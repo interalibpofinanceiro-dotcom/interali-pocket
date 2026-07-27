@@ -23,6 +23,7 @@ const {
   projetarFluxoDeCaixa,
   formatarProjecao,
 } = require('./reconciliacao');
+const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -30,7 +31,6 @@ app.use(express.urlencoded({ extended: false }));
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
-const CLIENTE_WHATSAPP_NUMBER = process.env.CLIENTE_WHATSAPP_NUMBER;
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
 const PORT = process.env.PORT || 3000;
 
@@ -53,10 +53,10 @@ async function baixarMidiaDoTwilio(mediaUrl) {
   return Buffer.from(arrayBuffer);
 }
 
-async function enviarMensagemWhatsApp(texto) {
+async function enviarMensagemWhatsApp(numeroDestino, texto) {
   return twilioClient.messages.create({
     from: TWILIO_WHATSAPP_NUMBER,
-    to: CLIENTE_WHATSAPP_NUMBER,
+    to: numeroDestino,
     body: texto,
   });
 }
@@ -87,11 +87,11 @@ function formatarResumoComprovante(dados) {
   return linhas.join('\n');
 }
 
-async function gerarEEnviarProjecao(dias) {
+async function gerarProjecao(sheetId, dias) {
   const [lancamentos, extrato, contasAPagar] = await Promise.all([
-    buscarTodosLancamentos(),
-    buscarExtrato(),
-    buscarContasAPagar(),
+    buscarTodosLancamentos(sheetId),
+    buscarExtrato(sheetId),
+    buscarContasAPagar(sheetId),
   ]);
 
   const saldoAtual = obterSaldoAtual(extrato);
@@ -109,6 +109,16 @@ app.post('/webhook', async (req, res) => {
   console.log(`Mensagem recebida de ${remetente} | mídias: ${numMedia} | texto: ${corpoTexto}`);
 
   try {
+    const cliente = await buscarClientePorNumero(remetente);
+
+    if (!cliente) {
+      twiml.message('Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
+      res.type('text/xml').send(twiml.toString());
+      return;
+    }
+
+    const sheetId = cliente.sheetId;
+
     if (numMedia > 0 && corpoLower.includes('extrato')) {
       const mediaUrl = req.body.MediaUrl0;
       const mediaType = req.body.MediaContentType0;
@@ -118,7 +128,7 @@ app.post('/webhook', async (req, res) => {
 
       console.log(`Extrato processado: ${transacoes.length} transação(ões)`);
 
-      await salvarExtrato(transacoes);
+      await salvarExtrato(sheetId, transacoes);
       twiml.message(`✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
     } else if (numMedia > 0 && (corpoLower.includes('boleto') || corpoLower.includes('fatura') || corpoLower.includes('pagar'))) {
       const mediaUrl = req.body.MediaUrl0;
@@ -129,7 +139,7 @@ app.post('/webhook', async (req, res) => {
 
       console.log(`Contas a pagar processadas: ${contas.length} conta(s)`);
 
-      await salvarContasAPagar(contas);
+      await salvarContasAPagar(sheetId, contas);
       twiml.message(`✅ Registrei ${contas.length} conta(s) a pagar.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
     } else if (numMedia > 0) {
       const mediaUrl = req.body.MediaUrl0;
@@ -140,28 +150,28 @@ app.post('/webhook', async (req, res) => {
 
       console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
-      await salvarComprovante(dadosExtraidos);
+      await salvarComprovante(sheetId, dadosExtraidos);
       twiml.message(formatarResumoComprovante(dadosExtraidos));
     } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
       const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
-      const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(), buscarExtrato()]);
+      const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
       const resumo = gerarResumo(lancamentos, extrato, { periodo });
       twiml.message(formatarResumo(resumo));
     } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
       const dias = corpoLower.includes('semana') ? 7 : 30;
-      const projecao = await gerarEEnviarProjecao(dias);
+      const projecao = await gerarProjecao(sheetId, dias);
       twiml.message(formatarProjecao(projecao));
     } else if (corpoTexto.length > 0) {
       const [lancamentos, extrato, contasAPagar] = await Promise.all([
-        buscarTodosLancamentos(),
-        buscarExtrato(),
-        buscarContasAPagar(),
+        buscarTodosLancamentos(sheetId),
+        buscarExtrato(sheetId),
+        buscarContasAPagar(sheetId),
       ]);
       const resposta = await consultarFluxoDeCaixa(corpoTexto, { lancamentos, extrato, contasAPagar });
       twiml.message(resposta);
     } else {
       twiml.message(
-        'Olá! Sou o assistente financeiro da Interali Pocket 🤖\n\n' +
+        `Olá, ${cliente.nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
         '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
         '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
         '🧾 Mande um boleto ou fatura de cartão AINDA NÃO PAGO escrevendo "boleto" ou "fatura" na legenda.\n' +
@@ -178,6 +188,7 @@ app.post('/webhook', async (req, res) => {
 
 // Endpoints para disparo de relatório proativo (chamados por um agendador externo,
 // já que instâncias gratuitas do Render "dormem" e não sustentam um cron interno confiável).
+// Percorrem todos os clientes ativos da planilha mestre, ou só um (?numero=whatsapp:+55...) para teste.
 app.all('/tarefas/relatorio/:periodo', async (req, res) => {
   if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
     return res.status(403).json({ erro: 'Não autorizado' });
@@ -189,10 +200,23 @@ app.all('/tarefas/relatorio/:periodo', async (req, res) => {
   }
 
   try {
-    const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(), buscarExtrato()]);
-    const resumo = gerarResumo(lancamentos, extrato, { periodo });
-    await enviarMensagemWhatsApp(formatarResumo(resumo));
-    res.json({ ok: true, periodo });
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const alvo = req.query.numero
+      ? clientes.filter((cliente) => cliente.numeroWhatsapp === req.query.numero)
+      : clientes;
+
+    const resultados = [];
+    for (const cliente of alvo) {
+      const [lancamentos, extrato] = await Promise.all([
+        buscarTodosLancamentos(cliente.sheetId),
+        buscarExtrato(cliente.sheetId),
+      ]);
+      const resumo = gerarResumo(lancamentos, extrato, { periodo });
+      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarResumo(resumo));
+      resultados.push(cliente.numeroWhatsapp);
+    }
+
+    res.json({ ok: true, periodo, enviados: resultados });
   } catch (error) {
     console.error('Erro ao enviar relatório proativo:', error.message);
     res.status(500).json({ erro: error.message });
@@ -207,9 +231,19 @@ app.all('/tarefas/previsao', async (req, res) => {
   const dias = parseInt(req.query.dias || '30', 10);
 
   try {
-    const projecao = await gerarEEnviarProjecao(dias);
-    await enviarMensagemWhatsApp(formatarProjecao(projecao));
-    res.json({ ok: true, dias });
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const alvo = req.query.numero
+      ? clientes.filter((cliente) => cliente.numeroWhatsapp === req.query.numero)
+      : clientes;
+
+    const resultados = [];
+    for (const cliente of alvo) {
+      const projecao = await gerarProjecao(cliente.sheetId, dias);
+      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarProjecao(projecao));
+      resultados.push(cliente.numeroWhatsapp);
+    }
+
+    res.json({ ok: true, dias, enviados: resultados });
   } catch (error) {
     console.error('Erro ao enviar previsão proativa:', error.message);
     res.status(500).json({ erro: error.message });

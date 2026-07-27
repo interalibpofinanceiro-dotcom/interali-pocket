@@ -6,7 +6,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node index.js",
-    "server": "node server.js"
+    "server": "node server.js",
+    "cadastrar-cliente": "node cadastrar-cliente.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

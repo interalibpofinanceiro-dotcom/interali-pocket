@@ -58,8 +58,7 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   }
 }
 
-async function buscarLinhas(nomeAba, range) {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+async function buscarLinhas(spreadsheetId, nomeAba, range) {
   const sheets = getSheetsClient();
 
   try {
@@ -73,8 +72,7 @@ async function buscarLinhas(nomeAba, range) {
   }
 }
 
-async function salvarComprovante(dados) {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+async function salvarComprovante(spreadsheetId, dados) {
   const sheets = getSheetsClient();
 
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_LANCAMENTOS, CABECALHO_LANCAMENTOS);
@@ -103,8 +101,8 @@ async function salvarComprovante(dados) {
   });
 }
 
-async function buscarTodosLancamentos() {
-  const linhas = await buscarLinhas(ABA_LANCAMENTOS, 'A2:L');
+async function buscarTodosLancamentos(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_LANCAMENTOS, 'A2:L');
 
   return linhas.map((linha) => ({
     data: linha[0] || '',
@@ -121,12 +119,11 @@ async function buscarTodosLancamentos() {
   }));
 }
 
-async function salvarExtrato(transacoes) {
+async function salvarExtrato(spreadsheetId, transacoes) {
   if (!transacoes || transacoes.length === 0) {
     return;
   }
 
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const sheets = getSheetsClient();
 
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_EXTRATO, CABECALHO_EXTRATO);
@@ -150,8 +147,8 @@ async function salvarExtrato(transacoes) {
   });
 }
 
-async function buscarExtrato() {
-  const linhas = await buscarLinhas(ABA_EXTRATO, 'A2:F');
+async function buscarExtrato(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_EXTRATO, 'A2:F');
 
   return linhas.map((linha) => ({
     data: linha[0] || '',
@@ -162,12 +159,11 @@ async function buscarExtrato() {
   }));
 }
 
-async function salvarContasAPagar(contas) {
+async function salvarContasAPagar(spreadsheetId, contas) {
   if (!contas || contas.length === 0) {
     return;
   }
 
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const sheets = getSheetsClient();
 
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_CONTAS_A_PAGAR, CABECALHO_CONTAS_A_PAGAR);
@@ -193,8 +189,8 @@ async function salvarContasAPagar(contas) {
   });
 }
 
-async function buscarContasAPagar() {
-  const linhas = await buscarLinhas(ABA_CONTAS_A_PAGAR, 'A2:H');
+async function buscarContasAPagar(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_PAGAR, 'A2:H');
 
   return linhas.map((linha) => ({
     vencimento: linha[0] || '',
