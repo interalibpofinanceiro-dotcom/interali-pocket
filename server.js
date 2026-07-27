@@ -1,8 +1,9 @@
 require('dotenv').config();
 const express = require('express');
 const twilio = require('twilio');
-const { extrairComprovanteDeBuffer, consultarFluxoDeCaixa } = require('./index');
-const { salvarComprovante, buscarTodosLancamentos } = require('./sheets');
+const { extrairComprovanteDeBuffer, extrairExtratoDeBuffer, consultarFluxoDeCaixa } = require('./index');
+const { salvarComprovante, buscarTodosLancamentos, salvarExtrato, buscarExtrato } = require('./sheets');
+const { gerarResumo, formatarResumo } = require('./reconciliacao');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -59,11 +60,24 @@ app.post('/webhook', async (req, res) => {
   const twiml = new twilio.twiml.MessagingResponse();
   const numMedia = parseInt(req.body.NumMedia || '0', 10);
   const remetente = req.body.From;
+  const corpoTexto = (req.body.Body || '').trim();
+  const corpoLower = corpoTexto.toLowerCase();
 
-  console.log(`Mensagem recebida de ${remetente} | mídias: ${numMedia}`);
+  console.log(`Mensagem recebida de ${remetente} | mídias: ${numMedia} | texto: ${corpoTexto}`);
 
   try {
-    if (numMedia > 0) {
+    if (numMedia > 0 && corpoLower.includes('extrato')) {
+      const mediaUrl = req.body.MediaUrl0;
+      const mediaType = req.body.MediaContentType0;
+
+      const arquivoBuffer = await baixarMidiaDoTwilio(mediaUrl);
+      const transacoes = await extrairExtratoDeBuffer(arquivoBuffer, mediaType);
+
+      console.log(`Extrato processado: ${transacoes.length} transação(ões)`);
+
+      await salvarExtrato(transacoes);
+      twiml.message(`✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
+    } else if (numMedia > 0) {
       const mediaUrl = req.body.MediaUrl0;
       const mediaType = req.body.MediaContentType0;
 
@@ -74,19 +88,26 @@ app.post('/webhook', async (req, res) => {
 
       await salvarComprovante(dadosExtraidos);
       twiml.message(formatarResumoComprovante(dadosExtraidos));
-    } else if (req.body.Body && req.body.Body.trim().length > 0) {
-      const pergunta = req.body.Body.trim();
-      const lancamentos = await buscarTodosLancamentos();
-      const resposta = await consultarFluxoDeCaixa(pergunta, lancamentos);
+    } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
+      const periodo = corpoLower.includes('semana') ? 'semana' : 'mes';
+      const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(), buscarExtrato()]);
+      const resumo = gerarResumo(lancamentos, extrato, { periodo });
+      twiml.message(formatarResumo(resumo));
+    } else if (corpoTexto.length > 0) {
+      const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(), buscarExtrato()]);
+      const resposta = await consultarFluxoDeCaixa(corpoTexto, { lancamentos, extrato });
       twiml.message(resposta);
     } else {
       twiml.message(
-        'Olá! Sou o assistente financeiro da Interali Pocket 🤖\n\nMe envie a foto de um comprovante, nota fiscal ou recibo para eu registrar automaticamente, ou pergunte sobre seu fluxo de caixa (ex: "quanto gastei essa semana?").'
+        'Olá! Sou o assistente financeiro da Interali Pocket 🤖\n\n' +
+        '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
+        '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
+        '💬 Pergunte sobre seu fluxo de caixa (ex: "quanto gastei essa semana?") ou peça o "resumo do mês".'
       );
     }
   } catch (error) {
     console.error('Erro ao processar mensagem:', error.message);
-    twiml.message('Ops, não consegui processar esse comprovante agora. Pode tentar reenviar a foto?');
+    twiml.message('Ops, não consegui processar isso agora. Pode tentar de novo?');
   }
 
   res.type('text/xml').send(twiml.toString());

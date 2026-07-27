@@ -2,7 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PROMPT_EXTRACAO, PROMPT_CONSULTA } = require('./prompts');
+const { PROMPT_EXTRACAO, PROMPT_CONSULTA, PROMPT_EXTRATO } = require('./prompts');
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -27,9 +27,20 @@ function getMediaType(filePath) {
   return map[ext] || 'image/jpeg';
 }
 
-async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
-  const imageBase64 = imageBuffer.toString('base64');
+function construirBlocoConteudo(buffer, mediaType) {
+  const dataBase64 = buffer.toString('base64');
+  const tipo = mediaType === 'application/pdf' ? 'document' : 'image';
+  return {
+    type: tipo,
+    source: {
+      type: 'base64',
+      media_type: mediaType,
+      data: dataBase64,
+    },
+  };
+}
 
+async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 1024,
@@ -38,14 +49,7 @@ async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
       {
         role: 'user',
         content: [
-          {
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: mediaType,
-              data: imageBase64,
-            },
-          },
+          construirBlocoConteudo(imageBuffer, mediaType),
           {
             type: 'text',
             text: 'Extraia os dados deste comprovante seguindo o formato JSON definido.',
@@ -69,6 +73,34 @@ async function extrairComprovante(imagePath) {
   return extrairComprovanteDeBuffer(imageBuffer, mediaType);
 }
 
+async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4096,
+    system: PROMPT_EXTRATO,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: 'Extraia todas as transações deste extrato bancário seguindo o formato JSON definido.',
+          },
+        ],
+      },
+    ],
+  });
+
+  const textoResposta = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  const resultado = extrairJSON(textoResposta);
+  return resultado.transacoes || [];
+}
+
 async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
@@ -77,7 +109,7 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
     messages: [
       {
         role: 'user',
-        content: `Dados financeiros do cliente (extraídos da planilha):\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}`,
+        content: `Dados financeiros do cliente:\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}`,
       },
     ],
   });
@@ -120,6 +152,7 @@ if (require.main === module) {
 module.exports = {
   extrairComprovante,
   extrairComprovanteDeBuffer,
+  extrairExtratoDeBuffer,
   consultarFluxoDeCaixa,
   getMediaType,
 };

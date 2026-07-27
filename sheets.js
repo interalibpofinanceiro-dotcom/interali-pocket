@@ -1,11 +1,14 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 
-const SHEET_NAME = 'Lancamentos';
-const CABECALHO = [
+const ABA_LANCAMENTOS = 'Lancamentos';
+const CABECALHO_LANCAMENTOS = [
   'Data', 'Hora', 'Valor', 'Tipo', 'Descricao', 'Estabelecimento_Pessoa',
   'Documento', 'Forma_Pagamento', 'Categoria', 'Subcategoria', 'Observacoes', 'Registrado_Em',
 ];
+
+const ABA_EXTRATO = 'Extrato';
+const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em'];
 
 function getAuthClient() {
   const privateKey = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
@@ -21,18 +24,31 @@ function getSheetsClient() {
   return google.sheets({ version: 'v4', auth: getAuthClient() });
 }
 
-async function garantirCabecalho(sheets, spreadsheetId) {
+async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho) {
+  const planilha = await sheets.spreadsheets.get({ spreadsheetId });
+  const abaExiste = planilha.data.sheets.some((aba) => aba.properties.title === nomeAba);
+
+  if (!abaExiste) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: nomeAba } } }],
+      },
+    });
+  }
+
+  const ultimaColuna = String.fromCharCode('A'.charCodeAt(0) + cabecalho.length - 1);
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${SHEET_NAME}!A1:L1`,
+    range: `${nomeAba}!A1:${ultimaColuna}1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${SHEET_NAME}!A1:L1`,
+      range: `${nomeAba}!A1:${ultimaColuna}1`,
       valueInputOption: 'RAW',
-      requestBody: { values: [CABECALHO] },
+      requestBody: { values: [cabecalho] },
     });
   }
 }
@@ -41,7 +57,7 @@ async function salvarComprovante(dados) {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const sheets = getSheetsClient();
 
-  await garantirCabecalho(sheets, spreadsheetId);
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_LANCAMENTOS, CABECALHO_LANCAMENTOS);
 
   const linha = [
     dados.data || '',
@@ -60,7 +76,7 @@ async function salvarComprovante(dados) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${SHEET_NAME}!A:L`,
+    range: `${ABA_LANCAMENTOS}!A:L`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [linha] },
@@ -73,7 +89,7 @@ async function buscarTodosLancamentos() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${SHEET_NAME}!A2:L`,
+    range: `${ABA_LANCAMENTOS}!A2:L`,
   });
 
   const linhas = resposta.data.values || [];
@@ -93,7 +109,66 @@ async function buscarTodosLancamentos() {
   }));
 }
 
+async function salvarExtrato(transacoes) {
+  if (!transacoes || transacoes.length === 0) {
+    return;
+  }
+
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_EXTRATO, CABECALHO_EXTRATO);
+
+  const registradoEm = new Date().toISOString();
+  const linhas = transacoes.map((transacao) => [
+    transacao.data || '',
+    transacao.descricao || '',
+    transacao.valor || 0,
+    transacao.tipo || '',
+    transacao.saldo_apos ?? '',
+    registradoEm,
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${ABA_EXTRATO}!A:F`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linhas },
+  });
+}
+
+async function buscarExtrato() {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  let resposta;
+  try {
+    resposta = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${ABA_EXTRATO}!A2:F`,
+    });
+  } catch (error) {
+    if (error.code === 400 || error.code === 404) {
+      return [];
+    }
+    throw error;
+  }
+
+  const linhas = resposta.data.values || [];
+
+  return linhas.map((linha) => ({
+    data: linha[0] || '',
+    descricao: linha[1] || '',
+    valor: Number(linha[2]) || 0,
+    tipo: linha[3] || '',
+    saldo_apos: linha[4] ? Number(linha[4]) : null,
+  }));
+}
+
 module.exports = {
   salvarComprovante,
   buscarTodosLancamentos,
+  salvarExtrato,
+  buscarExtrato,
 };
