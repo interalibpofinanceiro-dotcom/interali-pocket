@@ -1,7 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const twilio = require('twilio');
-const { extrairComprovanteDeBuffer } = require('./index');
+const { extrairComprovanteDeBuffer, consultarFluxoDeCaixa } = require('./index');
+const { salvarComprovante, buscarTodosLancamentos } = require('./sheets');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -71,11 +72,16 @@ app.post('/webhook', async (req, res) => {
 
       console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
-      // TODO: gravar `dadosExtraidos` na planilha do cliente (Google Sheets)
+      await salvarComprovante(dadosExtraidos);
       twiml.message(formatarResumoComprovante(dadosExtraidos));
+    } else if (req.body.Body && req.body.Body.trim().length > 0) {
+      const pergunta = req.body.Body.trim();
+      const lancamentos = await buscarTodosLancamentos();
+      const resposta = await consultarFluxoDeCaixa(pergunta, lancamentos);
+      twiml.message(resposta);
     } else {
       twiml.message(
-        'Olá! Sou o assistente financeiro da Interali Pocket 🤖\n\nMe envie a foto de um comprovante, nota fiscal ou recibo para eu registrar automaticamente.'
+        'Olá! Sou o assistente financeiro da Interali Pocket 🤖\n\nMe envie a foto de um comprovante, nota fiscal ou recibo para eu registrar automaticamente, ou pergunte sobre seu fluxo de caixa (ex: "quanto gastei essa semana?").'
       );
     }
   } catch (error) {
