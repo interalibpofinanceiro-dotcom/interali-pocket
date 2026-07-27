@@ -10,6 +10,11 @@ const anthropic = new Anthropic({
 
 const CLAUDE_MODEL = 'claude-sonnet-5';
 
+function extrairJSON(texto) {
+  const semCercas = texto.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
+  return JSON.parse(semCercas.trim());
+}
+
 function getMediaType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   const map = {
@@ -55,7 +60,7 @@ async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
     .map((block) => block.text)
     .join('');
 
-  return JSON.parse(textoResposta);
+  return extrairJSON(textoResposta);
 }
 
 async function extrairComprovante(imagePath) {
