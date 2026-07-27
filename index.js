@@ -2,7 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PROMPT_EXTRACAO, PROMPT_CONSULTA, PROMPT_EXTRATO } = require('./prompts');
+const { PROMPT_EXTRACAO, PROMPT_CONSULTA, PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR } = require('./prompts');
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -101,6 +101,34 @@ async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
   return resultado.transacoes || [];
 }
 
+async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4096,
+    system: PROMPT_CONTA_A_PAGAR,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: 'Extraia as contas a pagar deste boleto/fatura seguindo o formato JSON definido.',
+          },
+        ],
+      },
+    ],
+  });
+
+  const textoResposta = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  const resultado = extrairJSON(textoResposta);
+  return resultado.contas || [];
+}
+
 async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
@@ -153,6 +181,7 @@ module.exports = {
   extrairComprovante,
   extrairComprovanteDeBuffer,
   extrairExtratoDeBuffer,
+  extrairContasAPagarDeBuffer,
   consultarFluxoDeCaixa,
   getMediaType,
 };

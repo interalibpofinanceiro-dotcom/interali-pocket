@@ -65,7 +65,9 @@ function calcularPeriodo(tipo, referencia) {
   const fim = new Date(referencia);
   let inicio;
 
-  if (tipo === 'semana') {
+  if (tipo === 'dia') {
+    inicio = new Date(referencia);
+  } else if (tipo === 'semana') {
     inicio = new Date(referencia);
     inicio.setDate(inicio.getDate() - 6);
   } else {
@@ -76,6 +78,12 @@ function calcularPeriodo(tipo, referencia) {
 }
 
 function calcularPeriodoAnterior(tipo, referencia) {
+  if (tipo === 'dia') {
+    const dia = new Date(referencia);
+    dia.setDate(dia.getDate() - 1);
+    return { inicio: dia, fim: dia };
+  }
+
   if (tipo === 'semana') {
     const fim = new Date(referencia);
     fim.setDate(fim.getDate() - 7);
@@ -126,7 +134,7 @@ function calcularTopCategorias(lancamentosPeriodo, limite = 3) {
 // maiores categorias de despesa e status da conciliação com o extrato bancário.
 function gerarResumo(lancamentos, extrato, opcoes = {}) {
   const referencia = opcoes.referencia || new Date();
-  const tipoPeriodo = opcoes.periodo === 'semana' ? 'semana' : 'mes';
+  const tipoPeriodo = ['dia', 'semana', 'mes'].includes(opcoes.periodo) ? opcoes.periodo : 'mes';
 
   const { inicio, fim } = calcularPeriodo(tipoPeriodo, referencia);
   const { inicio: inicioAnterior, fim: fimAnterior } = calcularPeriodoAnterior(tipoPeriodo, referencia);
@@ -173,7 +181,8 @@ function gerarResumo(lancamentos, extrato, opcoes = {}) {
 }
 
 function formatarResumo(resumo) {
-  const nomePeriodo = resumo.tipoPeriodo === 'semana' ? 'semana' : 'mês';
+  const nomesPeriodo = { dia: 'dia', semana: 'semana', mes: 'mês' };
+  const nomePeriodo = nomesPeriodo[resumo.tipoPeriodo] || 'mês';
   const linhas = [];
 
   linhas.push(`📊 Resumo do ${nomePeriodo} (${resumo.inicio.toLocaleDateString('pt-BR')} a ${resumo.fim.toLocaleDateString('pt-BR')})`);
@@ -222,8 +231,102 @@ function formatarResumo(resumo) {
   return linhas.join('\n');
 }
 
+// Usa o saldo_apos da transação mais recente do extrato como melhor estimativa do saldo atual em conta.
+function obterSaldoAtual(extrato) {
+  const comSaldo = extrato.filter((transacao) => transacao.saldo_apos !== null && transacao.saldo_apos !== undefined);
+  if (comSaldo.length === 0) return null;
+
+  const maisRecente = comSaldo.reduce((maisNova, atual) => {
+    const dataAtual = paraData(atual.data);
+    const dataMaisNova = paraData(maisNova.data);
+    if (!dataAtual) return maisNova;
+    if (!dataMaisNova || dataAtual > dataMaisNova) return atual;
+    return maisNova;
+  }, comSaldo[0]);
+
+  return maisRecente.saldo_apos;
+}
+
+// Remove da lista de "contas a pagar" as que já têm um comprovante de pagamento
+// correspondente (mesmo valor, pago perto do vencimento) — evita duplicar na projeção.
+function filtrarContasEmAberto(contasAPagar, lancamentos) {
+  const saidas = lancamentos.filter((lancamento) => lancamento.tipo_movimentacao === 'saida');
+
+  return contasAPagar.filter((conta) => {
+    const vencimento = paraData(conta.vencimento);
+    const jaPaga = saidas.some((lancamento) => {
+      if (Math.abs(lancamento.valor - conta.valor) > TOLERANCIA_VALOR) return false;
+      const dataPagamento = paraData(lancamento.data);
+      if (!vencimento || !dataPagamento) return false;
+      const diferenca = (dataPagamento.getTime() - vencimento.getTime()) / (1000 * 60 * 60 * 24);
+      return diferenca >= -10 && diferenca <= 10;
+    });
+    return !jaPaga;
+  });
+}
+
+// Projeta o saldo disponível somando o saldo atual (do extrato) e subtraindo
+// as contas a pagar em aberto dentro da janela de dias informada.
+function projetarFluxoDeCaixa(saldoAtual, contasEmAberto, dias = 30, referencia = new Date()) {
+  const limite = new Date(referencia);
+  limite.setDate(limite.getDate() + dias);
+
+  const contasNoPeriodo = contasEmAberto
+    .filter((conta) => {
+      const vencimento = paraData(conta.vencimento);
+      return vencimento && vencimento >= referencia && vencimento <= limite;
+    })
+    .sort((a, b) => paraData(a.vencimento) - paraData(b.vencimento));
+
+  const totalAPagar = contasNoPeriodo.reduce((soma, conta) => soma + (conta.valor || 0), 0);
+  const saldoProjetado = saldoAtual !== null ? saldoAtual - totalAPagar : null;
+
+  return { saldoAtual, dias, contasNoPeriodo, totalAPagar, saldoProjetado };
+}
+
+function formatarProjecao(projecao) {
+  const linhas = [];
+
+  linhas.push(`🔮 Previsão para os próximos ${projecao.dias} dias`);
+  linhas.push('');
+
+  if (projecao.saldoAtual === null) {
+    linhas.push('⚠️ Ainda não tenho um saldo atual confiável (preciso que você mande um extrato recente com o saldo visível).');
+  } else {
+    linhas.push(`💰 Saldo atual (último extrato): ${formatarMoeda(projecao.saldoAtual)}`);
+  }
+
+  linhas.push(`🔴 Total a pagar no período: ${formatarMoeda(projecao.totalAPagar)}`);
+
+  if (projecao.saldoProjetado !== null) {
+    const alerta = projecao.saldoProjetado < 0 ? '⚠️ Atenção: saldo pode ficar negativo!' : '✅';
+    linhas.push(`📈 Saldo projetado: ${formatarMoeda(projecao.saldoProjetado)} ${alerta}`);
+  }
+
+  if (projecao.contasNoPeriodo.length > 0) {
+    linhas.push('');
+    linhas.push('📋 Contas a vencer:');
+    projecao.contasNoPeriodo.slice(0, 10).forEach((conta) => {
+      const parcela = conta.parcela_atual && conta.parcela_total ? ` (${conta.parcela_atual}/${conta.parcela_total})` : '';
+      linhas.push(`   • ${formatarDataBR(conta.vencimento)} — ${formatarMoeda(conta.valor)} — ${conta.beneficiario || conta.descricao || 'sem descrição'}${parcela}`);
+    });
+    if (projecao.contasNoPeriodo.length > 10) {
+      linhas.push(`   ... e mais ${projecao.contasNoPeriodo.length - 10} conta(s).`);
+    }
+  } else {
+    linhas.push('');
+    linhas.push('Nenhuma conta a pagar registrada para esse período. 🎉');
+  }
+
+  return linhas.join('\n');
+}
+
 module.exports = {
   reconciliar,
   gerarResumo,
   formatarResumo,
+  obterSaldoAtual,
+  filtrarContasEmAberto,
+  projetarFluxoDeCaixa,
+  formatarProjecao,
 };

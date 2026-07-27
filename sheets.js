@@ -10,6 +10,11 @@ const CABECALHO_LANCAMENTOS = [
 const ABA_EXTRATO = 'Extrato';
 const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em'];
 
+const ABA_CONTAS_A_PAGAR = 'ContasAPagar';
+const CABECALHO_CONTAS_A_PAGAR = [
+  'Vencimento', 'Valor', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
+];
+
 function getAuthClient() {
   const privateKey = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
   return new google.auth.JWT(
@@ -53,6 +58,21 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   }
 }
 
+async function buscarLinhas(nomeAba, range) {
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  try {
+    const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}` });
+    return resposta.data.values || [];
+  } catch (error) {
+    if (error.code === 400 || error.code === 404) {
+      return [];
+    }
+    throw error;
+  }
+}
+
 async function salvarComprovante(dados) {
   const spreadsheetId = process.env.GOOGLE_SHEET_ID;
   const sheets = getSheetsClient();
@@ -84,15 +104,7 @@ async function salvarComprovante(dados) {
 }
 
 async function buscarTodosLancamentos() {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  const sheets = getSheetsClient();
-
-  const resposta = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${ABA_LANCAMENTOS}!A2:L`,
-  });
-
-  const linhas = resposta.data.values || [];
+  const linhas = await buscarLinhas(ABA_LANCAMENTOS, 'A2:L');
 
   return linhas.map((linha) => ({
     data: linha[0] || '',
@@ -139,23 +151,7 @@ async function salvarExtrato(transacoes) {
 }
 
 async function buscarExtrato() {
-  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
-  const sheets = getSheetsClient();
-
-  let resposta;
-  try {
-    resposta = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `${ABA_EXTRATO}!A2:F`,
-    });
-  } catch (error) {
-    if (error.code === 400 || error.code === 404) {
-      return [];
-    }
-    throw error;
-  }
-
-  const linhas = resposta.data.values || [];
+  const linhas = await buscarLinhas(ABA_EXTRATO, 'A2:F');
 
   return linhas.map((linha) => ({
     data: linha[0] || '',
@@ -166,9 +162,56 @@ async function buscarExtrato() {
   }));
 }
 
+async function salvarContasAPagar(contas) {
+  if (!contas || contas.length === 0) {
+    return;
+  }
+
+  const spreadsheetId = process.env.GOOGLE_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_CONTAS_A_PAGAR, CABECALHO_CONTAS_A_PAGAR);
+
+  const registradoEm = new Date().toISOString();
+  const linhas = contas.map((conta) => [
+    conta.vencimento || '',
+    conta.valor || 0,
+    conta.beneficiario || '',
+    conta.descricao || '',
+    conta.categoria || '',
+    conta.parcela_atual ?? '',
+    conta.parcela_total ?? '',
+    registradoEm,
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${ABA_CONTAS_A_PAGAR}!A:H`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linhas },
+  });
+}
+
+async function buscarContasAPagar() {
+  const linhas = await buscarLinhas(ABA_CONTAS_A_PAGAR, 'A2:H');
+
+  return linhas.map((linha) => ({
+    vencimento: linha[0] || '',
+    valor: Number(linha[1]) || 0,
+    beneficiario: linha[2] || '',
+    descricao: linha[3] || '',
+    categoria: linha[4] || '',
+    parcela_atual: linha[5] ? Number(linha[5]) : null,
+    parcela_total: linha[6] ? Number(linha[6]) : null,
+  }));
+}
+
 module.exports = {
   salvarComprovante,
   buscarTodosLancamentos,
   salvarExtrato,
   buscarExtrato,
+  salvarContasAPagar,
+  buscarContasAPagar,
 };
