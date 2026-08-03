@@ -25,7 +25,9 @@ const {
 const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
 
 const app = express();
-app.use(express.json());
+// type: '*/*' porque nem toda implementação de webhook manda o header Content-Type
+// exatamente como "application/json" — sem isso, o body chegaria vazio silenciosamente.
+app.use(express.json({ type: '*/*' }));
 
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
@@ -140,8 +142,15 @@ function interpretarMensagem(data) {
 app.post('/webhook', async (req, res) => {
   const body = req.body || {};
 
+  // Log cru de tudo que chega, mesmo eventos que vamos ignorar — sem isso, um payload em
+  // formato inesperado (ex.: nome do evento diferente do previsto) não deixa nenhum rastro nos logs.
+  console.log(`Webhook recebido | event=${body.event} | chaves do body=${Object.keys(body).join(',')}`);
+
   // Só nos interessa evento de mensagem recebida; ignora connection.update, qrcode.updated etc.
-  if (body.event !== 'messages.upsert') {
+  // Normaliza porque versões/telas diferentes da Evolution API usam grafias diferentes pro mesmo evento
+  // (ex.: "messages.upsert" vs "MESSAGES_UPSERT").
+  const eventoNormalizado = (body.event || '').toString().toUpperCase().replace(/[.\s]/g, '_');
+  if (eventoNormalizado !== 'MESSAGES_UPSERT') {
     return res.sendStatus(200);
   }
 
@@ -150,6 +159,7 @@ app.post('/webhook', async (req, res) => {
 
   // Ignora eco de mensagens que o próprio agente mandou, e grupos/broadcast (só atende conversa 1:1).
   if (!remoteJid || (data.key && data.key.fromMe) || !remoteJid.endsWith('@s.whatsapp.net')) {
+    console.log(`Webhook ignorado (sem remoteJid, é eco, ou não é conversa 1:1) | data.key=${JSON.stringify(data.key)}`);
     return res.sendStatus(200);
   }
 
