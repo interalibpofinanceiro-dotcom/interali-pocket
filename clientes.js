@@ -81,10 +81,28 @@ async function listarClientesAtivos({ ignorarCache = false } = {}) {
   return clientes;
 }
 
+// Números brasileiros de celular têm um 9º dígito extra que o WhatsApp às vezes omite
+// no identificador da conversa, mesmo o número real tendo 9 dígitos. Gera as duas variantes
+// (com e sem o 9) pra comparação não depender de qual formato exato foi usado no cadastro.
+function candidatosNumero(numeroWhatsapp) {
+  const match = (numeroWhatsapp || '').match(/^whatsapp:\+55(\d{2})(\d{8,9})$/);
+  if (!match) return [numeroWhatsapp];
+
+  const [, ddd, numero] = match;
+  if (numero.length === 9 && numero[0] === '9') {
+    return [numeroWhatsapp, `whatsapp:+55${ddd}${numero.slice(1)}`];
+  }
+  if (numero.length === 8) {
+    return [numeroWhatsapp, `whatsapp:+55${ddd}9${numero}`];
+  }
+  return [numeroWhatsapp];
+}
+
 async function buscarClientePorNumero(numeroWhatsapp) {
   const clientes = await listarClientesAtivos();
   const alvo = (numeroWhatsapp || '').trim();
-  return clientes.find((cliente) => cliente.numeroWhatsapp === alvo && cliente.ativo) || null;
+  const candidatos = candidatosNumero(alvo);
+  return clientes.find((cliente) => candidatos.includes(cliente.numeroWhatsapp) && cliente.ativo) || null;
 }
 
 async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
