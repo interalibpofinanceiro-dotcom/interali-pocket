@@ -25,6 +25,15 @@ const {
 const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
 
 const app = express();
+
+// Log de TODA requisição que chega, antes de qualquer outra coisa — inclusive as que não vão
+// bater em nenhuma rota. Sem isso, um caminho ou método inesperado (ex.: a Evolution mandando
+// pra "/webhook/messages-upsert" em vez de "/webhook") não deixa rastro nenhum nos logs.
+app.use((req, _res, next) => {
+  console.log(`Requisição recebida: ${req.method} ${req.originalUrl}`);
+  next();
+});
+
 // type: '*/*' porque nem toda implementação de webhook manda o header Content-Type
 // exatamente como "application/json" — sem isso, o body chegaria vazio silenciosamente.
 app.use(express.json({ type: '*/*' }));
@@ -139,7 +148,10 @@ function interpretarMensagem(data) {
   return { tipoMidia: null, texto: texto.trim() };
 }
 
-app.post('/webhook', async (req, res) => {
+// Regex em vez de string fixa: se "Webhook by Events" estiver ligado na Evolution, ela manda
+// pra "/webhook/<nome-do-evento>" (ex.: "/webhook/messages-upsert") em vez de só "/webhook" —
+// isso aceita os dois casos, então não depende de lembrar de manter aquele toggle desligado.
+app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   const body = req.body || {};
 
   // Log cru de tudo que chega, mesmo eventos que vamos ignorar — sem isso, um payload em
