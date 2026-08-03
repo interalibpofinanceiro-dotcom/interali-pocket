@@ -1,6 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const twilio = require('twilio');
 const {
   extrairComprovanteDeBuffer,
   extrairExtratoDeBuffer,
@@ -26,39 +25,63 @@ const {
 const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
 
 const app = express();
-app.use(express.urlencoded({ extended: false }));
+app.use(express.json());
 
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_WHATSAPP_NUMBER = process.env.TWILIO_WHATSAPP_NUMBER;
+const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
+const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
+const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
 const PORT = process.env.PORT || 3000;
 
-const twilioClient = twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
+// ── Números: a planilha guarda "whatsapp:+55XXXXXXXXXXX" (formato herdado do Twilio).
+// A Evolution API usa só dígitos ("55XXXXXXXXXXX") pra enviar e JID ("55XXXXXXXXXXX@s.whatsapp.net")
+// pra identificar quem mandou. Converte nas bordas pra não precisar migrar o que já tá cadastrado.
+function jidParaFormatoPlanilha(remoteJid) {
+  const numero = (remoteJid || '').split('@')[0];
+  return `whatsapp:+${numero}`;
+}
 
-async function baixarMidiaDoTwilio(mediaUrl) {
-  const credenciais = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+function formatoPlanilhaParaNumeroEvolution(numeroPlanilha) {
+  return (numeroPlanilha || '').replace('whatsapp:', '').replace('+', '');
+}
 
-  const resposta = await fetch(mediaUrl, {
+async function chamarEvolutionAPI(caminho, corpo) {
+  const resposta = await fetch(`${EVOLUTION_API_URL}${caminho}`, {
+    method: 'POST',
     headers: {
-      Authorization: `Basic ${credenciais}`,
+      'Content-Type': 'application/json',
+      apikey: EVOLUTION_API_KEY,
     },
+    body: JSON.stringify(corpo),
   });
 
   if (!resposta.ok) {
-    throw new Error(`Falha ao baixar mídia do Twilio: ${resposta.status}`);
+    const textoErro = await resposta.text().catch(() => '');
+    throw new Error(`Evolution API respondeu ${resposta.status}: ${textoErro}`);
   }
 
-  const arrayBuffer = await resposta.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  return resposta.json();
 }
 
-async function enviarMensagemWhatsApp(numeroDestino, texto) {
-  return twilioClient.messages.create({
-    from: TWILIO_WHATSAPP_NUMBER,
-    to: numeroDestino,
-    body: texto,
+async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
+  const number = formatoPlanilhaParaNumeroEvolution(numeroDestinoPlanilha);
+  // Endpoint/corpo conforme Evolution API v2 (doc.evolution-api.com/v2) — confirmar
+  // contra a versão realmente hospedada no primeiro teste real com o QR pareado.
+  return chamarEvolutionAPI(`/message/sendText/${EVOLUTION_INSTANCE}`, { number, text: texto });
+}
+
+// Busca o binário (imagem/PDF) de uma mensagem recebida, pelo id da mensagem —
+// a Evolution não manda o arquivo direto no webhook, só os metadados.
+async function buscarMidiaBase64(messageId) {
+  const resultado = await chamarEvolutionAPI(`/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`, {
+    message: { key: { id: messageId } },
+    convertToMp4: false,
   });
+
+  return {
+    buffer: Buffer.from(resultado.base64, 'base64'),
+    mimeType: resultado.mimetype,
+  };
 }
 
 function formatarNumero(valor) {
@@ -99,95 +122,117 @@ async function gerarProjecao(sheetId, dias) {
   return projetarFluxoDeCaixa(saldoAtual, contasEmAberto, dias);
 }
 
-app.post('/webhook', async (req, res) => {
-  const twiml = new twilio.twiml.MessagingResponse();
-  const numMedia = parseInt(req.body.NumMedia || '0', 10);
-  const remetente = req.body.From;
-  const corpoTexto = (req.body.Body || '').trim();
-  const corpoLower = corpoTexto.toLowerCase();
+// Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
+function interpretarMensagem(data) {
+  const msg = data.message || {};
 
-  console.log(`Mensagem recebida de ${remetente} | mídias: ${numMedia} | texto: ${corpoTexto}`);
+  if (msg.imageMessage) {
+    return { tipoMidia: 'image', mimeType: msg.imageMessage.mimetype, legenda: (msg.imageMessage.caption || '').toLowerCase() };
+  }
+  if (msg.documentMessage) {
+    return { tipoMidia: 'document', mimeType: msg.documentMessage.mimetype, legenda: (msg.documentMessage.caption || '').toLowerCase() };
+  }
+
+  const texto = msg.conversation || (msg.extendedTextMessage && msg.extendedTextMessage.text) || '';
+  return { tipoMidia: null, texto: texto.trim() };
+}
+
+app.post('/webhook', async (req, res) => {
+  const body = req.body || {};
+
+  // Só nos interessa evento de mensagem recebida; ignora connection.update, qrcode.updated etc.
+  if (body.event !== 'messages.upsert') {
+    return res.sendStatus(200);
+  }
+
+  const data = body.data || {};
+  const remoteJid = data.key && data.key.remoteJid;
+
+  // Ignora eco de mensagens que o próprio agente mandou, e grupos/broadcast (só atende conversa 1:1).
+  if (!remoteJid || (data.key && data.key.fromMe) || !remoteJid.endsWith('@s.whatsapp.net')) {
+    return res.sendStatus(200);
+  }
+
+  const remetente = jidParaFormatoPlanilha(remoteJid);
+  const interpretado = interpretarMensagem(data);
+
+  console.log(`Mensagem recebida de ${remetente} | mídia: ${interpretado.tipoMidia || 'nenhuma'} | texto: ${interpretado.texto || interpretado.legenda || ''}`);
 
   try {
     const cliente = await buscarClientePorNumero(remetente);
 
     if (!cliente) {
-      twiml.message('Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
-      res.type('text/xml').send(twiml.toString());
-      return;
+      await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
+      return res.sendStatus(200);
     }
 
     const sheetId = cliente.sheetId;
 
-    if (numMedia > 0 && corpoLower.includes('extrato')) {
-      const mediaUrl = req.body.MediaUrl0;
-      const mediaType = req.body.MediaContentType0;
-
-      const arquivoBuffer = await baixarMidiaDoTwilio(mediaUrl);
-      const transacoes = await extrairExtratoDeBuffer(arquivoBuffer, mediaType);
+    if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
+      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
 
       console.log(`Extrato processado: ${transacoes.length} transação(ões)`);
 
       await salvarExtrato(sheetId, transacoes);
-      twiml.message(`✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
-    } else if (numMedia > 0 && (corpoLower.includes('boleto') || corpoLower.includes('fatura') || corpoLower.includes('pagar'))) {
-      const mediaUrl = req.body.MediaUrl0;
-      const mediaType = req.body.MediaContentType0;
-
-      const arquivoBuffer = await baixarMidiaDoTwilio(mediaUrl);
-      const contas = await extrairContasAPagarDeBuffer(arquivoBuffer, mediaType);
+      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
+    } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar'))) {
+      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
 
       console.log(`Contas a pagar processadas: ${contas.length} conta(s)`);
 
       await salvarContasAPagar(sheetId, contas);
-      twiml.message(`✅ Registrei ${contas.length} conta(s) a pagar.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
-    } else if (numMedia > 0) {
-      const mediaUrl = req.body.MediaUrl0;
-      const mediaType = req.body.MediaContentType0;
-
-      const imageBuffer = await baixarMidiaDoTwilio(mediaUrl);
-      const dadosExtraidos = await extrairComprovanteDeBuffer(imageBuffer, mediaType);
+      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+    } else if (interpretado.tipoMidia) {
+      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
 
       console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
       await salvarComprovante(sheetId, dadosExtraidos);
-      twiml.message(formatarResumoComprovante(dadosExtraidos));
-    } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
-      const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
-      const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
-      const resumo = gerarResumo(lancamentos, extrato, { periodo });
-      twiml.message(formatarResumo(resumo));
-    } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
-      const dias = corpoLower.includes('semana') ? 7 : 30;
-      const projecao = await gerarProjecao(sheetId, dias);
-      twiml.message(formatarProjecao(projecao));
-    } else if (corpoTexto.length > 0) {
-      const [lancamentos, extrato, contasAPagar] = await Promise.all([
-        buscarTodosLancamentos(sheetId),
-        buscarExtrato(sheetId),
-        buscarContasAPagar(sheetId),
-      ]);
-      const resposta = await consultarFluxoDeCaixa(corpoTexto, { lancamentos, extrato, contasAPagar });
-      twiml.message(resposta);
+      await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
     } else {
-      twiml.message(
-        `Olá, ${cliente.nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
-        '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
-        '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
-        '🧾 Mande um boleto ou fatura de cartão AINDA NÃO PAGO escrevendo "boleto" ou "fatura" na legenda.\n' +
-        '💬 Pergunte "resumo do mês", "resumo da semana" ou "previsão" para ver seus relatórios.'
-      );
+      const corpoLower = (interpretado.texto || '').toLowerCase();
+
+      if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
+        const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
+        const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
+        const resumo = gerarResumo(lancamentos, extrato, { periodo });
+        await enviarMensagemWhatsApp(remetente, formatarResumo(resumo));
+      } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
+        const dias = corpoLower.includes('semana') ? 7 : 30;
+        const projecao = await gerarProjecao(sheetId, dias);
+        await enviarMensagemWhatsApp(remetente, formatarProjecao(projecao));
+      } else if (corpoLower.length > 0) {
+        const [lancamentos, extrato, contasAPagar] = await Promise.all([
+          buscarTodosLancamentos(sheetId),
+          buscarExtrato(sheetId),
+          buscarContasAPagar(sheetId),
+        ]);
+        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar });
+        await enviarMensagemWhatsApp(remetente, resposta);
+      } else {
+        await enviarMensagemWhatsApp(
+          remetente,
+          `Olá, ${cliente.nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
+          '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
+          '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
+          '🧾 Mande um boleto ou fatura de cartão AINDA NÃO PAGO escrevendo "boleto" ou "fatura" na legenda.\n' +
+          '💬 Pergunte "resumo do mês", "resumo da semana" ou "previsão" para ver seus relatórios.'
+        );
+      }
     }
   } catch (error) {
     console.error('Erro ao processar mensagem:', error.message);
-    twiml.message('Ops, não consegui processar isso agora. Pode tentar de novo?');
+    await enviarMensagemWhatsApp(remetente, 'Ops, não consegui processar isso agora. Pode tentar de novo?').catch(() => {});
   }
 
-  res.type('text/xml').send(twiml.toString());
+  res.sendStatus(200);
 });
 
 // Endpoints para disparo de relatório proativo (chamados por um agendador externo,
-// já que instâncias gratuitas do Render "dormem" e não sustentam um cron interno confiável).
+// já que instâncias gratuitas de hospedagem "dormem" e não sustentam um cron interno confiável).
 // Percorrem todos os clientes ativos da planilha mestre, ou só um (?numero=whatsapp:+55...) para teste.
 app.all('/tarefas/relatorio/:periodo', async (req, res) => {
   if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
@@ -257,5 +302,5 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor Interali Pocket rodando na porta ${PORT}`);
   console.log(`Webhook: POST http://localhost:${PORT}/webhook`);
-  console.log(`Número WhatsApp configurado: ${TWILIO_WHATSAPP_NUMBER}`);
+  console.log(`Instância Evolution configurada: ${EVOLUTION_INSTANCE}`);
 });
