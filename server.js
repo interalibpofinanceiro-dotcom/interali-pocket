@@ -76,15 +76,15 @@ async function chamarEvolutionAPI(caminho, corpo) {
 
 async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
   const number = formatoPlanilhaParaNumeroEvolution(numeroDestinoPlanilha);
-  // Endpoint/corpo conforme Evolution API v2 (doc.evolution-api.com/v2) — confirmar
-  // contra a versão realmente hospedada no primeiro teste real com o QR pareado.
-  return chamarEvolutionAPI(`/message/sendText/${EVOLUTION_INSTANCE}`, { number, text: texto });
+  // encodeURIComponent porque o nome real da instância na Evolution tem espaço ("Interlai Poket") —
+  // sem isso, o espaço quebraria a URL da requisição.
+  return chamarEvolutionAPI(`/message/sendText/${encodeURIComponent(EVOLUTION_INSTANCE)}`, { number, text: texto });
 }
 
 // Busca o binário (imagem/PDF) de uma mensagem recebida, pelo id da mensagem —
 // a Evolution não manda o arquivo direto no webhook, só os metadados.
 async function buscarMidiaBase64(messageId) {
-  const resultado = await chamarEvolutionAPI(`/chat/getBase64FromMediaMessage/${EVOLUTION_INSTANCE}`, {
+  const resultado = await chamarEvolutionAPI(`/chat/getBase64FromMediaMessage/${encodeURIComponent(EVOLUTION_INSTANCE)}`, {
     message: { key: { id: messageId } },
     convertToMp4: false,
   });
