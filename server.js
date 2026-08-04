@@ -32,6 +32,7 @@ const {
 const {
   validarVoucher,
   queimarVoucher,
+  criarVoucher,
   registrarAssinatura,
   buscarAssinaturaPorSubscription,
   ativarAssinatura,
@@ -147,6 +148,15 @@ function extrairNomeCartao(legendaLower) {
   return match[1].trim().replace(/\b\w/g, (letra) => letra.toUpperCase());
 }
 
+// Reconhece o comando do admin pra criar voucher direto pelo WhatsApp, sem precisar de
+// terminal: "criar cupom BARBER-8912" ou "criar cupom BARBER-8912 indicação Instagram".
+// Tudo depois do código vira a descrição (opcional, só pra controle interno do Aroldo).
+function interpretarComandoVoucher(texto) {
+  const match = (texto || '').trim().match(/^(?:criar|novo)\s+(?:cupom|voucher)\s+(\S+)\s*(.*)$/i);
+  if (!match) return null;
+  return { codigo: match[1].toUpperCase(), descricao: match[2].trim() };
+}
+
 // Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
 function interpretarMensagem(data) {
   const msg = data.message || {};
@@ -193,6 +203,28 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   const interpretado = interpretarMensagem(data);
 
   console.log(`Mensagem recebida de ${remetente} | mídia: ${interpretado.tipoMidia || 'nenhuma'} | texto: ${interpretado.texto || interpretado.legenda || ''}`);
+
+  // Comando de admin (só funciona vindo do número configurado em ADMIN_WHATSAPP_NUMBER) —
+  // checado antes de tudo, porque o admin não precisa (nem deve) estar cadastrado como cliente.
+  if (ADMIN_WHATSAPP_NUMBER && remetente === ADMIN_WHATSAPP_NUMBER && !interpretado.tipoMidia) {
+    const comandoVoucher = interpretarComandoVoucher(interpretado.texto);
+    if (comandoVoucher) {
+      try {
+        await criarVoucher(comandoVoucher.codigo, comandoVoucher.descricao);
+        await enviarMensagemWhatsApp(
+          remetente,
+          `✅ Cupom *${comandoVoucher.codigo}* criado!\n\n` +
+          '🎟️ Libera o plano Pocket Starter por R$ 49,90/mês (300 lançamentos).\n' +
+          `📋 Passa pro cliente: ele acessa pocket.interali.com.br, escolhe o plano Starter e digita o código *${comandoVoucher.codigo}* no campo "Código do Voucher" ao assinar.\n\n` +
+          '⚠️ Uso único — some sozinho assim que alguém pagar com ele.'
+        );
+      } catch (error) {
+        console.error('Erro ao criar voucher via comando WhatsApp:', error.message);
+        await enviarMensagemWhatsApp(remetente, `❌ Não consegui criar o cupom "${comandoVoucher.codigo}". Tenta de novo em instantes.`).catch(() => {});
+      }
+      return res.sendStatus(200);
+    }
+  }
 
   try {
     const cliente = await buscarClientePorNumero(remetente);
