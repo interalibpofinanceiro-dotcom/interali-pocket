@@ -110,8 +110,9 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
 
 REGRAS:
 - Se for um BOLETO único: retorne um único item em "contas".
-- Se for uma FATURA DE CARTÃO DE CRÉDITO com vários lançamentos: retorne um item por lançamento da fatura, todos com o mesmo "vencimento" (a data de vencimento da fatura).
+- Se for uma FATURA DE CARTÃO DE CRÉDITO com vários lançamentos: retorne um item por lançamento da fatura atual, todos com o mesmo "vencimento" (a data de vencimento desta fatura).
 - Se algum lançamento da fatura indicar parcelamento (ex.: "3/12"), preencha "parcela_atual" e "parcela_total" com esses números; caso contrário, use null nos dois.
+- ATENÇÃO — parcelas futuras: muitas faturas de cartão brasileiras trazem, além dos lançamentos desta fatura, uma seção separada de "compras parceladas" ou "parcelas futuras" mostrando os valores e vencimentos das parcelas que ainda vão aparecer nas PRÓXIMAS faturas (ex.: "Notebook 4/12 R$ 250,00 — vence em 25/09", "5/12 vence em 25/10" etc.). Se essa seção existir na imagem, inclua CADA parcela futura como um item adicional em "contas", com o "vencimento" real dela (a data futura mostrada, não a data desta fatura) e "parcela_atual"/"parcela_total" preenchidos. Se essa seção não existir ou não estiver legível, não invente — inclua só o que está visível.
 - "valor" é sempre positivo.
 - Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente (e o próximo ano se o mês/dia já tiver passado no ano corrente).
 - Categorize seguindo a mesma lógica dinâmica por nicho de mercado usada para comprovantes (ex.: "Insumos - Carnes", "Despesas Administrativas", etc.), ou "Não Classificado" se não for possível inferir.

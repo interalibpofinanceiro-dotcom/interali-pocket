@@ -308,7 +308,8 @@ function formatarProjecao(projecao) {
     linhas.push('📋 Contas a vencer:');
     projecao.contasNoPeriodo.slice(0, 10).forEach((conta) => {
       const parcela = conta.parcela_atual && conta.parcela_total ? ` (${conta.parcela_atual}/${conta.parcela_total})` : '';
-      linhas.push(`   • ${formatarDataBR(conta.vencimento)} — ${formatarMoeda(conta.valor)} — ${conta.beneficiario || conta.descricao || 'sem descrição'}${parcela}`);
+      const cartao = conta.cartao ? `[${conta.cartao}] ` : '';
+      linhas.push(`   • ${cartao}${formatarDataBR(conta.vencimento)} — ${formatarMoeda(conta.valor)} — ${conta.beneficiario || conta.descricao || 'sem descrição'}${parcela}`);
     });
     if (projecao.contasNoPeriodo.length > 10) {
       linhas.push(`   ... e mais ${projecao.contasNoPeriodo.length - 10} conta(s).`);

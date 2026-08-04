@@ -12,7 +12,7 @@ const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', '
 
 const ABA_CONTAS_A_PAGAR = 'ContasAPagar';
 const CABECALHO_CONTAS_A_PAGAR = [
-  'Vencimento', 'Valor', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
+  'Vencimento', 'Valor', 'Cartao', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
 ];
 
 function getAuthClient() {
@@ -172,6 +172,7 @@ async function salvarContasAPagar(spreadsheetId, contas) {
   const linhas = contas.map((conta) => [
     conta.vencimento || '',
     conta.valor || 0,
+    conta.cartao || '',
     conta.beneficiario || '',
     conta.descricao || '',
     conta.categoria || '',
@@ -182,7 +183,7 @@ async function salvarContasAPagar(spreadsheetId, contas) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_CONTAS_A_PAGAR}!A:H`,
+    range: `${ABA_CONTAS_A_PAGAR}!A:I`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: linhas },
@@ -190,16 +191,17 @@ async function salvarContasAPagar(spreadsheetId, contas) {
 }
 
 async function buscarContasAPagar(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_PAGAR, 'A2:H');
+  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_PAGAR, 'A2:I');
 
   return linhas.map((linha) => ({
     vencimento: linha[0] || '',
     valor: Number(linha[1]) || 0,
-    beneficiario: linha[2] || '',
-    descricao: linha[3] || '',
-    categoria: linha[4] || '',
-    parcela_atual: linha[5] ? Number(linha[5]) : null,
-    parcela_total: linha[6] ? Number(linha[6]) : null,
+    cartao: linha[2] || '',
+    beneficiario: linha[3] || '',
+    descricao: linha[4] || '',
+    categoria: linha[5] || '',
+    parcela_atual: linha[6] ? Number(linha[6]) : null,
+    parcela_total: linha[7] ? Number(linha[7]) : null,
   }));
 }
 

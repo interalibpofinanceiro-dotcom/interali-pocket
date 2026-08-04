@@ -36,7 +36,10 @@ app.use((req, _res, next) => {
 
 // type: '*/*' porque nem toda implementação de webhook manda o header Content-Type
 // exatamente como "application/json" — sem isso, o body chegaria vazio silenciosamente.
-app.use(express.json({ type: '*/*' }));
+// limit maior que o padrão (100kb) porque a Evolution API inclui thumbnails/dados em base64
+// no próprio payload do webhook de imagem e documento — sem isso, toda mensagem com mídia
+// era rejeitada com PayloadTooLargeError antes de chegar no handler (bug real encontrado em produção).
+app.use(express.json({ type: '*/*', limit: '50mb' }));
 
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
 const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
@@ -133,6 +136,15 @@ async function gerarProjecao(sheetId, dias) {
   return projetarFluxoDeCaixa(saldoAtual, contasEmAberto, dias);
 }
 
+// Extrai o nome do cartão da legenda (ex.: "lançar como Cartão Bradesco" → "Bradesco"),
+// já que o nome do cartão normalmente não aparece de forma confiável na própria imagem da fatura —
+// quem sabe qual cartão é o cliente, então ele informa isso na legenda da mensagem.
+function extrairNomeCartao(legendaLower) {
+  const match = legendaLower.match(/cart[ãa]o\s+([a-zà-ÿ0-9]+(?:\s+[a-zà-ÿ0-9]+){0,2})/i);
+  if (!match) return null;
+  return match[1].trim().replace(/\b\w/g, (letra) => letra.toUpperCase());
+}
+
 // Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
 function interpretarMensagem(data) {
   const msg = data.message || {};
@@ -198,14 +210,20 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       await salvarExtrato(sheetId, transacoes);
       await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
-    } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar'))) {
+    } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
+      const cartao = extrairNomeCartao(interpretado.legenda);
 
-      console.log(`Contas a pagar processadas: ${contas.length} conta(s)`);
+      if (cartao) {
+        contas.forEach((conta) => { conta.cartao = cartao; });
+      }
+
+      console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
 
       await salvarContasAPagar(sheetId, contas);
-      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+      const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
+      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar${sufixoCartao}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
     } else if (interpretado.tipoMidia) {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
