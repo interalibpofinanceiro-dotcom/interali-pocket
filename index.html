@@ -53,14 +53,6 @@
   </div>
 </header>
 
-<!-- ============ VOUCHER BANNER (oculto por padrão, JS mostra se ?voucher= na URL) ============ -->
-<div id="voucher-banner" class="hidden bg-gradient-to-r from-sky-500 to-cyan-400 text-slate-900">
-  <div class="max-w-6xl mx-auto px-5 py-2.5 flex flex-wrap items-center justify-center gap-2 text-sm font-semibold text-center">
-    <span>🎟️ Voucher Exclusivo Aplicado: Código <span id="voucher-code-display" class="font-mono"></span></span>
-    <a href="#planos" class="underline underline-offset-2">Ver oferta liberada ↓</a>
-  </div>
-</div>
-
 <!-- ============ HERO ============ -->
 <section class="relative overflow-hidden">
   <div class="absolute inset-0 bg-[radial-gradient(circle_at_20%_-10%,rgba(56,189,248,0.18),transparent_45%)]"></div>
@@ -266,24 +258,9 @@
         </button>
       </div>
 
-      <!-- Voucher / Teste VIP (oculto por padrão) -->
-      <div id="plano-voucher-card" class="hidden md:col-span-3 max-w-md md:mx-auto w-full">
-        <div class="relative rounded-2xl border-2 border-cyan-300 bg-gradient-to-br from-cyan-400/10 to-sky-400/5 p-7">
-          <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-cyan-300 text-slate-900 text-xs font-bold px-3 py-1 rounded-full whitespace-nowrap">
-            OFERTA EXCLUSIVA E INDIVIDUAL
-          </span>
-          <h3 class="font-semibold text-lg">Pocket Teste (Voucher)</h3>
-          <p class="text-xs text-slate-400 mt-1">Liberado com o código <span id="voucher-code-display-2" class="font-mono text-cyan-300"></span></p>
-          <p class="mt-5"><span class="text-3xl font-extrabold text-cyan-300">R$ 49</span><span class="text-slate-400 text-sm">,90/mês</span></p>
-          <p class="text-sm text-cyan-300 font-medium mt-1">Até 300 lançamentos/mês</p>
-          <button data-plano="teste"
-            class="btn-assinar mt-7 w-full bg-cyan-300 hover:bg-cyan-200 text-slate-900 font-bold py-3 rounded-full transition">
-            Assinar com Voucher
-          </button>
-        </div>
-      </div>
-
     </div>
+
+    <p class="text-center text-xs text-slate-500 mt-8">Tem um código de voucher promocional? Insira no passo de pagamento do plano Starter.</p>
   </div>
 </section>
 
@@ -318,7 +295,7 @@
           class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-sky-400" />
       </div>
 
-      <div>
+      <div id="campo-voucher" class="hidden">
         <label class="block text-xs font-medium text-slate-400 mb-1.5">Código do Voucher <span class="text-slate-600">(opcional)</span></label>
         <input type="text" id="input-voucher" placeholder="Ex.: BARBER-8912"
           class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono focus:outline-none focus:border-cyan-300" />
@@ -410,8 +387,7 @@
   var PLANOS = {
     starter:  { nome: "Pocket Starter",  valorTexto: "R$ 99,00/mês" },
     pro:      { nome: "Pocket Pro",      valorTexto: "R$ 169,00/mês" },
-    business: { nome: "Pocket Business", valorTexto: "R$ 249,00/mês" },
-    teste:    { nome: "Pocket Teste (Voucher)", valorTexto: "R$ 49,90/mês" }
+    business: { nome: "Pocket Business", valorTexto: "R$ 249,00/mês" }
   };
 
   // ── Menu mobile ──
@@ -424,29 +400,27 @@
     a.addEventListener("click", function () { mobileMenu.classList.add("hidden"); });
   });
 
-  // ── Voucher via URL (?voucher=CODIGO) ──
-  var params = new URLSearchParams(window.location.search);
-  var voucherDaUrl = (params.get("voucher") || "").trim();
-
-  if (voucherDaUrl) {
-    document.getElementById("voucher-banner").classList.remove("hidden");
-    document.getElementById("voucher-code-display").textContent = voucherDaUrl;
-    document.getElementById("voucher-code-display-2").textContent = voucherDaUrl;
-    document.getElementById("plano-voucher-card").classList.remove("hidden");
-  }
-
   // ── Modal de checkout ──
   var modal = document.getElementById("checkout-modal");
   var form = document.getElementById("checkout-form");
   var feedback = document.getElementById("modal-feedback");
   var submitBtn = document.getElementById("modal-submit-btn");
+  var campoVoucher = document.getElementById("campo-voucher");
 
   function abrirModal(planoId) {
     var plano = PLANOS[planoId] || PLANOS.starter;
     document.getElementById("modal-plano-id").value = planoId;
     document.getElementById("modal-plano-nome").textContent = plano.nome;
     document.getElementById("modal-plano-valor").textContent = plano.valorTexto;
-    document.getElementById("input-voucher").value = planoId === "teste" ? voucherDaUrl : (voucherDaUrl || "");
+    document.getElementById("input-voucher").value = "";
+
+    // O voucher só se aplica ao plano Starter — nos outros planos o campo fica oculto.
+    if (planoId === "starter") {
+      campoVoucher.classList.remove("hidden");
+    } else {
+      campoVoucher.classList.add("hidden");
+    }
+
     feedback.classList.add("hidden");
     feedback.textContent = "";
     submitBtn.disabled = false;

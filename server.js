@@ -376,6 +376,12 @@ app.post('/api/assinar', async (req, res) => {
 
   const codigoVoucher = (voucher || '').trim();
   if (codigoVoucher) {
+    // Voucher só se aplica junto com o plano Starter — nos outros planos, o valor do voucher
+    // não faz sentido (ex.: alguém pagando Business não deveria cair pro tier de teste).
+    if (planoId !== 'starter') {
+      return res.status(400).json({ ok: false, erro: 'O voucher só pode ser usado ao assinar o plano Pocket Starter (R$ 99,00).' });
+    }
+
     const voucherValido = await validarVoucher(codigoVoucher);
     if (!voucherValido) {
       return res.status(400).json({ ok: false, erro: 'Esse voucher é inválido ou já foi utilizado. Você pode assinar sem o voucher, no valor normal do plano.' });
