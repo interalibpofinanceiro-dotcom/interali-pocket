@@ -61,7 +61,37 @@ app.use(express.json({ type: '*/*', limit: '50mb' }));
 
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
 const PORT = process.env.PORT || 3000;
-const ADMIN_WHATSAPP_NUMBER = process.env.ADMIN_WHATSAPP_NUMBER; // formato "whatsapp:+55DDXXXXXXXXX" — número do Aroldo, avisado sobre leads
+const ADMIN_WHATSAPP_NUMBER = process.env.ADMIN_WHATSAPP_NUMBER; // formato "whatsapp:+55DDXXXXXXXXX" — número do Aroldo, avisado sobre leads e usado como contato de suporte pro cliente
+
+// Mostra o número de suporte pro cliente em formato legível, ex.: "(41) 98788-5732".
+function formatarNumeroExibicao(numeroPlanilha) {
+  const digitos = (numeroPlanilha || '').replace(/\D/g, '');
+  const ddd = digitos.slice(2, 4);
+  const resto = digitos.slice(4);
+  return `(${ddd}) ${resto.slice(0, 5)}-${resto.slice(5)}`;
+}
+
+const SUPORTE_TEXTO = ADMIN_WHATSAPP_NUMBER
+  ? `Se der erro ou tiver qualquer dúvida, chama o suporte no WhatsApp: ${formatarNumeroExibicao(ADMIN_WHATSAPP_NUMBER)}`
+  : '';
+
+// Mensagem completa de orientação — usada tanto na ativação automática (pagamento confirmado)
+// quanto como resposta padrão quando o cliente manda mensagem sem nada específico pra fazer.
+function montarMensagemBoasVindas(nome) {
+  return (
+    `Olá, ${nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
+    '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
+    '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
+    '🧾 Mande boleto ou fatura de cartão de crédito escrevendo "boleto" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco").\n' +
+    '💬 Pergunte "resumo do mês", "resumo da semana" ou "previsão" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
+    '💡 Dicas rápidas:\n' +
+    '• Sempre escreva alguma legenda ao mandar boleto, fatura ou extrato — sem isso eu tento adivinhar o tipo de documento e posso errar.\n' +
+    '• Uma foto por mensagem.\n' +
+    '• Foto legível, sem cortar número.\n' +
+    '• Se tiver mais de um cartão de crédito, sempre diga o nome do banco na legenda.' +
+    (SUPORTE_TEXTO ? `\n\n${SUPORTE_TEXTO}` : '')
+  );
+}
 
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
@@ -226,8 +256,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     }
   }
 
+  let cliente;
+
   try {
-    const cliente = await buscarClientePorNumero(remetente);
+    cliente = await buscarClientePorNumero(remetente);
 
     if (!cliente) {
       await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
@@ -311,19 +343,25 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar });
         await enviarMensagemWhatsApp(remetente, resposta);
       } else {
-        await enviarMensagemWhatsApp(
-          remetente,
-          `Olá, ${cliente.nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
-          '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
-          '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
-          '🧾 Mande um boleto ou fatura de cartão AINDA NÃO PAGO escrevendo "boleto" ou "fatura" na legenda.\n' +
-          '💬 Pergunte "resumo do mês", "resumo da semana" ou "previsão" para ver seus relatórios.'
-        );
+        await enviarMensagemWhatsApp(remetente, montarMensagemBoasVindas(cliente.nome));
       }
     }
   } catch (error) {
     console.error('Erro ao processar mensagem:', error.message);
-    await enviarMensagemWhatsApp(remetente, 'Ops, não consegui processar isso agora. Pode tentar de novo?').catch(() => {});
+
+    const mensagemErroCliente = SUPORTE_TEXTO
+      ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+      : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+
+    await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
+
+    if (ADMIN_WHATSAPP_NUMBER) {
+      const nomeCliente = cliente ? cliente.nome : '(não identificado)';
+      await enviarMensagemWhatsApp(
+        ADMIN_WHATSAPP_NUMBER,
+        `⚠️ Erro processando mensagem no Interali Pocket\n\n👤 ${nomeCliente}\n📱 ${remetente}\n📎 Tipo: ${interpretado.tipoMidia || 'texto'}\n❌ ${error.message}`
+      ).catch((erroNotificacao) => console.error('Falha ao notificar admin sobre erro de processamento:', erroNotificacao.message));
+    }
   }
 
   res.sendStatus(200);
@@ -533,12 +571,7 @@ app.post('/webhook-asaas', async (req, res) => {
 
     await enviarMensagemWhatsApp(
       assinatura.whatsapp,
-      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.\n\n` +
-      '📸 Mande a foto de um comprovante, nota fiscal ou recibo pra eu registrar.\n' +
-      '🏦 Mande o extrato do banco escrevendo "extrato" na legenda, pra eu conciliar.\n' +
-      '🧾 Mande boleto ou fatura de cartão escrevendo "boleto" ou "cartão + nome do banco" na legenda.\n' +
-      '💬 Pergunte "resumo do mês" ou "previsão" quando quiser ver seus relatórios.\n\n' +
-      'Qualquer dúvida, é só perguntar por aqui mesmo!'
+      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.\n\n` + montarMensagemBoasVindas(assinatura.nome)
     ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
 
     if (ADMIN_WHATSAPP_NUMBER) {
