@@ -122,8 +122,38 @@ async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
   cache = null;
 }
 
+// Desativação por soft delete (marca Ativo=FALSE em vez de apagar a linha) — preserva o
+// histórico de quem já foi cliente e evita reindexar linhas de outros clientes por engano.
+async function desativarCliente(numeroWhatsapp) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:D` });
+  const linhas = resposta.data.values || [];
+  const alvo = (numeroWhatsapp || '').trim();
+  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
+
+  if (indice === -1) return null;
+
+  const nome = linhas[indice][1] || '';
+  const numeroLinha = indice + 2; // +2: a busca começou em A2, então índice 0 é a linha 2 da planilha
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_CLIENTES}!D${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [['FALSE']] },
+  });
+
+  cache = null;
+  return { numeroWhatsapp: alvo, nome };
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
   adicionarCliente,
+  desativarCliente,
 };

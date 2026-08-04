@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { adicionarCliente } = require('./clientes');
+const { enviarMensagemWhatsApp } = require('./evolution');
 
 const [, , numero, nome, sheetId] = process.argv;
 
@@ -8,11 +9,19 @@ if (!numero || !nome || !sheetId) {
   process.exit(1);
 }
 
-adicionarCliente(numero, nome, sheetId)
-  .then(() => {
-    console.log(`Cliente "${nome}" (${numero}) cadastrado com sucesso.`);
-  })
-  .catch((erro) => {
-    console.error('Erro ao cadastrar cliente:', erro.message);
-    process.exit(1);
-  });
+async function main() {
+  await adicionarCliente(numero, nome, sheetId);
+  console.log(`Cliente "${nome}" (${numero}) cadastrado com sucesso.`);
+
+  const admin = process.env.ADMIN_WHATSAPP_NUMBER;
+  if (admin) {
+    await enviarMensagemWhatsApp(admin, `✅ Novo cliente ativado no Interali Pocket: ${nome} (${numero})`).catch(
+      (erro) => console.error('Aviso: cliente cadastrado, mas não consegui notificar o admin:', erro.message)
+    );
+  }
+}
+
+main().catch((erro) => {
+  console.error('Erro ao cadastrar cliente:', erro.message);
+  process.exit(1);
+});

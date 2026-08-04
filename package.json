@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node index.js",
     "server": "node server.js",
-    "cadastrar-cliente": "node cadastrar-cliente.js"
+    "cadastrar-cliente": "node cadastrar-cliente.js",
+    "desativar-cliente": "node desativar-cliente.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

@@ -23,6 +23,11 @@ const {
   formatarProjecao,
 } = require('./reconciliacao');
 const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
+const {
+  jidParaFormatoPlanilha,
+  enviarMensagemWhatsApp,
+  buscarMidiaBase64,
+} = require('./evolution');
 
 const app = express();
 
@@ -41,61 +46,27 @@ app.use((req, _res, next) => {
 // era rejeitada com PayloadTooLargeError antes de chegar no handler (bug real encontrado em produção).
 app.use(express.json({ type: '*/*', limit: '50mb' }));
 
-const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');
-const EVOLUTION_API_KEY = process.env.EVOLUTION_API_KEY;
-const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE;
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
 const PORT = process.env.PORT || 3000;
+const ADMIN_WHATSAPP_NUMBER = process.env.ADMIN_WHATSAPP_NUMBER; // formato "whatsapp:+55DDXXXXXXXXX" — número do Aroldo, avisado sobre leads
 
-// ── Números: a planilha guarda "whatsapp:+55XXXXXXXXXXX" (formato herdado do Twilio).
-// A Evolution API usa só dígitos ("55XXXXXXXXXXX") pra enviar e JID ("55XXXXXXXXXXX@s.whatsapp.net")
-// pra identificar quem mandou. Converte nas bordas pra não precisar migrar o que já tá cadastrado.
-function jidParaFormatoPlanilha(remoteJid) {
-  const numero = (remoteJid || '').split('@')[0];
-  return `whatsapp:+${numero}`;
-}
+// Evita notificar o admin toda vez que o mesmo número não cadastrado manda várias mensagens
+// seguidas enquanto espera resposta — reresetada a cada deploy/restart (aceitável no volume atual).
+const ULTIMA_NOTIFICACAO_LEAD = new Map();
+const COOLDOWN_NOTIFICACAO_LEAD_MS = 15 * 60 * 1000;
 
-function formatoPlanilhaParaNumeroEvolution(numeroPlanilha) {
-  return (numeroPlanilha || '').replace('whatsapp:', '').replace('+', '');
-}
+async function notificarAdminSobreLead(remetente) {
+  if (!ADMIN_WHATSAPP_NUMBER) return;
 
-async function chamarEvolutionAPI(caminho, corpo) {
-  const resposta = await fetch(`${EVOLUTION_API_URL}${caminho}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: EVOLUTION_API_KEY,
-    },
-    body: JSON.stringify(corpo),
-  });
+  const agora = Date.now();
+  const ultimaNotificacao = ULTIMA_NOTIFICACAO_LEAD.get(remetente) || 0;
+  if (agora - ultimaNotificacao < COOLDOWN_NOTIFICACAO_LEAD_MS) return;
+  ULTIMA_NOTIFICACAO_LEAD.set(remetente, agora);
 
-  if (!resposta.ok) {
-    const textoErro = await resposta.text().catch(() => '');
-    throw new Error(`Evolution API respondeu ${resposta.status}: ${textoErro}`);
-  }
-
-  return resposta.json();
-}
-
-async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
-  const number = formatoPlanilhaParaNumeroEvolution(numeroDestinoPlanilha);
-  // encodeURIComponent porque o nome real da instância na Evolution tem espaço ("Interlai Poket") —
-  // sem isso, o espaço quebraria a URL da requisição.
-  return chamarEvolutionAPI(`/message/sendText/${encodeURIComponent(EVOLUTION_INSTANCE)}`, { number, text: texto });
-}
-
-// Busca o binário (imagem/PDF) de uma mensagem recebida, pelo id da mensagem —
-// a Evolution não manda o arquivo direto no webhook, só os metadados.
-async function buscarMidiaBase64(messageId) {
-  const resultado = await chamarEvolutionAPI(`/chat/getBase64FromMediaMessage/${encodeURIComponent(EVOLUTION_INSTANCE)}`, {
-    message: { key: { id: messageId } },
-    convertToMp4: false,
-  });
-
-  return {
-    buffer: Buffer.from(resultado.base64, 'base64'),
-    mimeType: resultado.mimetype,
-  };
+  await enviarMensagemWhatsApp(
+    ADMIN_WHATSAPP_NUMBER,
+    `🔔 Novo lead no Interali Pocket: ${remetente} tentou mandar mensagem e ainda não está cadastrado.\n\nPra liberar: npm run cadastrar-cliente -- "${remetente}" "Nome" "ID_DA_PLANILHA"`
+  ).catch((erro) => console.error('Falha ao notificar admin sobre lead:', erro.message));
 }
 
 function formatarNumero(valor) {
@@ -197,6 +168,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
     if (!cliente) {
       await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
+      await notificarAdminSobreLead(remetente);
       return res.sendStatus(200);
     }
 
