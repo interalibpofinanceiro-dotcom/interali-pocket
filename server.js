@@ -1,4 +1,5 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
 const {
   extrairComprovanteDeBuffer,
@@ -28,6 +29,7 @@ const {
   enviarMensagemWhatsApp,
   buscarMidiaBase64,
 } = require('./evolution');
+const { validarVoucher, queimarVoucher, registrarAssinatura } = require('./vendas');
 
 const app = express();
 
@@ -49,6 +51,25 @@ app.use(express.json({ type: '*/*', limit: '50mb' }));
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
 const PORT = process.env.PORT || 3000;
 const ADMIN_WHATSAPP_NUMBER = process.env.ADMIN_WHATSAPP_NUMBER; // formato "whatsapp:+55DDXXXXXXXXX" — número do Aroldo, avisado sobre leads
+
+// Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
+// em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
+const PLANOS = {
+  starter: { id: 'starter', nome: 'Pocket Starter', valor: 99.0, limite: 300 },
+  pro: { id: 'pro', nome: 'Pocket Pro', valor: 169.0, limite: 600 },
+  business: { id: 'business', nome: 'Pocket Business', valor: 249.0, limite: 1000 },
+  teste: { id: 'teste', nome: 'Pocket Teste (Voucher)', valor: 49.9, limite: 300 },
+};
+
+// Aceita o número digitado em qualquer formato ((41) 99999-9999, 41999999999 etc.) e
+// normaliza pro padrão "whatsapp:+55DDXXXXXXXXX" usado no resto do sistema.
+function normalizarWhatsapp(numeroDigitado) {
+  let digitos = (numeroDigitado || '').replace(/\D/g, '');
+  if (digitos.length <= 11) {
+    digitos = `55${digitos}`;
+  }
+  return `whatsapp:+${digitos}`;
+}
 
 // Evita notificar o admin toda vez que o mesmo número não cadastrado manda várias mensagens
 // seguidas enquanto espera resposta — reresetada a cada deploy/restart (aceitável no volume atual).
@@ -331,7 +352,62 @@ app.all('/tarefas/previsao', async (req, res) => {
 });
 
 app.get('/', (_req, res) => {
-  res.send('Interali Pocket - servidor de webhook ativo.');
+  res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// Recebe o formulário de checkout da landing page (index.html). Ainda não existe integração
+// real com o Asaas (falta decidir API key vs. links de pagamento estáticos por plano) — por
+// enquanto, registra o pedido na planilha mestre e avisa o admin pelo WhatsApp pra fechamento manual.
+app.post('/api/assinar', async (req, res) => {
+  const { nome, whatsapp, documento, planoId, voucher } = req.body || {};
+
+  if (!nome || !whatsapp || !documento || !planoId) {
+    return res.status(400).json({ ok: false, erro: 'Preencha nome, WhatsApp, CPF/e-mail e escolha um plano.' });
+  }
+
+  const planoOficial = PLANOS[planoId];
+  if (!planoOficial) {
+    return res.status(400).json({ ok: false, erro: 'Plano inválido.' });
+  }
+
+  const numeroFormatado = normalizarWhatsapp(whatsapp);
+  let planoFinal = planoOficial;
+  let voucherAplicado = null;
+
+  const codigoVoucher = (voucher || '').trim();
+  if (codigoVoucher) {
+    const voucherValido = await validarVoucher(codigoVoucher);
+    if (!voucherValido) {
+      return res.status(400).json({ ok: false, erro: 'Esse voucher é inválido ou já foi utilizado. Você pode assinar sem o voucher, no valor normal do plano.' });
+    }
+    planoFinal = PLANOS.teste;
+    voucherAplicado = codigoVoucher.toUpperCase();
+    await queimarVoucher(voucherAplicado, `${nome} (${numeroFormatado})`);
+  }
+
+  try {
+    await registrarAssinatura({
+      nome,
+      whatsapp: numeroFormatado,
+      documento,
+      plano: planoFinal.nome,
+      valor: planoFinal.valor,
+      voucher: voucherAplicado,
+    });
+  } catch (error) {
+    console.error('Erro ao registrar assinatura:', error.message);
+    return res.status(500).json({ ok: false, erro: 'Não consegui registrar seu pedido agora. Tente novamente em instantes.' });
+  }
+
+  if (ADMIN_WHATSAPP_NUMBER) {
+    const linhaVoucher = voucherAplicado ? `\n🎟️ Voucher: ${voucherAplicado}` : '';
+    await enviarMensagemWhatsApp(
+      ADMIN_WHATSAPP_NUMBER,
+      `💰 Nova assinatura no site do Interali Pocket!\n\n👤 ${nome}\n📱 ${numeroFormatado}\n🪪 ${documento}\n📋 Plano: ${planoFinal.nome} (R$ ${planoFinal.valor.toFixed(2)})${linhaVoucher}\n\nEntra em contato pra fechar o pagamento.`
+    ).catch((erro) => console.error('Falha ao notificar admin sobre assinatura:', erro.message));
+  }
+
+  res.json({ ok: true, plano: planoFinal });
 });
 
 app.listen(PORT, () => {
