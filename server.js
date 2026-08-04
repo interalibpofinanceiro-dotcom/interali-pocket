@@ -228,10 +228,33 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
 
-      console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
+      if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
+        // Chegou sem legenda "fatura"/"boleto"/"cartão" (ex.: cliente só colou a imagem), mas o
+        // Claude percebeu que é uma fatura com múltiplos lançamentos — reprocessa como contas a
+        // pagar (item a item, com vencimento) em vez de salvar como um único comprovante, senão
+        // os lançamentos individuais e as parcelas ficariam perdidos dentro de "itens".
+        const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
+        const cartao = extrairNomeCartao(interpretado.legenda);
 
-      await salvarComprovante(sheetId, dadosExtraidos);
-      await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+        if (cartao) {
+          contas.forEach((conta) => { conta.cartao = cartao; });
+        }
+
+        console.log(`Fatura de cartão detectada sem legenda apropriada — reprocessada como ${contas.length} conta(s) a pagar${cartao ? ` | cartão: ${cartao}` : ''}`);
+
+        await salvarContasAPagar(sheetId, contas);
+        const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
+        await enviarMensagemWhatsApp(
+          remetente,
+          `✅ Essa imagem é uma fatura de cartão com ${contas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único.\n\n` +
+          'Da próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉\n\nPergunte "previsão" para ver o fluxo de caixa projetado.'
+        );
+      } else {
+        console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
+
+        await salvarComprovante(sheetId, dadosExtraidos);
+        await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+      }
     } else {
       const corpoLower = (interpretado.texto || '').toLowerCase();
 

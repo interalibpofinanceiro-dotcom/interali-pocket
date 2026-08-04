@@ -3,7 +3,7 @@ const PROMPT_EXTRACAO = `Você é um especialista em extração de dados finance
 Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
 
 {
-  "tipo_documento": "comprovante_pix | comprovante_ted | comprovante_boleto | nota_fiscal | cupom_fiscal | recibo | outro",
+  "tipo_documento": "comprovante_pix | comprovante_ted | comprovante_boleto | nota_fiscal | cupom_fiscal | recibo | fatura_cartao_credito | outro",
   "data": "YYYY-MM-DD",
   "hora": "HH:MM ou null se não identificado",
   "valor": 0.00,
@@ -42,6 +42,7 @@ REGRAS GERAIS:
 - Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito no documento, assuma o ano corrente.
 - Se o documento não tiver itens detalhados (ex.: comprovante de PIX simples), retorne "itens" como array vazio [].
 - Se algum campo não puder ser identificado com confiança, use null (nunca invente informação).
+- IMPORTANTE — fatura de cartão de crédito com múltiplos lançamentos: se o documento for uma FATURA DE CARTÃO (não um comprovante único), use "tipo_documento": "fatura_cartao_credito". Isso é só um sinal para quem for processar o resultado depois saber que precisa tratar item a item (cada lançamento da fatura é uma conta a pagar separada, não um único gasto) — mesmo assim, preencha "valor" com o total da fatura e "itens" com a lista de lançamentos, normalmente.
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
 const PROMPT_CONSULTA = `Você é o assistente financeiro pessoal do Interali Pocket, respondendo dúvidas via WhatsApp sobre o fluxo de caixa do cliente, com base nos dados extraídos e organizados em uma planilha (Google Sheets).
