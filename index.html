@@ -6,6 +6,26 @@
 <title>Interali Pocket — O financeiro da sua barbearia ou salão, organizado pelo WhatsApp</title>
 <meta name="description" content="Mande fotos de comprovantes, boletos e extratos pelo WhatsApp. A IA do Interali Pocket categoriza, concilia e responde suas dúvidas de caixa na hora." />
 <script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Paleta oficial da marca Interali (verde-petróleo + dourado, igual à logo) —
+  // usada em todos os apps/sistemas da marca daqui pra frente, não só no Pocket.
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: {
+            teal: '#0d2b28',
+            tealDark: '#081a18',
+            tealLight: '#123a35',
+            gold: '#c9a227',
+            goldLight: '#e3c877',
+            goldDark: '#9c7d1e'
+          }
+        }
+      }
+    }
+  };
+</script>
 <style>
   html { scroll-behavior: smooth; }
   .chat-in { animation: fadeUp .5s ease both; }
@@ -14,12 +34,15 @@
   @keyframes fadeUp { from { opacity:0; transform: translateY(8px);} to { opacity:1; transform: translateY(0);} }
 </style>
 </head>
-<body class="bg-slate-900 text-slate-100 antialiased">
+<body class="bg-brand-teal text-slate-100 antialiased">
 
 <!-- ============ HEADER ============ -->
-<header class="sticky top-0 z-40 bg-slate-900/90 backdrop-blur border-b border-slate-800">
+<header class="sticky top-0 z-40 bg-brand-teal/90 backdrop-blur border-b border-brand-gold/20">
   <div class="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
-    <a href="#" class="text-xl font-bold tracking-tight">Interali <span class="text-sky-400">Pocket</span></a>
+    <a href="#" class="flex items-center gap-3">
+      <img src="/logo.jpg" alt="Interali" class="h-10 w-10 rounded-full object-cover" />
+      <span class="text-xl font-bold tracking-tight">Interali <span class="text-brand-gold">Pocket</span></span>
+    </a>
 
     <nav class="hidden md:flex items-center gap-8 text-sm text-slate-300">
       <a href="#como-funciona" class="hover:text-white transition">Como Funciona</a>
@@ -41,7 +64,7 @@
     </button>
   </div>
 
-  <div id="mobile-menu" class="hidden md:hidden border-t border-slate-800 px-5 py-4 flex flex-col gap-4 text-slate-300 bg-slate-900">
+  <div id="mobile-menu" class="hidden md:hidden border-t border-brand-gold/20 px-5 py-4 flex flex-col gap-4 text-slate-300 bg-brand-teal">
     <a href="#como-funciona" class="hover:text-white">Como Funciona</a>
     <a href="#recursos" class="hover:text-white">Recursos</a>
     <a href="#planos" class="hover:text-white">Planos</a>
@@ -55,15 +78,15 @@
 
 <!-- ============ HERO ============ -->
 <section class="relative overflow-hidden">
-  <div class="absolute inset-0 bg-[radial-gradient(circle_at_20%_-10%,rgba(56,189,248,0.18),transparent_45%)]"></div>
+  <div class="absolute inset-0 bg-[radial-gradient(circle_at_20%_-10%,rgba(201,162,39,0.16),transparent_45%)]"></div>
   <div class="max-w-6xl mx-auto px-5 pt-16 pb-20 md:pt-24 md:pb-28 relative grid md:grid-cols-2 gap-12 items-center">
 
     <div>
-      <span class="inline-block text-xs font-semibold tracking-wide uppercase text-sky-400 bg-sky-400/10 px-3 py-1 rounded-full mb-5">
+      <span class="inline-block text-xs font-semibold tracking-wide uppercase text-brand-gold bg-brand-gold/10 px-3 py-1 rounded-full mb-5">
         BPO Financeiro de Bolso
       </span>
       <h1 class="text-3xl sm:text-4xl md:text-5xl font-extrabold leading-tight tracking-tight">
-        O financeiro da sua barbearia ou salão organizado pelo <span class="text-sky-400">WhatsApp</span>.
+        O financeiro da sua barbearia ou salão organizado pelo <span class="text-brand-gold">WhatsApp</span>.
         <span class="block text-slate-400 font-bold mt-1">Sem abrir planilhas.</span>
       </h1>
       <p class="mt-6 text-lg text-slate-300 max-w-xl">
@@ -73,7 +96,7 @@
 
       <div class="mt-8 flex flex-col sm:flex-row gap-4">
         <a href="#planos"
-           class="inline-flex items-center justify-center bg-sky-400 hover:bg-sky-300 text-slate-900 font-bold px-7 py-3.5 rounded-full transition">
+           class="inline-flex items-center justify-center bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold px-7 py-3.5 rounded-full transition">
           Escolher meu Plano
         </a>
         <a href="https://wa.me/5541987885732?text=Ol%C3%A1!%20Quero%20conhecer%20o%20Interali%20Pocket"
@@ -88,9 +111,9 @@
 
     <!-- Mockup de conversa no WhatsApp -->
     <div class="relative mx-auto max-w-sm w-full">
-      <div class="rounded-[2rem] border border-slate-700 bg-slate-800/60 shadow-2xl shadow-sky-500/10 p-4">
+      <div class="rounded-[2rem] border border-slate-700 bg-slate-800/60 shadow-2xl shadow-brand-gold/10 p-4">
         <div class="flex items-center gap-3 border-b border-slate-700 pb-3 mb-4">
-          <div class="h-9 w-9 rounded-full bg-sky-400 flex items-center justify-center font-bold text-slate-900 text-sm">IP</div>
+          <div class="h-9 w-9 rounded-full bg-brand-gold flex items-center justify-center font-bold text-brand-tealDark text-sm">IP</div>
           <div>
             <p class="text-sm font-semibold">Interali Pocket</p>
             <p class="text-xs text-green-400">online</p>
@@ -130,7 +153,7 @@
 </section>
 
 <!-- ============ DORES x SOLUÇÃO ============ -->
-<section id="recursos" class="py-20 border-t border-slate-800 bg-slate-900">
+<section id="recursos" class="py-20 border-t border-brand-gold/10 bg-brand-tealDark">
   <div class="max-w-6xl mx-auto px-5">
     <div class="text-center max-w-2xl mx-auto mb-14">
       <h2 class="text-2xl sm:text-3xl font-bold">Você fica o dia inteiro na cadeira. Seu caixa não pode ficar largado.</h2>
@@ -166,7 +189,7 @@
 </section>
 
 <!-- ============ COMO FUNCIONA ============ -->
-<section id="como-funciona" class="py-20 border-t border-slate-800">
+<section id="como-funciona" class="py-20 border-t border-brand-gold/10">
   <div class="max-w-6xl mx-auto px-5">
     <div class="text-center max-w-2xl mx-auto mb-14">
       <h2 class="text-2xl sm:text-3xl font-bold">Como funciona</h2>
@@ -175,17 +198,17 @@
 
     <div class="grid md:grid-cols-3 gap-8">
       <div class="text-center">
-        <div class="mx-auto h-14 w-14 rounded-2xl bg-sky-400/10 text-sky-400 flex items-center justify-center text-xl font-bold mb-5">1</div>
+        <div class="mx-auto h-14 w-14 rounded-2xl bg-brand-gold/10 text-brand-gold flex items-center justify-center text-xl font-bold mb-5">1</div>
         <h3 class="font-semibold text-lg mb-2">Envie o comprovante</h3>
         <p class="text-slate-400 text-sm">Foto de Pix, boleto, fatura de cartão ou PDF de extrato — direto no WhatsApp, do jeito que você já manda pra qualquer pessoa.</p>
       </div>
       <div class="text-center">
-        <div class="mx-auto h-14 w-14 rounded-2xl bg-sky-400/10 text-sky-400 flex items-center justify-center text-xl font-bold mb-5">2</div>
+        <div class="mx-auto h-14 w-14 rounded-2xl bg-brand-gold/10 text-brand-gold flex items-center justify-center text-xl font-bold mb-5">2</div>
         <h3 class="font-semibold text-lg mb-2">A IA processa</h3>
         <p class="text-slate-400 text-sm">Extrai valor, data e categoria, concilia com seu extrato bancário e organiza tudo na sua planilha, sem você digitar nada.</p>
       </div>
       <div class="text-center">
-        <div class="mx-auto h-14 w-14 rounded-2xl bg-sky-400/10 text-sky-400 flex items-center justify-center text-xl font-bold mb-5">3</div>
+        <div class="mx-auto h-14 w-14 rounded-2xl bg-brand-gold/10 text-brand-gold flex items-center justify-center text-xl font-bold mb-5">3</div>
         <h3 class="font-semibold text-lg mb-2">Acompanhe seu lucro</h3>
         <p class="text-slate-400 text-sm">Peça resumo do dia, da semana ou do mês, e pergunte sobre seu caixa em linguagem normal, quando quiser.</p>
       </div>
@@ -194,7 +217,7 @@
 </section>
 
 <!-- ============ PLANOS ============ -->
-<section id="planos" class="py-20 border-t border-slate-800 bg-slate-900">
+<section id="planos" class="py-20 border-t border-brand-gold/10 bg-brand-tealDark">
   <div class="max-w-6xl mx-auto px-5">
     <div class="text-center max-w-2xl mx-auto mb-14">
       <h2 class="text-2xl sm:text-3xl font-bold">Planos que cabem no seu negócio</h2>
@@ -208,7 +231,7 @@
         <h3 class="font-semibold text-lg">Pocket Starter</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para barbearias e salões</p>
         <p class="mt-5"><span class="text-3xl font-extrabold">R$ 99</span><span class="text-slate-400 text-sm">,00/mês</span></p>
-        <p class="text-sm text-sky-400 font-medium mt-1">Até 300 lançamentos/mês</p>
+        <p class="text-sm text-brand-gold font-medium mt-1">Até 300 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Leitura de comprovantes por IA</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Conciliação bancária automática</li>
@@ -222,12 +245,12 @@
       </div>
 
       <!-- Pro (destaque) -->
-      <div class="relative rounded-2xl border-2 border-sky-400 bg-slate-800/50 p-7 flex flex-col md:-translate-y-3 shadow-xl shadow-sky-500/10">
-        <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-sky-400 text-slate-900 text-xs font-bold px-3 py-1 rounded-full">MAIS ESCOLHIDO</span>
+      <div class="relative rounded-2xl border-2 border-brand-gold bg-slate-800/50 p-7 flex flex-col md:-translate-y-3 shadow-xl shadow-brand-gold/10">
+        <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-brand-gold text-brand-tealDark text-xs font-bold px-3 py-1 rounded-full">MAIS ESCOLHIDO</span>
         <h3 class="font-semibold text-lg">Pocket Pro</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para estabelecimentos médios/equipes</p>
         <p class="mt-5"><span class="text-3xl font-extrabold">R$ 169</span><span class="text-slate-400 text-sm">,00/mês</span></p>
-        <p class="text-sm text-sky-400 font-medium mt-1">Até 600 lançamentos/mês</p>
+        <p class="text-sm text-brand-gold font-medium mt-1">Até 600 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Tudo do Starter</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Comissão por profissional</li>
@@ -235,7 +258,7 @@
           <li class="flex gap-2"><span class="text-green-400">✓</span> Suporte prioritário</li>
         </ul>
         <button data-plano="pro"
-          class="btn-assinar mt-7 w-full bg-sky-400 hover:bg-sky-300 text-slate-900 font-bold py-3 rounded-full transition">
+          class="btn-assinar mt-7 w-full bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold py-3 rounded-full transition">
           Assinar Pro
         </button>
       </div>
@@ -245,7 +268,7 @@
         <h3 class="font-semibold text-lg">Pocket Business</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para alto volume / restaurantes / pizzarias</p>
         <p class="mt-5"><span class="text-3xl font-extrabold">R$ 249</span><span class="text-slate-400 text-sm">,00/mês</span></p>
-        <p class="text-sm text-sky-400 font-medium mt-1">Até 1.000 lançamentos/mês</p>
+        <p class="text-sm text-brand-gold font-medium mt-1">Até 1.000 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Tudo do Pro</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Maior volume de lançamentos</li>
@@ -271,7 +294,7 @@
   <div class="relative w-full max-w-md bg-slate-800 border border-slate-700 rounded-2xl p-6 sm:p-7 shadow-2xl">
     <button id="modal-close" aria-label="Fechar" class="absolute top-4 right-4 text-slate-400 hover:text-white text-xl leading-none">✕</button>
 
-    <h3 class="text-lg font-bold">Assinar <span id="modal-plano-nome" class="text-sky-400">Pocket Starter</span></h3>
+    <h3 class="text-lg font-bold">Assinar <span id="modal-plano-nome" class="text-brand-gold">Pocket Starter</span></h3>
     <p class="text-sm text-slate-400 mt-1">Valor: <span id="modal-plano-valor" class="font-semibold text-slate-200">R$ 99,00/mês</span></p>
 
     <form id="checkout-form" class="mt-6 space-y-4">
@@ -280,25 +303,27 @@
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">Nome completo</label>
         <input required type="text" id="input-nome" placeholder="Seu nome"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-sky-400" />
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
       </div>
 
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp (com DDD)</label>
         <input required type="tel" id="input-whatsapp" placeholder="(41) 99999-9999"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-sky-400" />
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
       </div>
 
       <div>
-        <label class="block text-xs font-medium text-slate-400 mb-1.5">CPF ou E-mail</label>
-        <input required type="text" id="input-documento" placeholder="CPF ou e-mail"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-sky-400" />
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">CPF ou CNPJ</label>
+        <input required type="text" id="input-documento" placeholder="Só números"
+          inputmode="numeric" maxlength="18"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
+        <p class="text-[11px] text-slate-500 mt-1">Necessário para gerar a cobrança no pagamento.</p>
       </div>
 
       <div id="campo-voucher" class="hidden">
         <label class="block text-xs font-medium text-slate-400 mb-1.5">Código do Voucher <span class="text-slate-600">(opcional)</span></label>
         <input type="text" id="input-voucher" placeholder="Ex.: BARBER-8912"
-          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono focus:outline-none focus:border-cyan-300" />
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm font-mono focus:outline-none focus:border-brand-gold" />
       </div>
 
       <div id="modal-feedback" class="hidden text-sm rounded-lg px-3.5 py-2.5"></div>
@@ -313,7 +338,7 @@
 </div>
 
 <!-- ============ FAQ ============ -->
-<section id="faq" class="py-20 border-t border-slate-800">
+<section id="faq" class="py-20 border-t border-brand-gold/10">
   <div class="max-w-3xl mx-auto px-5">
     <h2 class="text-2xl sm:text-3xl font-bold text-center mb-10">Perguntas frequentes</h2>
 
@@ -321,7 +346,7 @@
       <details class="group bg-slate-800/50 border border-slate-700 rounded-xl px-5 py-4">
         <summary class="cursor-pointer font-medium flex justify-between items-center list-none">
           O que acontece se eu passar do limite de lançamentos do meu plano?
-          <span class="text-sky-400 group-open:rotate-45 transition">+</span>
+          <span class="text-brand-gold group-open:rotate-45 transition">+</span>
         </summary>
         <p class="text-sm text-slate-400 mt-3">A gente te avisa antes de chegar no limite e você pode migrar pro plano seguinte a qualquer momento, sem perder histórico.</p>
       </details>
@@ -329,7 +354,7 @@
       <details class="group bg-slate-800/50 border border-slate-700 rounded-xl px-5 py-4">
         <summary class="cursor-pointer font-medium flex justify-between items-center list-none">
           Posso trocar de plano depois?
-          <span class="text-sky-400 group-open:rotate-45 transition">+</span>
+          <span class="text-brand-gold group-open:rotate-45 transition">+</span>
         </summary>
         <p class="text-sm text-slate-400 mt-3">Sim, é só falar com a gente pelo WhatsApp. A troca vale a partir do próximo ciclo de cobrança.</p>
       </details>
@@ -337,7 +362,7 @@
       <details class="group bg-slate-800/50 border border-slate-700 rounded-xl px-5 py-4">
         <summary class="cursor-pointer font-medium flex justify-between items-center list-none">
           Meus dados financeiros estão seguros?
-          <span class="text-sky-400 group-open:rotate-45 transition">+</span>
+          <span class="text-brand-gold group-open:rotate-45 transition">+</span>
         </summary>
         <p class="text-sm text-slate-400 mt-3">Cada cliente tem sua própria planilha isolada, acessível só por você e pela Interali. Nada é compartilhado entre clientes.</p>
       </details>
@@ -345,7 +370,7 @@
       <details class="group bg-slate-800/50 border border-slate-700 rounded-xl px-5 py-4">
         <summary class="cursor-pointer font-medium flex justify-between items-center list-none">
           Preciso instalar algum aplicativo?
-          <span class="text-sky-400 group-open:rotate-45 transition">+</span>
+          <span class="text-brand-gold group-open:rotate-45 transition">+</span>
         </summary>
         <p class="text-sm text-slate-400 mt-3">Não. Tudo funciona dentro do WhatsApp que você já usa — sem app novo, sem senha nova.</p>
       </details>
@@ -353,7 +378,7 @@
       <details class="group bg-slate-800/50 border border-slate-700 rounded-xl px-5 py-4">
         <summary class="cursor-pointer font-medium flex justify-between items-center list-none">
           Tem período de teste ou garantia?
-          <span class="text-sky-400 group-open:rotate-45 transition">+</span>
+          <span class="text-brand-gold group-open:rotate-45 transition">+</span>
         </summary>
         <p class="text-sm text-slate-400 mt-3">Fale com a gente pelo WhatsApp — em alguns casos liberamos um voucher de teste individual com condição especial.</p>
       </details>
@@ -362,10 +387,13 @@
 </section>
 
 <!-- ============ FOOTER ============ -->
-<footer class="border-t border-slate-800 py-10">
+<footer class="border-t border-brand-gold/20 py-10">
   <div class="max-w-6xl mx-auto px-5 flex flex-col md:flex-row items-center justify-between gap-4">
-    <p class="text-sm font-semibold">Interali <span class="text-sky-400">Pocket</span></p>
-    <p class="text-xs text-slate-500">© 2026 Interali Pocket. Todos os direitos reservados.</p>
+    <div class="flex items-center gap-3">
+      <img src="/logo.jpg" alt="Interali" class="h-9 w-9 rounded-full object-cover" />
+      <p class="text-sm font-semibold">Interali <span class="text-brand-gold">Pocket</span></p>
+    </div>
+    <p class="text-xs text-slate-500">© 2026 Interali. Todos os direitos reservados.</p>
     <a href="https://wa.me/5541987885732" target="_blank" rel="noopener" class="text-sm text-green-400 hover:text-green-300">Falar no WhatsApp</a>
   </div>
 </footer>
@@ -373,16 +401,6 @@
 <script>
 (function () {
   "use strict";
-
-  // ── Preencha os links de pagamento do Asaas aqui assim que existirem (um por plano).
-  // Enquanto estiverem vazios, o checkout captura o lead e avisa a Interali pelo WhatsApp
-  // em vez de redirecionar — nada quebra, só fica manual até isso ser configurado.
-  var ASAAS_LINKS = {
-    starter: "",
-    pro: "",
-    business: "",
-    teste: ""
-  };
 
   var PLANOS = {
     starter:  { nome: "Pocket Starter",  valorTexto: "R$ 99,00/mês" },
@@ -486,12 +504,9 @@
           return;
         }
 
-        var planoFinalId = r.dados.plano && r.dados.plano.id ? r.dados.plano.id : planoId;
-        var linkAsaas = ASAAS_LINKS[planoFinalId];
-
-        if (linkAsaas) {
-          submitBtn.textContent = "Redirecionando...";
-          window.location.href = linkAsaas;
+        if (r.dados.redirectUrl) {
+          submitBtn.textContent = "Redirecionando para pagamento...";
+          window.location.href = r.dados.redirectUrl;
           return;
         }
 

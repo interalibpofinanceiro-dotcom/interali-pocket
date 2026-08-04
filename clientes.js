@@ -105,6 +105,22 @@ async function buscarClientePorNumero(numeroWhatsapp) {
   return clientes.find((cliente) => candidatos.includes(cliente.numeroWhatsapp) && cliente.ativo) || null;
 }
 
+// Cria a planilha individual do cliente do zero, já com o nome dele no título — usada no
+// fluxo automático de ativação (pagamento confirmado no Asaas), pra não depender do Aroldo
+// criar manualmente. Como a service account cria a planilha, ela já nasce dona/editora dela,
+// sem precisar de nenhum passo extra de compartilhamento.
+async function criarPlanilhaCliente(nomeCliente) {
+  const sheets = getSheetsClient();
+
+  const resposta = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title: `Interali Pocket — ${nomeCliente}` },
+    },
+  });
+
+  return resposta.data.spreadsheetId;
+}
+
 async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
@@ -156,4 +172,5 @@ module.exports = {
   buscarClientePorNumero,
   adicionarCliente,
   desativarCliente,
+  criarPlanilhaCliente,
 };

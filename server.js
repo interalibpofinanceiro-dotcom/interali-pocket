@@ -23,13 +23,20 @@ const {
   projetarFluxoDeCaixa,
   formatarProjecao,
 } = require('./reconciliacao');
-const { buscarClientePorNumero, listarClientesAtivos } = require('./clientes');
+const { buscarClientePorNumero, listarClientesAtivos, adicionarCliente, criarPlanilhaCliente } = require('./clientes');
 const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
   buscarMidiaBase64,
 } = require('./evolution');
-const { validarVoucher, queimarVoucher, registrarAssinatura } = require('./vendas');
+const {
+  validarVoucher,
+  queimarVoucher,
+  registrarAssinatura,
+  buscarAssinaturaPorSubscription,
+  ativarAssinatura,
+} = require('./vendas');
+const { buscarOuCriarCliente, criarAssinatura, buscarLinkPagamento } = require('./asaas');
 
 const app = express();
 
@@ -40,6 +47,9 @@ app.use((req, _res, next) => {
   console.log(`Requisição recebida: ${req.method} ${req.originalUrl}`);
   next();
 });
+
+// Assets estáticos da landing page (logo etc.) — ex.: public/logo.jpg fica em /logo.jpg.
+app.use(express.static(path.join(__dirname, 'public')));
 
 // type: '*/*' porque nem toda implementação de webhook manda o header Content-Type
 // exatamente como "application/json" — sem isso, o body chegaria vazio silenciosamente.
@@ -355,14 +365,20 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// Recebe o formulário de checkout da landing page (index.html). Ainda não existe integração
-// real com o Asaas (falta decidir API key vs. links de pagamento estáticos por plano) — por
-// enquanto, registra o pedido na planilha mestre e avisa o admin pelo WhatsApp pra fechamento manual.
+// Recebe o formulário de checkout da landing page (index.html), cria a cobrança recorrente
+// de verdade no Asaas e devolve o link de pagamento hospedado pra redirecionar o cliente.
+// A ativação em si (liberar o número no bot) só acontece depois, no /webhook-asaas, quando
+// o Asaas confirma que o pagamento entrou — nunca no momento do formulário.
 app.post('/api/assinar', async (req, res) => {
   const { nome, whatsapp, documento, planoId, voucher } = req.body || {};
 
   if (!nome || !whatsapp || !documento || !planoId) {
-    return res.status(400).json({ ok: false, erro: 'Preencha nome, WhatsApp, CPF/e-mail e escolha um plano.' });
+    return res.status(400).json({ ok: false, erro: 'Preencha nome, WhatsApp, CPF/CNPJ e escolha um plano.' });
+  }
+
+  const documentoLimpo = documento.replace(/\D/g, '');
+  if (documentoLimpo.length !== 11 && documentoLimpo.length !== 14) {
+    return res.status(400).json({ ok: false, erro: 'CPF ou CNPJ inválido. Confira os números e tente de novo.' });
   }
 
   const planoOficial = PLANOS[planoId];
@@ -386,34 +402,125 @@ app.post('/api/assinar', async (req, res) => {
     if (!voucherValido) {
       return res.status(400).json({ ok: false, erro: 'Esse voucher é inválido ou já foi utilizado. Você pode assinar sem o voucher, no valor normal do plano.' });
     }
+    // Só confere disponibilidade aqui — o voucher só é de fato "queimado" quando o pagamento
+    // é confirmado (/webhook-asaas), pra não desperdiçar o código se o cliente nunca pagar.
     planoFinal = PLANOS.teste;
     voucherAplicado = codigoVoucher.toUpperCase();
-    await queimarVoucher(voucherAplicado, `${nome} (${numeroFormatado})`);
+  }
+
+  let linkPagamento;
+  let subscriptionId;
+
+  try {
+    const customerId = await buscarOuCriarCliente({ nome, cpfCnpj: documentoLimpo, telefone: numeroFormatado });
+    const assinatura = await criarAssinatura({
+      customerId,
+      valor: planoFinal.valor,
+      descricao: `Interali Pocket - ${planoFinal.nome}`,
+      referenciaExterna: `pocket-${Date.now()}`,
+    });
+    subscriptionId = assinatura.id;
+    linkPagamento = await buscarLinkPagamento(subscriptionId);
+
+    if (!linkPagamento) {
+      throw new Error('Asaas não retornou o link de pagamento da primeira fatura.');
+    }
+  } catch (error) {
+    console.error('Erro ao criar cobrança no Asaas:', error.message);
+    return res.status(500).json({ ok: false, erro: 'Não consegui gerar o link de pagamento agora. Tente novamente em instantes ou fale com a gente no WhatsApp.' });
   }
 
   try {
     await registrarAssinatura({
       nome,
       whatsapp: numeroFormatado,
-      documento,
+      documento: documentoLimpo,
       plano: planoFinal.nome,
       valor: planoFinal.valor,
       voucher: voucherAplicado,
+      asaasSubscriptionId: subscriptionId,
     });
   } catch (error) {
-    console.error('Erro ao registrar assinatura:', error.message);
-    return res.status(500).json({ ok: false, erro: 'Não consegui registrar seu pedido agora. Tente novamente em instantes.' });
+    // A cobrança no Asaas já foi criada e o link já existe — não bloqueia o cliente por causa
+    // de uma falha só no registro interno, só loga pra investigar depois.
+    console.error('Erro ao registrar assinatura na planilha (cobrança no Asaas já foi criada):', error.message);
   }
 
   if (ADMIN_WHATSAPP_NUMBER) {
     const linhaVoucher = voucherAplicado ? `\n🎟️ Voucher: ${voucherAplicado}` : '';
     await enviarMensagemWhatsApp(
       ADMIN_WHATSAPP_NUMBER,
-      `💰 Nova assinatura no site do Interali Pocket!\n\n👤 ${nome}\n📱 ${numeroFormatado}\n🪪 ${documento}\n📋 Plano: ${planoFinal.nome} (R$ ${planoFinal.valor.toFixed(2)})${linhaVoucher}\n\nEntra em contato pra fechar o pagamento.`
+      `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${planoFinal.nome} (R$ ${planoFinal.valor.toFixed(2)})${linhaVoucher}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
     ).catch((erro) => console.error('Falha ao notificar admin sobre assinatura:', erro.message));
   }
 
-  res.json({ ok: true, plano: planoFinal });
+  res.json({ ok: true, plano: planoFinal, redirectUrl: linkPagamento });
+});
+
+// Webhook do Asaas — configurado manualmente no painel dele (Configurações > Integrações >
+// Webhooks), apontando pra esta URL com o token abaixo. Confirma pagamento e ativa o cliente
+// sozinho: cria a planilha individual dele e libera o número no bot, sem intervenção manual.
+app.post('/webhook-asaas', async (req, res) => {
+  const tokenRecebido = req.headers['asaas-access-token'];
+  if (!process.env.ASAAS_WEBHOOK_TOKEN || tokenRecebido !== process.env.ASAAS_WEBHOOK_TOKEN) {
+    console.error('Webhook do Asaas recebido com token inválido ou ausente.');
+    return res.sendStatus(401);
+  }
+
+  const body = req.body || {};
+  const evento = body.event;
+  const pagamento = body.payment || {};
+
+  console.log(`Webhook Asaas recebido | event=${evento} | subscription=${pagamento.subscription}`);
+
+  const eventosDePagamentoConfirmado = ['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'];
+  if (!eventosDePagamentoConfirmado.includes(evento) || !pagamento.subscription) {
+    return res.sendStatus(200);
+  }
+
+  try {
+    const assinatura = await buscarAssinaturaPorSubscription(pagamento.subscription);
+
+    if (!assinatura) {
+      console.error(`Webhook Asaas: nenhuma assinatura encontrada pra subscription ${pagamento.subscription}`);
+      return res.sendStatus(200);
+    }
+
+    if (assinatura.status === 'Ativo') {
+      // Asaas reenvia webhook em caso de dúvida de entrega — evita ativar/avisar duas vezes.
+      return res.sendStatus(200);
+    }
+
+    const sheetIdNovo = await criarPlanilhaCliente(assinatura.nome);
+    await adicionarCliente(assinatura.whatsapp, assinatura.nome, sheetIdNovo);
+    await ativarAssinatura(assinatura.numeroLinha, sheetIdNovo);
+
+    if (assinatura.voucher) {
+      await queimarVoucher(assinatura.voucher, `${assinatura.nome} (${assinatura.whatsapp})`);
+    }
+
+    await enviarMensagemWhatsApp(
+      assinatura.whatsapp,
+      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.\n\n` +
+      '📸 Mande a foto de um comprovante, nota fiscal ou recibo pra eu registrar.\n' +
+      '🏦 Mande o extrato do banco escrevendo "extrato" na legenda, pra eu conciliar.\n' +
+      '🧾 Mande boleto ou fatura de cartão escrevendo "boleto" ou "cartão + nome do banco" na legenda.\n' +
+      '💬 Pergunte "resumo do mês" ou "previsão" quando quiser ver seus relatórios.\n\n' +
+      'Qualquer dúvida, é só perguntar por aqui mesmo!'
+    ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
+
+    if (ADMIN_WHATSAPP_NUMBER) {
+      await enviarMensagemWhatsApp(
+        ADMIN_WHATSAPP_NUMBER,
+        `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${assinatura.whatsapp}\n📋 ${assinatura.plano}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
+      ).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática:', erro.message));
+    }
+
+    res.sendStatus(200);
+  } catch (error) {
+    console.error('Erro ao processar webhook do Asaas:', error.message);
+    res.sendStatus(200); // 200 mesmo em erro interno, pra evitar reenvio infinito do Asaas
+  }
 });
 
 app.listen(PORT, () => {

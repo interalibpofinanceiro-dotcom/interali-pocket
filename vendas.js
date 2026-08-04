@@ -5,7 +5,9 @@ const ABA_VOUCHERS = 'Vouchers';
 const CABECALHO_VOUCHERS = ['Codigo', 'Descricao', 'Usado', 'UsadoPor', 'UsadoEm', 'CriadoEm'];
 
 const ABA_ASSINATURAS = 'Assinaturas';
-const CABECALHO_ASSINATURAS = ['Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'Status', 'CriadoEm'];
+const CABECALHO_ASSINATURAS = [
+  'Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'AsaasSubscriptionId', 'Status', 'ClienteSheetId', 'CriadoEm',
+];
 
 function getAuthClient() {
   const privateKey = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
@@ -103,21 +105,67 @@ async function criarVoucher(codigo, descricao) {
   });
 }
 
-// Registra o pedido de assinatura vindo da landing page — não é o cliente ativo ainda
-// (isso só acontece quando o Aroldo roda cadastrar-cliente.js depois de confirmar o pagamento).
-async function registrarAssinatura({ nome, whatsapp, documento, plano, valor, voucher }) {
+// Registra o pedido de assinatura vindo da landing page — não é o cliente ativo ainda.
+// Ativação acontece sozinha quando o webhook do Asaas confirma o pagamento (ver ativarAssinatura).
+async function registrarAssinatura({ nome, whatsapp, documento, plano, valor, voucher, asaasSubscriptionId }) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_ASSINATURAS}!A:H`,
+    range: `${ABA_ASSINATURAS}!A:J`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
-      values: [[nome || '', whatsapp || '', documento || '', plano || '', valor || 0, voucher || '', 'Aguardando contato', new Date().toISOString()]],
+      values: [[
+        nome || '', whatsapp || '', documento || '', plano || '', valor || 0, voucher || '',
+        asaasSubscriptionId || '', 'Aguardando pagamento', '', new Date().toISOString(),
+      ]],
     },
+  });
+}
+
+// Localiza a linha da assinatura pelo ID da assinatura no Asaas — é assim que o webhook
+// de pagamento confirmado sabe qual pedido da landing page ele está confirmando.
+async function buscarAssinaturaPorSubscription(asaasSubscriptionId) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:J` });
+  const linhas = resposta.data.values || [];
+  const indice = linhas.findIndex((linha) => (linha[6] || '').trim() === asaasSubscriptionId);
+
+  if (indice === -1) return null;
+
+  const linha = linhas[indice];
+  return {
+    numeroLinha: indice + 2, // +2: busca começou em A2
+    nome: linha[0] || '',
+    whatsapp: linha[1] || '',
+    documento: linha[2] || '',
+    plano: linha[3] || '',
+    valor: Number(linha[4]) || 0,
+    voucher: linha[5] || '',
+    asaasSubscriptionId: linha[6] || '',
+    status: linha[7] || '',
+    clienteSheetId: linha[8] || '',
+  };
+}
+
+// Marca a assinatura como ativada e guarda o ID da planilha individual criada pro cliente —
+// idempotente por natureza (buscarAssinaturaPorSubscription reflete o status atual, e quem
+// chama isso confere status antes, então reenvios do mesmo webhook não duplicam a ativação).
+async function ativarAssinatura(numeroLinha, clienteSheetId) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_ASSINATURAS}!H${numeroLinha}:I${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [['Ativo', clienteSheetId]] },
   });
 }
 
@@ -126,4 +174,6 @@ module.exports = {
   queimarVoucher,
   criarVoucher,
   registrarAssinatura,
+  buscarAssinaturaPorSubscription,
+  ativarAssinatura,
 };
