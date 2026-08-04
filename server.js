@@ -337,5 +337,5 @@ app.get('/', (_req, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor Interali Pocket rodando na porta ${PORT}`);
   console.log(`Webhook: POST http://localhost:${PORT}/webhook`);
-  console.log(`Instância Evolution configurada: ${EVOLUTION_INSTANCE}`);
+  console.log(`Instância Evolution configurada: ${process.env.EVOLUTION_INSTANCE}`);
 });
