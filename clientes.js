@@ -14,12 +14,16 @@ function getAuthClient() {
     process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
     null,
     privateKey,
-    ['https://www.googleapis.com/auth/spreadsheets']
+    ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
   );
 }
 
 function getSheetsClient() {
   return google.sheets({ version: 'v4', auth: getAuthClient() });
+}
+
+function getDriveClient() {
+  return google.drive({ version: 'v3', auth: getAuthClient() });
 }
 
 async function garantirAbaComCabecalho(sheets, spreadsheetId) {
@@ -105,20 +109,40 @@ async function buscarClientePorNumero(numeroWhatsapp) {
   return clientes.find((cliente) => candidatos.includes(cliente.numeroWhatsapp) && cliente.ativo) || null;
 }
 
-// Cria a planilha individual do cliente do zero, já com o nome dele no título — usada no
-// fluxo automático de ativação (pagamento confirmado no Asaas), pra não depender do Aroldo
-// criar manualmente. Como a service account cria a planilha, ela já nasce dona/editora dela,
-// sem precisar de nenhum passo extra de compartilhamento.
+// Reserva a planilha individual do cliente a partir de um "estoque" de planilhas em branco
+// pré-criadas na pasta CLIENTES (nomeadas "TEMPLATE-VAZIO" ou variações tipo "Cópia de
+// TEMPLATE-VAZIO"), em vez de criar uma nova do zero. Necessário porque a conta de serviço
+// não tem espaço próprio no Drive (0 bytes de quota — normal fora do Google Workspace) e,
+// numa conta pessoal, isso vale mesmo pra arquivos criados dentro de uma pasta compartilhada
+// (esse truque só funciona em Shared Drives do Workspace). Editar um arquivo que já existe,
+// porém, funciona normalmente — é o que o resto do sistema já faz o tempo todo.
 async function criarPlanilhaCliente(nomeCliente) {
-  const sheets = getSheetsClient();
+  const pastaClientes = process.env.GOOGLE_DRIVE_FOLDER_ID;
 
-  const resposta = await sheets.spreadsheets.create({
-    requestBody: {
-      properties: { title: `Interali Pocket — ${nomeCliente}` },
-    },
+  if (!pastaClientes) {
+    throw new Error('GOOGLE_DRIVE_FOLDER_ID não configurado — sem isso não dá pra localizar o estoque de planilhas em branco.');
+  }
+
+  const drive = getDriveClient();
+
+  const disponiveis = await drive.files.list({
+    q: `'${pastaClientes}' in parents and name contains 'TEMPLATE' and trashed = false`,
+    fields: 'files(id,name)',
+    orderBy: 'name',
+    pageSize: 1,
   });
 
-  return resposta.data.spreadsheetId;
+  const template = disponiveis.data.files && disponiveis.data.files[0];
+  if (!template) {
+    throw new Error('Estoque de planilhas em branco (TEMPLATE-VAZIO) na pasta CLIENTES está vazio. Crie mais cópias em branco lá antes de tentar de novo.');
+  }
+
+  await drive.files.update({
+    fileId: template.id,
+    requestBody: { name: `Interali Pocket — ${nomeCliente}` },
+  });
+
+  return template.id;
 }
 
 async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
