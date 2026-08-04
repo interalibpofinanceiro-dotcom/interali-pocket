@@ -322,10 +322,22 @@ function formatarProjecao(projecao) {
   return linhas.join('\n');
 }
 
+// Upsell do Plano com Especialista, anexado ao final do resumo MENSAL — só pra clientes que
+// ainda não têm o upgrade (Plano_Especialista=FALSE na planilha mestre). Usa os mesmos totais
+// já calculados no resumo, sem reprocessar nada.
+function formatarUpsellEspecialista(resumo) {
+  return (
+    `\n\n💰 Sua empresa faturou ${formatarMoeda(resumo.totaisAtuais.entradas)} e teve ${formatarMoeda(resumo.totaisAtuais.saidas)} em custos este mês.\n\n` +
+    'Que tal fazermos uma reunião rápida de 30 minutos via Google Meet para analisar sua margem e definir metas para o próximo mês?\n\n' +
+    '👉 Faça o upgrade para o Plano com Especialista por apenas +R$ 200,00/mês. Responda esta mensagem para ativar!'
+  );
+}
+
 module.exports = {
   reconciliar,
   gerarResumo,
   formatarResumo,
+  formatarUpsellEspecialista,
   obterSaldoAtual,
   filtrarContasEmAberto,
   projetarFluxoDeCaixa,

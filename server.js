@@ -18,6 +18,7 @@ const {
 const {
   gerarResumo,
   formatarResumo,
+  formatarUpsellEspecialista,
   obterSaldoAtual,
   filtrarContasEmAberto,
   projetarFluxoDeCaixa,
@@ -96,11 +97,13 @@ function montarMensagemBoasVindas(nome) {
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
 const PLANOS = {
-  starter: { id: 'starter', nome: 'Pocket Starter', valor: 99.0, limite: 300 },
-  pro: { id: 'pro', nome: 'Pocket Pro', valor: 169.0, limite: 600 },
-  business: { id: 'business', nome: 'Pocket Business', valor: 249.0, limite: 1000 },
+  starter: { id: 'starter', nome: 'Pocket Starter', valor: 149.0, limite: 300 },
+  pro: { id: 'pro', nome: 'Pocket Pro', valor: 249.0, limite: 600 },
+  business: { id: 'business', nome: 'Pocket Business', valor: 399.0, limite: 1000 },
   teste: { id: 'teste', nome: 'Pocket Teste (Voucher)', valor: 49.9, limite: 300 },
 };
+
+const ESPECIALISTA_ADICIONAL = 200.0; // Análise Mensal com Especialista — soma ao valor de qualquer plano
 
 // Aceita o número digitado em qualquer formato ((41) 99999-9999, 41999999999 etc.) e
 // normaliza pro padrão "whatsapp:+55DDXXXXXXXXX" usado no resto do sistema.
@@ -329,7 +332,8 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
         const resumo = gerarResumo(lancamentos, extrato, { periodo });
-        await enviarMensagemWhatsApp(remetente, formatarResumo(resumo));
+        const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
+        await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
       } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
         const dias = corpoLower.includes('semana') ? 7 : 30;
         const projecao = await gerarProjecao(sheetId, dias);
@@ -393,7 +397,8 @@ app.all('/tarefas/relatorio/:periodo', async (req, res) => {
         buscarExtrato(cliente.sheetId),
       ]);
       const resumo = gerarResumo(lancamentos, extrato, { periodo });
-      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarResumo(resumo));
+      const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
+      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarResumo(resumo) + upsell);
       resultados.push(cliente.numeroWhatsapp);
     }
 
@@ -440,7 +445,8 @@ app.get('/', (_req, res) => {
 // A ativação em si (liberar o número no bot) só acontece depois, no /webhook-asaas, quando
 // o Asaas confirma que o pagamento entrou — nunca no momento do formulário.
 app.post('/api/assinar', async (req, res) => {
-  const { nome, whatsapp, documento, planoId, voucher } = req.body || {};
+  const { nome, whatsapp, documento, planoId, voucher, upgradeEspecialista } = req.body || {};
+  const comEspecialista = upgradeEspecialista === true;
 
   if (!nome || !whatsapp || !documento || !planoId) {
     return res.status(400).json({ ok: false, erro: 'Preencha nome, WhatsApp, CPF/CNPJ e escolha um plano.' });
@@ -465,7 +471,7 @@ app.post('/api/assinar', async (req, res) => {
     // Voucher só se aplica junto com o plano Starter — nos outros planos, o valor do voucher
     // não faz sentido (ex.: alguém pagando Business não deveria cair pro tier de teste).
     if (planoId !== 'starter') {
-      return res.status(400).json({ ok: false, erro: 'O voucher só pode ser usado ao assinar o plano Pocket Starter (R$ 99,00).' });
+      return res.status(400).json({ ok: false, erro: 'O voucher só pode ser usado ao assinar o plano Pocket Starter (R$ 149,00).' });
     }
 
     const voucherValido = await validarVoucher(codigoVoucher);
@@ -478,6 +484,9 @@ app.post('/api/assinar', async (req, res) => {
     voucherAplicado = codigoVoucher.toUpperCase();
   }
 
+  const valorFinal = planoFinal.valor + (comEspecialista ? ESPECIALISTA_ADICIONAL : 0);
+  const nomePlanoCompleto = planoFinal.nome + (comEspecialista ? ' + Especialista' : '');
+
   let linkPagamento;
   let subscriptionId;
 
@@ -485,8 +494,8 @@ app.post('/api/assinar', async (req, res) => {
     const customerId = await buscarOuCriarCliente({ nome, cpfCnpj: documentoLimpo, telefone: numeroFormatado });
     const assinatura = await criarAssinatura({
       customerId,
-      valor: planoFinal.valor,
-      descricao: `Interali Pocket - ${planoFinal.nome}`,
+      valor: valorFinal,
+      descricao: `Interali Pocket - ${nomePlanoCompleto}`,
       referenciaExterna: `pocket-${Date.now()}`,
     });
     subscriptionId = assinatura.id;
@@ -505,10 +514,11 @@ app.post('/api/assinar', async (req, res) => {
       nome,
       whatsapp: numeroFormatado,
       documento: documentoLimpo,
-      plano: planoFinal.nome,
-      valor: planoFinal.valor,
+      plano: nomePlanoCompleto,
+      valor: valorFinal,
       voucher: voucherAplicado,
       asaasSubscriptionId: subscriptionId,
+      planoEspecialista: comEspecialista,
     });
   } catch (error) {
     // A cobrança no Asaas já foi criada e o link já existe — não bloqueia o cliente por causa
@@ -518,13 +528,14 @@ app.post('/api/assinar', async (req, res) => {
 
   if (ADMIN_WHATSAPP_NUMBER) {
     const linhaVoucher = voucherAplicado ? `\n🎟️ Voucher: ${voucherAplicado}` : '';
+    const linhaEspecialista = comEspecialista ? '\n🧑‍💼 Com Análise Mensal com Especialista' : '';
     await enviarMensagemWhatsApp(
       ADMIN_WHATSAPP_NUMBER,
-      `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${planoFinal.nome} (R$ ${planoFinal.valor.toFixed(2)})${linhaVoucher}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
+      `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${nomePlanoCompleto} (R$ ${valorFinal.toFixed(2)})${linhaVoucher}${linhaEspecialista}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
     ).catch((erro) => console.error('Falha ao notificar admin sobre assinatura:', erro.message));
   }
 
-  res.json({ ok: true, plano: planoFinal, redirectUrl: linkPagamento });
+  res.json({ ok: true, plano: { ...planoFinal, nome: nomePlanoCompleto, valor: valorFinal }, redirectUrl: linkPagamento });
 });
 
 // Webhook do Asaas — configurado manualmente no painel dele (Configurações > Integrações >
@@ -562,22 +573,27 @@ app.post('/webhook-asaas', async (req, res) => {
     }
 
     const sheetIdNovo = await criarPlanilhaCliente(assinatura.nome);
-    await adicionarCliente(assinatura.whatsapp, assinatura.nome, sheetIdNovo);
+    await adicionarCliente(assinatura.whatsapp, assinatura.nome, sheetIdNovo, assinatura.planoEspecialista);
     await ativarAssinatura(assinatura.numeroLinha, sheetIdNovo);
 
     if (assinatura.voucher) {
       await queimarVoucher(assinatura.voucher, `${assinatura.nome} (${assinatura.whatsapp})`);
     }
 
+    const linhaReuniao = assinatura.planoEspecialista
+      ? '\n\n🧑‍💼 Sua Análise Mensal com Especialista também foi ativada — em breve alguém da equipe entra em contato por aqui mesmo pra agendar a primeira Reunião Online de 50min.'
+      : '';
+
     await enviarMensagemWhatsApp(
       assinatura.whatsapp,
-      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.\n\n` + montarMensagemBoasVindas(assinatura.nome)
+      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.${linhaReuniao}\n\n` + montarMensagemBoasVindas(assinatura.nome)
     ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
 
     if (ADMIN_WHATSAPP_NUMBER) {
+      const avisoEspecialista = assinatura.planoEspecialista ? '\n🧑‍💼 Com Especialista — agendar a reunião de diagnóstico com esse cliente!' : '';
       await enviarMensagemWhatsApp(
         ADMIN_WHATSAPP_NUMBER,
-        `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${assinatura.whatsapp}\n📋 ${assinatura.plano}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
+        `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${assinatura.whatsapp}\n📋 ${assinatura.plano}${avisoEspecialista}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
       ).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática:', erro.message));
     }
 

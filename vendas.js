@@ -6,7 +6,7 @@ const CABECALHO_VOUCHERS = ['Codigo', 'Descricao', 'Usado', 'UsadoPor', 'UsadoEm
 
 const ABA_ASSINATURAS = 'Assinaturas';
 const CABECALHO_ASSINATURAS = [
-  'Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'AsaasSubscriptionId', 'Status', 'ClienteSheetId', 'CriadoEm',
+  'Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'AsaasSubscriptionId', 'Status', 'ClienteSheetId', 'CriadoEm', 'PlanoEspecialista',
 ];
 
 function getAuthClient() {
@@ -41,6 +41,15 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${nomeAba}!A1:${ultimaColuna}1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [cabecalho] },
+    });
+  } else if (resposta.data.values[0].length < cabecalho.length) {
+    // Migração leve: aba já existia com menos colunas do que o cabeçalho atual prevê
+    // (ex.: coluna nova adicionada depois que a aba já estava em uso).
     await sheets.spreadsheets.values.update({
       spreadsheetId,
       range: `${nomeAba}!A1:${ultimaColuna}1`,
@@ -107,20 +116,21 @@ async function criarVoucher(codigo, descricao) {
 
 // Registra o pedido de assinatura vindo da landing page — não é o cliente ativo ainda.
 // Ativação acontece sozinha quando o webhook do Asaas confirma o pagamento (ver ativarAssinatura).
-async function registrarAssinatura({ nome, whatsapp, documento, plano, valor, voucher, asaasSubscriptionId }) {
+async function registrarAssinatura({ nome, whatsapp, documento, plano, valor, voucher, asaasSubscriptionId, planoEspecialista }) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_ASSINATURAS}!A:J`,
+    range: `${ABA_ASSINATURAS}!A:K`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
       values: [[
         nome || '', whatsapp || '', documento || '', plano || '', valor || 0, voucher || '',
         asaasSubscriptionId || '', 'Aguardando pagamento', '', new Date().toISOString(),
+        planoEspecialista ? 'TRUE' : 'FALSE',
       ]],
     },
   });
@@ -133,7 +143,7 @@ async function buscarAssinaturaPorSubscription(asaasSubscriptionId) {
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
-  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:J` });
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:K` });
   const linhas = resposta.data.values || [];
   const indice = linhas.findIndex((linha) => (linha[6] || '').trim() === asaasSubscriptionId);
 
@@ -151,6 +161,7 @@ async function buscarAssinaturaPorSubscription(asaasSubscriptionId) {
     asaasSubscriptionId: linha[6] || '',
     status: linha[7] || '',
     clienteSheetId: linha[8] || '',
+    planoEspecialista: (linha[10] || '').toString().trim().toUpperCase() === 'TRUE',
   };
 }
 

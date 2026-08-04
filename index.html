@@ -227,10 +227,10 @@
     <div id="planos-grid" class="grid md:grid-cols-3 gap-6">
 
       <!-- Starter -->
-      <div class="rounded-2xl border border-slate-700 bg-slate-800/50 p-7 flex flex-col">
+      <div class="plano-card rounded-2xl border border-slate-700 bg-slate-800/50 p-7 flex flex-col">
         <h3 class="font-semibold text-lg">Pocket Starter</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para barbearias e salões</p>
-        <p class="mt-5"><span class="text-3xl font-extrabold">R$ 99</span><span class="text-slate-400 text-sm">,00/mês</span></p>
+        <p class="mt-5"><span class="text-3xl font-extrabold preco-valor" data-plano="starter">R$ 149</span><span class="text-slate-400 text-sm">,00/mês</span></p>
         <p class="text-sm text-brand-gold font-medium mt-1">Até 300 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Leitura de comprovantes por IA</li>
@@ -238,18 +238,30 @@
           <li class="flex gap-2"><span class="text-green-400">✓</span> Consultas em linguagem natural</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Relatórios semanais e mensais</li>
         </ul>
+
+        <div class="mt-6 pt-5 border-t border-slate-700/60">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-slate-300">Incluir Análise Mensal com Especialista <span class="text-brand-gold whitespace-nowrap">(+R$ 200,00/mês)</span></span>
+            <button type="button" class="btn-toggle-especialista relative inline-flex h-6 w-11 shrink-0 items-center rounded-full bg-slate-700 transition" data-plano="starter" aria-pressed="false">
+              <span class="toggle-knob inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white transition"></span>
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-2">Para donos de negócio que querem parar de pagar contas no escuro e precisam de um especialista olhando os números junto com eles uma vez por mês (1 Reunião Online de 50min incluso).</p>
+          <p class="badge-especialista hidden mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-green-400">✓ Reunião de 50min com Especialista Ativada</p>
+        </div>
+
         <button data-plano="starter"
-          class="btn-assinar mt-7 w-full bg-slate-100 hover:bg-white text-slate-900 font-semibold py-3 rounded-full transition">
+          class="btn-assinar texto-btn mt-6 w-full bg-slate-100 hover:bg-white text-slate-900 font-semibold py-3 rounded-full transition">
           Assinar Starter
         </button>
       </div>
 
       <!-- Pro (destaque) -->
-      <div class="relative rounded-2xl border-2 border-brand-gold bg-slate-800/50 p-7 flex flex-col md:-translate-y-3 shadow-xl shadow-brand-gold/10">
+      <div class="plano-card relative rounded-2xl border-2 border-brand-gold bg-slate-800/50 p-7 flex flex-col md:-translate-y-3 shadow-xl shadow-brand-gold/10">
         <span class="absolute -top-3 left-1/2 -translate-x-1/2 bg-brand-gold text-brand-tealDark text-xs font-bold px-3 py-1 rounded-full">MAIS ESCOLHIDO</span>
         <h3 class="font-semibold text-lg">Pocket Pro</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para estabelecimentos médios/equipes</p>
-        <p class="mt-5"><span class="text-3xl font-extrabold">R$ 169</span><span class="text-slate-400 text-sm">,00/mês</span></p>
+        <p class="mt-5"><span class="text-3xl font-extrabold preco-valor" data-plano="pro">R$ 249</span><span class="text-slate-400 text-sm">,00/mês</span></p>
         <p class="text-sm text-brand-gold font-medium mt-1">Até 600 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Tudo do Starter</li>
@@ -257,17 +269,29 @@
           <li class="flex gap-2"><span class="text-green-400">✓</span> Contas a pagar e previsão de caixa</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Suporte prioritário</li>
         </ul>
+
+        <div class="mt-6 pt-5 border-t border-slate-700/60">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-slate-300">Incluir Análise Mensal com Especialista <span class="text-brand-gold whitespace-nowrap">(+R$ 200,00/mês)</span></span>
+            <button type="button" class="btn-toggle-especialista relative inline-flex h-6 w-11 shrink-0 items-center rounded-full bg-slate-700 transition" data-plano="pro" aria-pressed="false">
+              <span class="toggle-knob inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white transition"></span>
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-2">Para donos de negócio que querem parar de pagar contas no escuro e precisam de um especialista olhando os números junto com eles uma vez por mês (1 Reunião Online de 50min incluso).</p>
+          <p class="badge-especialista hidden mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-green-400">✓ Reunião de 50min com Especialista Ativada</p>
+        </div>
+
         <button data-plano="pro"
-          class="btn-assinar mt-7 w-full bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold py-3 rounded-full transition">
+          class="btn-assinar texto-btn mt-6 w-full bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold py-3 rounded-full transition">
           Assinar Pro
         </button>
       </div>
 
       <!-- Business -->
-      <div class="rounded-2xl border border-slate-700 bg-slate-800/50 p-7 flex flex-col">
+      <div class="plano-card rounded-2xl border border-slate-700 bg-slate-800/50 p-7 flex flex-col">
         <h3 class="font-semibold text-lg">Pocket Business</h3>
         <p class="text-xs text-slate-400 mt-1">Ideal para alto volume / restaurantes / pizzarias</p>
-        <p class="mt-5"><span class="text-3xl font-extrabold">R$ 249</span><span class="text-slate-400 text-sm">,00/mês</span></p>
+        <p class="mt-5"><span class="text-3xl font-extrabold preco-valor" data-plano="business">R$ 399</span><span class="text-slate-400 text-sm">,00/mês</span></p>
         <p class="text-sm text-brand-gold font-medium mt-1">Até 1.000 lançamentos/mês</p>
         <ul class="mt-6 space-y-2.5 text-sm text-slate-300 flex-1">
           <li class="flex gap-2"><span class="text-green-400">✓</span> Tudo do Pro</li>
@@ -275,8 +299,20 @@
           <li class="flex gap-2"><span class="text-green-400">✓</span> Múltiplos cartões e fornecedores</li>
           <li class="flex gap-2"><span class="text-green-400">✓</span> Suporte prioritário</li>
         </ul>
+
+        <div class="mt-6 pt-5 border-t border-slate-700/60">
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-xs font-medium text-slate-300">Incluir Análise Mensal com Especialista <span class="text-brand-gold whitespace-nowrap">(+R$ 200,00/mês)</span></span>
+            <button type="button" class="btn-toggle-especialista relative inline-flex h-6 w-11 shrink-0 items-center rounded-full bg-slate-700 transition" data-plano="business" aria-pressed="false">
+              <span class="toggle-knob inline-block h-4 w-4 translate-x-1 transform rounded-full bg-white transition"></span>
+            </button>
+          </div>
+          <p class="text-[11px] text-slate-500 mt-2">Para donos de negócio que querem parar de pagar contas no escuro e precisam de um especialista olhando os números junto com eles uma vez por mês (1 Reunião Online de 50min incluso).</p>
+          <p class="badge-especialista hidden mt-2 inline-flex items-center gap-1.5 text-xs font-semibold text-green-400">✓ Reunião de 50min com Especialista Ativada</p>
+        </div>
+
         <button data-plano="business"
-          class="btn-assinar mt-7 w-full bg-slate-100 hover:bg-white text-slate-900 font-semibold py-3 rounded-full transition">
+          class="btn-assinar texto-btn mt-6 w-full bg-slate-100 hover:bg-white text-slate-900 font-semibold py-3 rounded-full transition">
           Assinar Business
         </button>
       </div>
@@ -295,10 +331,11 @@
     <button id="modal-close" aria-label="Fechar" class="absolute top-4 right-4 text-slate-400 hover:text-white text-xl leading-none">✕</button>
 
     <h3 class="text-lg font-bold">Assinar <span id="modal-plano-nome" class="text-brand-gold">Pocket Starter</span></h3>
-    <p class="text-sm text-slate-400 mt-1">Valor: <span id="modal-plano-valor" class="font-semibold text-slate-200">R$ 99,00/mês</span></p>
+    <p class="text-sm text-slate-400 mt-1">Valor: <span id="modal-plano-valor" class="font-semibold text-slate-200">R$ 149,00/mês</span></p>
 
     <form id="checkout-form" class="mt-6 space-y-4">
       <input type="hidden" id="modal-plano-id" value="starter" />
+      <input type="hidden" id="modal-upgrade-especialista" value="false" />
 
       <div>
         <label class="block text-xs font-medium text-slate-400 mb-1.5">Nome completo</label>
@@ -402,11 +439,46 @@
 (function () {
   "use strict";
 
+  var ESPECIALISTA_ADICIONAL = 200;
   var PLANOS = {
-    starter:  { nome: "Pocket Starter",  valorTexto: "R$ 99,00/mês" },
-    pro:      { nome: "Pocket Pro",      valorTexto: "R$ 169,00/mês" },
-    business: { nome: "Pocket Business", valorTexto: "R$ 249,00/mês" }
+    starter:  { nome: "Pocket Starter",  valor: 149 },
+    pro:      { nome: "Pocket Pro",      valor: 249 },
+    business: { nome: "Pocket Business", valor: 399 }
   };
+  var estadoEspecialista = { starter: false, pro: false, business: false };
+
+  // ── Toggle "Análise Mensal com Especialista" em cada card ──
+  document.querySelectorAll(".btn-toggle-especialista").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var planoId = btn.getAttribute("data-plano");
+      estadoEspecialista[planoId] = !estadoEspecialista[planoId];
+      atualizarCard(planoId);
+    });
+  });
+
+  function atualizarCard(planoId) {
+    var ligado = estadoEspecialista[planoId];
+    var plano = PLANOS[planoId];
+    var valorFinal = plano.valor + (ligado ? ESPECIALISTA_ADICIONAL : 0);
+    var card = document.querySelector('.btn-toggle-especialista[data-plano="' + planoId + '"]').closest(".plano-card");
+
+    card.querySelector(".preco-valor").textContent = "R$ " + valorFinal;
+
+    var toggleBtn = card.querySelector(".btn-toggle-especialista");
+    var knob = toggleBtn.querySelector(".toggle-knob");
+    toggleBtn.setAttribute("aria-pressed", ligado ? "true" : "false");
+    toggleBtn.classList.toggle("bg-green-500", ligado);
+    toggleBtn.classList.toggle("bg-slate-700", !ligado);
+    knob.classList.toggle("translate-x-6", ligado);
+    knob.classList.toggle("translate-x-1", !ligado);
+
+    card.querySelector(".badge-especialista").classList.toggle("hidden", !ligado);
+
+    var textoBtn = card.querySelector(".texto-btn");
+    textoBtn.textContent = ligado
+      ? "Assinar " + plano.nome.replace("Pocket ", "") + " + Especialista por R$ " + valorFinal + "/mês"
+      : "Assinar " + plano.nome.replace("Pocket ", "");
+  }
 
   // ── Menu mobile ──
   var menuBtn = document.getElementById("menu-btn");
@@ -427,9 +499,13 @@
 
   function abrirModal(planoId) {
     var plano = PLANOS[planoId] || PLANOS.starter;
+    var ligado = estadoEspecialista[planoId];
+    var valorFinal = plano.valor + (ligado ? ESPECIALISTA_ADICIONAL : 0);
+
     document.getElementById("modal-plano-id").value = planoId;
-    document.getElementById("modal-plano-nome").textContent = plano.nome;
-    document.getElementById("modal-plano-valor").textContent = plano.valorTexto;
+    document.getElementById("modal-upgrade-especialista").value = ligado ? "true" : "false";
+    document.getElementById("modal-plano-nome").textContent = plano.nome + (ligado ? " + Especialista" : "");
+    document.getElementById("modal-plano-valor").textContent = "R$ " + valorFinal + ",00/mês" + (ligado ? " (inclui reunião mensal de 50min)" : "");
     document.getElementById("input-voucher").value = "";
 
     // O voucher só se aplica ao plano Starter — nos outros planos o campo fica oculto.
@@ -483,7 +559,8 @@
       whatsapp: document.getElementById("input-whatsapp").value.trim(),
       documento: document.getElementById("input-documento").value.trim(),
       planoId: planoId,
-      voucher: document.getElementById("input-voucher").value.trim()
+      voucher: document.getElementById("input-voucher").value.trim(),
+      upgradeEspecialista: document.getElementById("modal-upgrade-especialista").value === "true"
     };
 
     submitBtn.disabled = true;

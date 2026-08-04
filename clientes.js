@@ -2,7 +2,7 @@ require('dotenv').config();
 const { google } = require('googleapis');
 
 const ABA_CLIENTES = 'Clientes';
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo'];
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista'];
 
 let cache = null;
 let cacheExpiraEm = 0;
@@ -39,15 +39,23 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:D1`,
+    range: `${ABA_CLIENTES}!A1:E1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:D1`,
+      range: `${ABA_CLIENTES}!A1:E1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
+    });
+  } else if (resposta.data.values[0].length < 5) {
+    // Migração leve: planilha já existia com só 4 colunas (antes do Plano_Especialista existir).
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${ABA_CLIENTES}!E1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [['Plano_Especialista']] },
     });
   }
 }
@@ -60,7 +68,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:D`,
+    range: `${ABA_CLIENTES}!A2:E`,
   });
 
   const linhas = resposta.data.values || [];
@@ -70,6 +78,7 @@ async function carregarTodosClientes() {
     nome: linha[1] || '',
     sheetId: linha[2] || '',
     ativo: (linha[3] || '').toString().trim().toLowerCase() !== 'false',
+    planoEspecialista: (linha[4] || '').toString().trim().toUpperCase() === 'TRUE',
   }));
 }
 
@@ -145,7 +154,7 @@ async function criarPlanilhaCliente(nomeCliente) {
   return template.id;
 }
 
-async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
+async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
 
@@ -153,10 +162,10 @@ async function adicionarCliente(numeroWhatsapp, nome, sheetId) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A:D`,
+    range: `${ABA_CLIENTES}!A:E`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE']] },
+    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE']] },
   });
 
   cache = null;
