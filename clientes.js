@@ -2,7 +2,8 @@ require('dotenv').config();
 const { google } = require('googleapis');
 
 const ABA_CLIENTES = 'Clientes';
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista'];
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos'];
+const LIMITE_PADRAO = 300; // usado se um cliente antigo não tiver limite salvo (ex.: cadastro manual anterior a essa coluna existir)
 
 let cache = null;
 let cacheExpiraEm = 0;
@@ -39,23 +40,24 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:E1`,
+    range: `${ABA_CLIENTES}!A1:F1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:E1`,
+      range: `${ABA_CLIENTES}!A1:F1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
     });
-  } else if (resposta.data.values[0].length < 5) {
-    // Migração leve: planilha já existia com só 4 colunas (antes do Plano_Especialista existir).
+  } else if (resposta.data.values[0].length < CABECALHO_CLIENTES.length) {
+    // Migração leve: planilha já existia com menos colunas do que o cabeçalho atual prevê.
+    const ultimaColuna = String.fromCharCode('A'.charCodeAt(0) + CABECALHO_CLIENTES.length - 1);
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!E1`,
+      range: `${ABA_CLIENTES}!A1:${ultimaColuna}1`,
       valueInputOption: 'RAW',
-      requestBody: { values: [['Plano_Especialista']] },
+      requestBody: { values: [CABECALHO_CLIENTES] },
     });
   }
 }
@@ -68,7 +70,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:E`,
+    range: `${ABA_CLIENTES}!A2:F`,
   });
 
   const linhas = resposta.data.values || [];
@@ -79,6 +81,7 @@ async function carregarTodosClientes() {
     sheetId: linha[2] || '',
     ativo: (linha[3] || '').toString().trim().toLowerCase() !== 'false',
     planoEspecialista: (linha[4] || '').toString().trim().toUpperCase() === 'TRUE',
+    limiteLancamentos: Number(linha[5]) || LIMITE_PADRAO,
   }));
 }
 
@@ -154,7 +157,7 @@ async function criarPlanilhaCliente(nomeCliente) {
   return template.id;
 }
 
-async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false) {
+async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false, limiteLancamentos = LIMITE_PADRAO) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
 
@@ -162,10 +165,10 @@ async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A:E`,
+    range: `${ABA_CLIENTES}!A:F`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE']] },
+    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE', limiteLancamentos]] },
   });
 
   cache = null;

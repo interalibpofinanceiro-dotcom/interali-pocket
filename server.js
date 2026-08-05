@@ -146,6 +146,50 @@ function formatarNumero(valor) {
   return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+// Mesma data + mesmo valor + mesmo tipo já é um sinal forte de comprovante repetido — não exige
+// que o estabelecimento bata também porque a leitura da IA pode variar levemente entre duas fotos
+// do mesmo documento. Fica mais importante com mais de um WhatsApp mandando pro mesmo cliente.
+function encontrarComprovanteDuplicado(lancamentosExistentes, novo) {
+  return lancamentosExistentes.find((lancamento) => (
+    lancamento.data === novo.data &&
+    Math.abs((lancamento.valor || 0) - (novo.valor || 0)) < 0.01 &&
+    lancamento.tipo_movimentacao === novo.tipo_movimentacao
+  ));
+}
+
+// Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
+// reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
+// rejeitar o lote inteiro.
+function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
+  return transacoesExtraidas.filter((nova) => !extratoExistente.some((existente) => (
+    existente.data === nova.data &&
+    Math.abs((existente.valor || 0) - (nova.valor || 0)) < 0.01 &&
+    existente.tipo === nova.tipo &&
+    (existente.descricao || '') === (nova.descricao || '')
+  )));
+}
+
+// Avisa uma vez ao cruzar ~90% do limite mensal do plano, e uma vez ao atingir/passar 100% —
+// não repete o aviso a cada lançamento novo depois de já ter avisado naquele mês.
+async function avisarSeLimiteProximo(remetente, cliente, totalLancamentosNoMes) {
+  const limite = cliente.limiteLancamentos;
+  if (!limite) return;
+
+  const limiteAviso = Math.floor(limite * 0.9);
+
+  if (totalLancamentosNoMes === limite) {
+    await enviarMensagemWhatsApp(
+      remetente,
+      `⚠️ Você atingiu o limite de ${limite} lançamentos do seu plano este mês.\n\nLançamentos extras ainda são registrados normalmente, mas talvez valha a pena considerar um upgrade de plano — é só chamar o suporte.`
+    ).catch(() => {});
+  } else if (totalLancamentosNoMes === limiteAviso) {
+    await enviarMensagemWhatsApp(
+      remetente,
+      `📊 Aviso: você já usou ${totalLancamentosNoMes} de ${limite} lançamentos do seu plano este mês.`
+    ).catch(() => {});
+  }
+}
+
 function formatarResumoComprovante(dados) {
   const linhas = [
     '✅ Comprovante processado!',
@@ -293,11 +337,15 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
+      const extratoExistente = await buscarExtrato(sheetId);
+      const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
+      const duplicadas = transacoes.length - transacoesNovas.length;
 
-      console.log(`Extrato processado: ${transacoes.length} transação(ões)`);
+      console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
 
-      await salvarExtrato(sheetId, transacoes);
-      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoes.length} transação(ões).\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
+      await salvarExtrato(sheetId, transacoesNovas);
+      const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
+      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
     } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
@@ -340,8 +388,22 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       } else {
         console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
-        await salvarComprovante(sheetId, dadosExtraidos);
-        await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+        const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+        const duplicado = encontrarComprovanteDuplicado(lancamentosExistentes, dadosExtraidos);
+
+        if (duplicado) {
+          await enviarMensagemWhatsApp(
+            remetente,
+            `⚠️ Esse comprovante parece já estar registrado (${formatarNumero(dadosExtraidos.valor)} em ${dadosExtraidos.data}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+          );
+        } else {
+          await salvarComprovante(sheetId, dadosExtraidos);
+          await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+
+          const prefixoMesAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
+          const lancamentosDoMes = lancamentosExistentes.filter((l) => (l.data || '').startsWith(prefixoMesAtual));
+          await avisarSeLimiteProximo(remetente, cliente, lancamentosDoMes.length + 1);
+        }
       }
     } else {
       const corpoLower = (interpretado.texto || '').toLowerCase();
@@ -501,7 +563,7 @@ app.get('/', (_req, res) => {
 // A ativação em si (liberar o número no bot) só acontece depois, no /webhook-asaas, quando
 // o Asaas confirma que o pagamento entrou — nunca no momento do formulário.
 app.post('/api/assinar', async (req, res) => {
-  const { nome, whatsapp, documento, planoId, voucher, upgradeEspecialista } = req.body || {};
+  const { nome, whatsapp, whatsappAtivacao, whatsappAtivacao2, documento, planoId, voucher, upgradeEspecialista } = req.body || {};
   const comEspecialista = upgradeEspecialista === true;
 
   if (!nome || !whatsapp || !documento || !planoId) {
@@ -519,6 +581,8 @@ app.post('/api/assinar', async (req, res) => {
   }
 
   const numeroFormatado = normalizarWhatsapp(whatsapp);
+  const numeroAtivacao = (whatsappAtivacao || '').trim() ? normalizarWhatsapp(whatsappAtivacao) : numeroFormatado;
+  const numeroAtivacao2 = (whatsappAtivacao2 || '').trim() ? normalizarWhatsapp(whatsappAtivacao2) : '';
   let planoFinal = planoOficial;
   let voucherAplicado = null;
 
@@ -569,12 +633,15 @@ app.post('/api/assinar', async (req, res) => {
     await registrarAssinatura({
       nome,
       whatsapp: numeroFormatado,
+      whatsappAtivacao: numeroAtivacao,
+      whatsappAtivacao2: numeroAtivacao2,
       documento: documentoLimpo,
       plano: nomePlanoCompleto,
       valor: valorFinal,
       voucher: voucherAplicado,
       asaasSubscriptionId: subscriptionId,
       planoEspecialista: comEspecialista,
+      limiteLancamentos: planoFinal.limite,
     });
   } catch (error) {
     // A cobrança no Asaas já foi criada e o link já existe — não bloqueia o cliente por causa
@@ -585,9 +652,11 @@ app.post('/api/assinar', async (req, res) => {
   if (ADMIN_WHATSAPP_NUMBER) {
     const linhaVoucher = voucherAplicado ? `\n🎟️ Voucher: ${voucherAplicado}` : '';
     const linhaEspecialista = comEspecialista ? '\n🧑‍💼 Com Análise Mensal com Especialista' : '';
+    const linhaAtivacao = numeroAtivacao !== numeroFormatado ? `\n📲 Ativação: ${numeroAtivacao}` : '';
+    const linhaAtivacao2 = numeroAtivacao2 ? `\n📲 2º número de ativação: ${numeroAtivacao2}` : '';
     await enviarMensagemWhatsApp(
       ADMIN_WHATSAPP_NUMBER,
-      `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${nomePlanoCompleto} (R$ ${valorFinal.toFixed(2)})${linhaVoucher}${linhaEspecialista}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
+      `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${nomePlanoCompleto} (R$ ${valorFinal.toFixed(2)})${linhaVoucher}${linhaEspecialista}${linhaAtivacao}${linhaAtivacao2}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
     ).catch((erro) => console.error('Falha ao notificar admin sobre assinatura:', erro.message));
   }
 
@@ -628,28 +697,38 @@ app.post('/webhook-asaas', async (req, res) => {
       return res.sendStatus(200);
     }
 
+    const numeroAtivacao = assinatura.whatsappAtivacao || assinatura.whatsapp;
     const sheetIdNovo = await criarPlanilhaCliente(assinatura.nome);
-    await adicionarCliente(assinatura.whatsapp, assinatura.nome, sheetIdNovo, assinatura.planoEspecialista);
+
+    await adicionarCliente(numeroAtivacao, assinatura.nome, sheetIdNovo, assinatura.planoEspecialista, assinatura.limiteLancamentos);
+    if (assinatura.whatsappAtivacao2) {
+      // Segundo número apontando pra MESMA planilha — os dois somam no mesmo limite mensal do plano.
+      await adicionarCliente(assinatura.whatsappAtivacao2, assinatura.nome, sheetIdNovo, assinatura.planoEspecialista, assinatura.limiteLancamentos);
+    }
     await ativarAssinatura(assinatura.numeroLinha, sheetIdNovo);
 
     if (assinatura.voucher) {
-      await queimarVoucher(assinatura.voucher, `${assinatura.nome} (${assinatura.whatsapp})`);
+      await queimarVoucher(assinatura.voucher, `${assinatura.nome} (${numeroAtivacao})`);
     }
 
     const linhaReuniao = assinatura.planoEspecialista
       ? '\n\n🧑‍💼 Sua Análise Mensal com Especialista também foi ativada — em breve alguém da equipe entra em contato por aqui mesmo pra agendar a primeira Reunião Online de 50min.'
       : '';
 
-    await enviarMensagemWhatsApp(
-      assinatura.whatsapp,
-      `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.${linhaReuniao}\n\n` + montarMensagemBoasVindas(assinatura.nome)
-    ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
+    const numerosParaAvisar = [numeroAtivacao, assinatura.whatsappAtivacao2].filter(Boolean);
+    for (const numero of numerosParaAvisar) {
+      await enviarMensagemWhatsApp(
+        numero,
+        `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.${linhaReuniao}\n\n` + montarMensagemBoasVindas(assinatura.nome)
+      ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
+    }
 
     if (ADMIN_WHATSAPP_NUMBER) {
       const avisoEspecialista = assinatura.planoEspecialista ? '\n🧑‍💼 Com Especialista — agendar a reunião de diagnóstico com esse cliente!' : '';
+      const linhaSegundoNumero = assinatura.whatsappAtivacao2 ? `\n📲 2º número ativado: ${assinatura.whatsappAtivacao2}` : '';
       await enviarMensagemWhatsApp(
         ADMIN_WHATSAPP_NUMBER,
-        `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${assinatura.whatsapp}\n📋 ${assinatura.plano}${avisoEspecialista}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
+        `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${numeroAtivacao}${linhaSegundoNumero}\n📋 ${assinatura.plano}${avisoEspecialista}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
       ).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática:', erro.message));
     }
 

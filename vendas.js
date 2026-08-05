@@ -6,7 +6,7 @@ const CABECALHO_VOUCHERS = ['Codigo', 'Descricao', 'Usado', 'UsadoPor', 'UsadoEm
 
 const ABA_ASSINATURAS = 'Assinaturas';
 const CABECALHO_ASSINATURAS = [
-  'Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'AsaasSubscriptionId', 'Status', 'ClienteSheetId', 'CriadoEm', 'PlanoEspecialista',
+  'Nome', 'WhatsApp', 'Documento', 'Plano', 'Valor', 'Voucher', 'AsaasSubscriptionId', 'Status', 'ClienteSheetId', 'CriadoEm', 'PlanoEspecialista', 'WhatsAppAtivacao', 'WhatsAppAtivacao2', 'LimiteLancamentos',
 ];
 
 function getAuthClient() {
@@ -116,21 +116,22 @@ async function criarVoucher(codigo, descricao) {
 
 // Registra o pedido de assinatura vindo da landing page — não é o cliente ativo ainda.
 // Ativação acontece sozinha quando o webhook do Asaas confirma o pagamento (ver ativarAssinatura).
-async function registrarAssinatura({ nome, whatsapp, documento, plano, valor, voucher, asaasSubscriptionId, planoEspecialista }) {
+async function registrarAssinatura({ nome, whatsapp, whatsappAtivacao, whatsappAtivacao2, documento, plano, valor, voucher, asaasSubscriptionId, planoEspecialista, limiteLancamentos }) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_ASSINATURAS}!A:K`,
+    range: `${ABA_ASSINATURAS}!A:N`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: {
       values: [[
         nome || '', whatsapp || '', documento || '', plano || '', valor || 0, voucher || '',
         asaasSubscriptionId || '', 'Aguardando pagamento', '', new Date().toISOString(),
-        planoEspecialista ? 'TRUE' : 'FALSE',
+        planoEspecialista ? 'TRUE' : 'FALSE', whatsappAtivacao || whatsapp || '', whatsappAtivacao2 || '',
+        limiteLancamentos || 300,
       ]],
     },
   });
@@ -143,7 +144,7 @@ async function buscarAssinaturaPorSubscription(asaasSubscriptionId) {
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
-  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:K` });
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:N` });
   const linhas = resposta.data.values || [];
   const indice = linhas.findIndex((linha) => (linha[6] || '').trim() === asaasSubscriptionId);
 
@@ -162,6 +163,9 @@ async function buscarAssinaturaPorSubscription(asaasSubscriptionId) {
     status: linha[7] || '',
     clienteSheetId: linha[8] || '',
     planoEspecialista: (linha[10] || '').toString().trim().toUpperCase() === 'TRUE',
+    whatsappAtivacao: linha[11] || linha[1] || '',
+    whatsappAtivacao2: linha[12] || '',
+    limiteLancamentos: Number(linha[13]) || 300,
   };
 }
 
@@ -189,12 +193,18 @@ async function buscarAssinaturaAtivaPorWhatsapp(whatsapp) {
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
 
-  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:K` });
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:M` });
   const linhas = resposta.data.values || [];
 
+  // Confere WhatsApp de contato e os dois de ativação possíveis — quem está pedindo o upgrade
+  // pelo chat normalmente é quem manda comprovante (ativação 1 ou 2), que pode ser diferente do
+  // número de contato/cobrança preenchido no checkout.
   let ultimoIndice = -1;
   linhas.forEach((linha, i) => {
-    if ((linha[1] || '').trim() === whatsapp && (linha[7] || '').trim() === 'Ativo') {
+    const contato = (linha[1] || '').trim();
+    const ativacao = (linha[11] || '').trim() || contato;
+    const ativacao2 = (linha[12] || '').trim();
+    if ((contato === whatsapp || ativacao === whatsapp || ativacao2 === whatsapp) && (linha[7] || '').trim() === 'Ativo') {
       ultimoIndice = i;
     }
   });

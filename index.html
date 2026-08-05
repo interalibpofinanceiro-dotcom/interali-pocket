@@ -344,9 +344,23 @@
       </div>
 
       <div>
-        <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp (com DDD)</label>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp de contato (com DDD)</label>
         <input required type="tel" id="input-whatsapp" placeholder="(41) 99999-9999"
           class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp que vai enviar os comprovantes <span class="text-slate-600">(se for diferente)</span></label>
+        <input type="tel" id="input-whatsapp-ativacao" placeholder="Deixe em branco se for o mesmo de cima"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
+        <p class="text-[11px] text-slate-500 mt-1">É esse número que vai ficar liberado no Interali Pocket pra mandar comprovantes, boletos e extratos.</p>
+      </div>
+
+      <div>
+        <label class="block text-xs font-medium text-slate-400 mb-1.5">2º WhatsApp que também pode enviar <span class="text-slate-600">(opcional)</span></label>
+        <input type="tel" id="input-whatsapp-ativacao-2" placeholder="Ex.: número de outro sócio ou funcionário"
+          class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
+        <p class="text-[11px] text-slate-500 mt-1">Os dois números somam no mesmo limite de lançamentos do plano.</p>
       </div>
 
       <div>
@@ -557,6 +571,8 @@
     var payload = {
       nome: document.getElementById("input-nome").value.trim(),
       whatsapp: document.getElementById("input-whatsapp").value.trim(),
+      whatsappAtivacao: document.getElementById("input-whatsapp-ativacao").value.trim(),
+      whatsappAtivacao2: document.getElementById("input-whatsapp-ativacao-2").value.trim(),
       documento: document.getElementById("input-documento").value.trim(),
       planoId: planoId,
       voucher: document.getElementById("input-voucher").value.trim(),
