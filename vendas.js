@@ -180,6 +180,60 @@ async function ativarAssinatura(numeroLinha, clienteSheetId) {
   });
 }
 
+// Localiza a assinatura ATIVA mais recente de um número — usado no upgrade do Especialista
+// pedido depois (via WhatsApp), quando não temos o AsaasSubscriptionId à mão, só o número de
+// quem está pedindo. Pega a última em vez da primeira porque pode haver histórico de
+// assinaturas antigas/canceladas do mesmo número.
+async function buscarAssinaturaAtivaPorWhatsapp(whatsapp) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ASSINATURAS, CABECALHO_ASSINATURAS);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_ASSINATURAS}!A2:K` });
+  const linhas = resposta.data.values || [];
+
+  let ultimoIndice = -1;
+  linhas.forEach((linha, i) => {
+    if ((linha[1] || '').trim() === whatsapp && (linha[7] || '').trim() === 'Ativo') {
+      ultimoIndice = i;
+    }
+  });
+
+  if (ultimoIndice === -1) return null;
+
+  const linha = linhas[ultimoIndice];
+  return {
+    numeroLinha: ultimoIndice + 2,
+    nome: linha[0] || '',
+    whatsapp: linha[1] || '',
+    plano: linha[3] || '',
+    valor: Number(linha[4]) || 0,
+    asaasSubscriptionId: linha[6] || '',
+    planoEspecialista: (linha[10] || '').toString().trim().toUpperCase() === 'TRUE',
+  };
+}
+
+// Atualiza plano/valor/flag na linha da assinatura depois de um upgrade do Especialista
+// processado via WhatsApp (fora do fluxo normal de checkout).
+async function marcarEspecialistaNaAssinatura(numeroLinha, novoPlanoNome, novoValor) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_ASSINATURAS}!D${numeroLinha}:E${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[novoPlanoNome, novoValor]] },
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_ASSINATURAS}!K${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [['TRUE']] },
+  });
+}
+
 module.exports = {
   validarVoucher,
   queimarVoucher,
@@ -187,4 +241,6 @@ module.exports = {
   registrarAssinatura,
   buscarAssinaturaPorSubscription,
   ativarAssinatura,
+  buscarAssinaturaAtivaPorWhatsapp,
+  marcarEspecialistaNaAssinatura,
 };

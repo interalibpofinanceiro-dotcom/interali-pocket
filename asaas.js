@@ -74,8 +74,19 @@ async function buscarLinkPagamento(subscriptionId) {
   return primeiraFatura ? primeiraFatura.invoiceUrl : null;
 }
 
+// Atualiza o valor (e descrição) de uma assinatura recorrente já existente — usado pro
+// upgrade do Especialista sem precisar gerar um novo checkout: a cobrança já ativa do
+// cliente simplesmente passa a valer mais a partir do próximo ciclo.
+async function atualizarValorAssinatura(subscriptionId, novoValor, novaDescricao) {
+  return chamarAsaas(`/subscriptions/${subscriptionId}`, {
+    method: 'PUT',
+    body: { value: novoValor, description: novaDescricao },
+  });
+}
+
 module.exports = {
   buscarOuCriarCliente,
   criarAssinatura,
   buscarLinkPagamento,
+  atualizarValorAssinatura,
 };

@@ -24,7 +24,13 @@ const {
   projetarFluxoDeCaixa,
   formatarProjecao,
 } = require('./reconciliacao');
-const { buscarClientePorNumero, listarClientesAtivos, adicionarCliente, criarPlanilhaCliente } = require('./clientes');
+const {
+  buscarClientePorNumero,
+  listarClientesAtivos,
+  adicionarCliente,
+  criarPlanilhaCliente,
+  ativarPlanoEspecialista,
+} = require('./clientes');
 const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
@@ -37,8 +43,10 @@ const {
   registrarAssinatura,
   buscarAssinaturaPorSubscription,
   ativarAssinatura,
+  buscarAssinaturaAtivaPorWhatsapp,
+  marcarEspecialistaNaAssinatura,
 } = require('./vendas');
-const { buscarOuCriarCliente, criarAssinatura, buscarLinkPagamento } = require('./asaas');
+const { buscarOuCriarCliente, criarAssinatura, buscarLinkPagamento, atualizarValorAssinatura } = require('./asaas');
 
 const app = express();
 
@@ -190,6 +198,16 @@ function interpretarComandoVoucher(texto) {
   return { codigo: match[1].toUpperCase(), descricao: match[2].trim() };
 }
 
+// Detecta se o cliente está respondendo ao upsell do Especialista (mensagem termina sempre
+// com "Responda esta mensagem para ativar!"). Heurística por palavra-chave — "especialista"
+// só aparece nesse contexto específico enviado pelo próprio bot, então é um sinal confiável
+// sem precisar de reply/quote explícito.
+function interpretarPedidoEspecialista(texto) {
+  const t = (texto || '').toLowerCase();
+  if (!t.includes('especialista')) return false;
+  return /ativ|quero|sim|bora|pode|manda|isso/.test(t);
+}
+
 // Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
 function interpretarMensagem(data) {
   const msg = data.message || {};
@@ -334,6 +352,44 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const resumo = gerarResumo(lancamentos, extrato, { periodo });
         const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
         await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
+      } else if (!cliente.planoEspecialista && interpretarPedidoEspecialista(interpretado.texto)) {
+        const assinatura = await buscarAssinaturaAtivaPorWhatsapp(remetente);
+
+        if (assinatura && assinatura.asaasSubscriptionId) {
+          const novoValor = assinatura.valor + ESPECIALISTA_ADICIONAL;
+          const novoNome = assinatura.plano.includes('Especialista') ? assinatura.plano : `${assinatura.plano} + Especialista`;
+
+          await atualizarValorAssinatura(assinatura.asaasSubscriptionId, novoValor, `Interali Pocket - ${novoNome}`);
+          await marcarEspecialistaNaAssinatura(assinatura.numeroLinha, novoNome, novoValor);
+          await ativarPlanoEspecialista(remetente);
+
+          await enviarMensagemWhatsApp(
+            remetente,
+            `🎉 Prontinho, ${cliente.nome || ''}! Sua Análise Mensal com Especialista foi ativada.\n\n` +
+            `A partir da próxima cobrança, seu plano passa a ser ${novoNome} por R$ ${novoValor.toFixed(2)}/mês.\n\n` +
+            '🧑‍💼 Alguém da equipe vai entrar em contato por aqui pra agendar a primeira Reunião Online de 50min.'
+          );
+
+          if (ADMIN_WHATSAPP_NUMBER) {
+            await enviarMensagemWhatsApp(
+              ADMIN_WHATSAPP_NUMBER,
+              `🧑‍💼 Upgrade Especialista ativado sozinho via WhatsApp!\n\n👤 ${cliente.nome}\n📱 ${remetente}\n📋 ${novoNome} (R$ ${novoValor.toFixed(2)})\n\nAgendar a reunião de diagnóstico com esse cliente!`
+            ).catch((erro) => console.error('Falha ao notificar admin sobre upgrade especialista:', erro.message));
+          }
+        } else {
+          // Sem assinatura Asaas rastreada (ex.: cliente cadastrado manualmente, fora do
+          // checkout online) — não dá pra ajustar cobrança sozinho, precisa do Aroldo.
+          await enviarMensagemWhatsApp(
+            remetente,
+            `Show, ${cliente.nome || ''}! Registrei seu interesse na Análise Mensal com Especialista — a equipe vai entrar em contato por aqui pra confirmar o pagamento e agendar.`
+          );
+          if (ADMIN_WHATSAPP_NUMBER) {
+            await enviarMensagemWhatsApp(
+              ADMIN_WHATSAPP_NUMBER,
+              `🧑‍💼 Cliente pediu upgrade do Especialista pelo WhatsApp, mas não achei assinatura Asaas rastreada pra esse número (provável cadastro manual) — precisa combinar a cobrança manual.\n\n👤 ${cliente.nome}\n📱 ${remetente}`
+            ).catch((erro) => console.error('Falha ao notificar admin sobre pedido de especialista sem assinatura:', erro.message));
+          }
+        }
       } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
         const dias = corpoLower.includes('semana') ? 7 : 30;
         const projecao = await gerarProjecao(sheetId, dias);

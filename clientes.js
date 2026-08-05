@@ -200,10 +200,39 @@ async function desativarCliente(numeroWhatsapp) {
   return { numeroWhatsapp: alvo, nome };
 }
 
+// Liga o Plano_Especialista de um cliente já ativo — usado quando o upgrade é pedido depois
+// (via WhatsApp), não no checkout original.
+async function ativarPlanoEspecialista(numeroWhatsapp) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:E` });
+  const linhas = resposta.data.values || [];
+  const alvo = (numeroWhatsapp || '').trim();
+  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
+
+  if (indice === -1) return false;
+
+  const numeroLinha = indice + 2;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_CLIENTES}!E${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [['TRUE']] },
+  });
+
+  cache = null;
+  return true;
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
   adicionarCliente,
   desativarCliente,
   criarPlanilhaCliente,
+  ativarPlanoEspecialista,
 };
