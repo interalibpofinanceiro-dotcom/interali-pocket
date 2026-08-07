@@ -1,5 +1,14 @@
+const { GRUPOS_DRE, ROTULO_BLOCO, porChave } = require('./dre');
+
 const TOLERANCIA_DIAS = 3;
 const TOLERANCIA_VALOR = 0.01;
+
+// "Regra de ouro" da conciliação, com folga pra divergência: às vezes o valor do comprovante não
+// bate 100% com o que saiu de fato no extrato (desconto aplicado, juro, arredondamento). Em vez de
+// tratar como "não conciliado", casa mesmo assim dentro dessa tolerância e sinaliza a diferença —
+// só entra em jogo quando o valor EXATO não encontrou par nenhum (ver reconciliar() abaixo).
+const TOLERANCIA_DIVERGENCIA_PERCENTUAL = 0.15;
+const TOLERANCIA_DIVERGENCIA_MINIMA = 5;
 
 function paraData(strData) {
   if (!strData) return null;
@@ -21,36 +30,61 @@ function formatarDataBR(strData) {
   return data.toLocaleDateString('pt-BR');
 }
 
-// Cruza os comprovantes fotografados (lançamentos) com o extrato bancário real,
-// por proximidade de data + mesmo valor, já que descrições nunca batem exatamente.
+// Cruza os comprovantes fotografados (lançamentos) com o extrato bancário real, por proximidade
+// de data + mesmo valor, já que descrições nunca batem exatamente. Duas passadas por lançamento:
+// 1) valor exato (tolerância de 1 centavo) — o caso comum; 2) só pra quem sobrou sem par, valor
+// aproximado (até 15%/R$5, o que for maior) — cobre desconto/juro/arredondamento entre o que o
+// comprovante mostra e o que efetivamente saiu do banco. Quando cai na 2ª passada, o par vem
+// marcado com `divergencia` (extrato − lançamento) em vez de ficar "não conciliado" à toa.
 function reconciliar(lancamentos, extrato) {
   const extratoDisponivel = extrato.map((transacao) => ({ ...transacao, usado: false }));
   const conciliados = [];
   const somenteNosComprovantes = [];
 
-  for (const lancamento of lancamentos) {
+  const encontrarIndice = (lancamento, comDivergencia) => {
     const dataLancamento = paraData(lancamento.data);
     let melhorIndice = -1;
-    let melhorDiferenca = Infinity;
+    let melhorPontuacao = Infinity;
 
     extratoDisponivel.forEach((transacao, indice) => {
       if (transacao.usado) return;
       if (transacao.tipo !== lancamento.tipo_movimentacao) return;
-      if (Math.abs(transacao.valor - lancamento.valor) > TOLERANCIA_VALOR) return;
+
+      const diferencaValor = Math.abs(transacao.valor - lancamento.valor);
+      const toleranciaValor = comDivergencia
+        ? Math.max(TOLERANCIA_DIVERGENCIA_MINIMA, lancamento.valor * TOLERANCIA_DIVERGENCIA_PERCENTUAL)
+        : TOLERANCIA_VALOR;
+      if (diferencaValor > toleranciaValor) return;
 
       const dataTransacao = paraData(transacao.data);
       if (!dataLancamento || !dataTransacao) return;
 
-      const diferenca = diferencaEmDias(dataLancamento, dataTransacao);
-      if (diferenca <= TOLERANCIA_DIAS && diferenca < melhorDiferenca) {
-        melhorDiferenca = diferenca;
+      const diferencaDias = diferencaEmDias(dataLancamento, dataTransacao);
+      if (diferencaDias > TOLERANCIA_DIAS) return;
+
+      // Desempate: menor diferença de valor primeiro (par mais provável), depois menor diferença de data.
+      const pontuacao = diferencaValor * 1000 + diferencaDias;
+      if (pontuacao < melhorPontuacao) {
+        melhorPontuacao = pontuacao;
         melhorIndice = indice;
       }
     });
 
-    if (melhorIndice >= 0) {
-      extratoDisponivel[melhorIndice].usado = true;
-      conciliados.push({ lancamento, transacao: extratoDisponivel[melhorIndice] });
+    return melhorIndice;
+  };
+
+  for (const lancamento of lancamentos) {
+    let indice = encontrarIndice(lancamento, false);
+    let divergencia = null;
+
+    if (indice < 0) {
+      indice = encontrarIndice(lancamento, true);
+      if (indice >= 0) divergencia = extratoDisponivel[indice].valor - lancamento.valor;
+    }
+
+    if (indice >= 0) {
+      extratoDisponivel[indice].usado = true;
+      conciliados.push({ lancamento, transacao: extratoDisponivel[indice], divergencia });
     } else {
       somenteNosComprovantes.push(lancamento);
     }
@@ -59,6 +93,50 @@ function reconciliar(lancamentos, extrato) {
   const somenteNoExtrato = extratoDisponivel.filter((transacao) => !transacao.usado);
 
   return { conciliados, somenteNoExtrato, somenteNosComprovantes };
+}
+
+// Recalcula o Status_Conciliacao de CADA lançamento (histórico inteiro, não só o período de um
+// resumo) — usado depois de salvar um comprovante ou um extrato novo, pra manter a coluna
+// Status_Conciliacao da planilha sempre correta. Retorna um Map linha → status (só as linhas que
+// mudaram precisam ser reescritas — quem chama compara com o status atual antes de gravar).
+function sincronizarConciliacao(lancamentos, extrato) {
+  const { conciliados, somenteNosComprovantes } = reconciliar(lancamentos, extrato);
+  const statusPorLinha = new Map();
+
+  for (const { lancamento, divergencia } of conciliados) {
+    statusPorLinha.set(
+      lancamento.linha,
+      divergencia !== null ? `Conciliado (divergência de ${formatarMoeda(Math.abs(divergencia))})` : 'Conciliado (Extrato)'
+    );
+  }
+  for (const lancamento of somenteNosComprovantes) {
+    statusPorLinha.set(lancamento.linha, 'Pendente');
+  }
+
+  return statusPorLinha;
+}
+
+// "Lançamento órfão": entrada que apareceu AGORA num extrato recém-enviado (transacoesNovas) e não
+// tem nenhum comprovante correspondente ainda — motiva o "identificamos um recebimento sem nota,
+// o que é isso?" logo na resposta do WhatsApp. Só olha as transações novas desta mensagem (não o
+// histórico inteiro) de propósito, pra não repetir o mesmo aviso a cada extrato seguinte enviado.
+function encontrarTransacoesOrfas(transacoesNovas, lancamentos) {
+  return transacoesNovas.filter((transacao) => {
+    if (transacao.tipo !== 'entrada') return false;
+    const dataTransacao = paraData(transacao.data);
+
+    return !lancamentos.some((lancamento) => {
+      if (lancamento.tipo_movimentacao !== 'entrada') return false;
+
+      const diferencaValor = Math.abs(lancamento.valor - transacao.valor);
+      const tolerancia = Math.max(TOLERANCIA_DIVERGENCIA_MINIMA, transacao.valor * TOLERANCIA_DIVERGENCIA_PERCENTUAL);
+      if (diferencaValor > tolerancia) return false;
+
+      const dataLancamento = paraData(lancamento.data);
+      if (!dataLancamento || !dataTransacao) return false;
+      return diferencaEmDias(dataLancamento, dataTransacao) <= TOLERANCIA_DIAS;
+    });
+  });
 }
 
 function calcularPeriodo(tipo, referencia) {
@@ -212,7 +290,11 @@ function formatarResumo(resumo) {
 
   linhas.push('');
   linhas.push('🔍 Conciliação com o banco:');
-  linhas.push(`✅ ${resumo.conciliacao.conciliados.length} lançamento(s) batem com o extrato`);
+  const comDivergencia = resumo.conciliacao.conciliados.filter((c) => c.divergencia !== null);
+  const sufixoDivergencia = comDivergencia.length > 0
+    ? ` (${comDivergencia.length} com pequena diferença de valor — desconto/juros/arredondamento)`
+    : '';
+  linhas.push(`✅ ${resumo.conciliacao.conciliados.length} lançamento(s) batem com o extrato${sufixoDivergencia}`);
 
   if (resumo.conciliacao.somenteNoExtrato.length > 0) {
     linhas.push(`⚠️ ${resumo.conciliacao.somenteNoExtrato.length} transação(ões) no extrato sem comprovante:`);
@@ -333,13 +415,172 @@ function formatarUpsellEspecialista(resumo) {
   );
 }
 
+// Monta a DRE Gerencial do período a partir dos LANÇAMENTOS já categorizados (campo Grupo_DRE,
+// preenchido pelo Claude na extração — ver prompts.js/dre.js). Regime de caixa, igual ao resto do
+// sistema: usa o que já foi pago/recebido (lancamentos), não o extrato bruto (não tem categoria)
+// nem contas a pagar (ainda não pagas). Lançamentos sem Grupo_DRE reconhecível — dado antigo, de
+// antes de 07/08/2026, ou que o Claude não conseguiu classificar — caem em "Outras Receitas/
+// Despesas (Não Classificado)" pra nunca sumir do total, mesmo sem entrar numa linha específica.
+function gerarDRE(lancamentos, opcoes = {}) {
+  const referencia = opcoes.referencia || new Date();
+  const tipoPeriodo = ['dia', 'semana', 'mes'].includes(opcoes.periodo) ? opcoes.periodo : 'mes';
+  const { inicio, fim } = calcularPeriodo(tipoPeriodo, referencia);
+  const lancamentosPeriodo = filtrarPorPeriodo(lancamentos, 'data', inicio, fim);
+
+  const totalPorChave = {};
+  let outrasReceitas = 0;
+  let outrasDespesas = 0;
+
+  for (const lancamento of lancamentosPeriodo) {
+    const valor = lancamento.valor || 0;
+    const grupo = lancamento.grupo_dre && porChave(lancamento.grupo_dre) ? lancamento.grupo_dre : null;
+
+    if (!grupo || grupo === 'nao_classificado') {
+      if (lancamento.tipo_movimentacao === 'entrada') outrasReceitas += valor;
+      else outrasDespesas += valor;
+      continue;
+    }
+
+    totalPorChave[grupo] = (totalPorChave[grupo] || 0) + valor;
+  }
+
+  const linhasBloco = (bloco) => GRUPOS_DRE
+    .filter((g) => g.bloco === bloco)
+    .map((g) => ({ rotulo: g.rotulo, valor: totalPorChave[g.chave] || 0 }))
+    .filter((l) => l.valor !== 0);
+
+  const somarBloco = (bloco) => GRUPOS_DRE
+    .filter((g) => g.bloco === bloco)
+    .reduce((soma, g) => soma + (totalPorChave[g.chave] || 0), 0);
+
+  const receitaBrutaTotal = somarBloco('RECEITA_BRUTA') + outrasReceitas;
+  const deducoesTotal = somarBloco('DEDUCOES');
+  const receitaLiquida = receitaBrutaTotal - deducoesTotal;
+  const custosTotal = somarBloco('CUSTOS');
+  const lucroBruto = receitaLiquida - custosTotal;
+
+  const despesasPessoalTotal = somarBloco('DESPESAS_PESSOAL');
+  const despesasAdminTotal = somarBloco('DESPESAS_ADMIN') + outrasDespesas;
+  const despesasVendasTotal = somarBloco('DESPESAS_VENDAS');
+  const despesasOperacionaisTotal = despesasPessoalTotal + despesasAdminTotal + despesasVendasTotal;
+
+  const resultadoOperacional = lucroBruto - despesasOperacionaisTotal;
+
+  const rendimentos = totalPorChave.financeiro_rendimentos || 0;
+  const tarifas = totalPorChave.financeiro_tarifas || 0;
+  const jurosEmprestimos = totalPorChave.financeiro_juros_emprestimos || 0;
+  const multasAtraso = totalPorChave.financeiro_multas_atraso || 0;
+  const resultadoFinanceiro = rendimentos - tarifas - jurosEmprestimos - multasAtraso;
+
+  const lucroLiquido = resultadoOperacional + resultadoFinanceiro;
+
+  return {
+    tipoPeriodo,
+    inicio,
+    fim,
+    receitaBruta: { linhas: linhasBloco('RECEITA_BRUTA'), outrasReceitas, total: receitaBrutaTotal },
+    deducoes: { linhas: linhasBloco('DEDUCOES'), total: deducoesTotal },
+    receitaLiquida,
+    custos: { linhas: linhasBloco('CUSTOS'), total: custosTotal },
+    lucroBruto,
+    despesasOperacionais: {
+      pessoal: { linhas: linhasBloco('DESPESAS_PESSOAL'), total: despesasPessoalTotal },
+      administrativas: { linhas: linhasBloco('DESPESAS_ADMIN'), outrasDespesas, total: despesasAdminTotal },
+      vendas: { linhas: linhasBloco('DESPESAS_VENDAS'), total: despesasVendasTotal },
+      total: despesasOperacionaisTotal,
+    },
+    resultadoOperacional,
+    financeiro: { rendimentos, tarifas, jurosEmprestimos, multasAtraso, total: resultadoFinanceiro },
+    lucroLiquido,
+  };
+}
+
+// Formata uma linha "(+)/(-) Rótulo ......... R$ valor" alinhada num bloco monoespaçado.
+function linhaDRE(sinal, rotulo, valor, largura = 50) {
+  const texto = `   (${sinal}) ${rotulo}`;
+  const valorTexto = formatarMoeda(valor);
+  const espacos = Math.max(1, largura - texto.length - valorTexto.length);
+  return `${texto}${' '.repeat(espacos)}${valorTexto}`;
+}
+
+function totalDRE(numero, rotulo, valor, largura = 50) {
+  const texto = `(=) ${numero}. ${rotulo}`;
+  const valorTexto = formatarMoeda(valor);
+  const espacos = Math.max(1, largura - texto.length - valorTexto.length);
+  return `${texto}${' '.repeat(espacos)}${valorTexto}`;
+}
+
+// Renderiza a DRE no formato de tabela do contador, dentro de um bloco ``` (monoespaçado no
+// WhatsApp) pra manter o alinhamento dos valores.
+function formatarDRE(dre, nomeCliente) {
+  const nomesPeriodo = { dia: 'Dia', semana: 'Semana', mes: 'Mês' };
+  const separador = '='.repeat(50);
+  const linhas = ['```', separador];
+
+  linhas.push('DEMONSTRAÇÃO DO RESULTADO DO EXERCÍCIO (DRE GERENCIAL)');
+  linhas.push(`Empresa: ${nomeCliente || ''}`);
+  linhas.push(`Período: ${nomesPeriodo[dre.tipoPeriodo] || 'Mês'} (${dre.inicio.toLocaleDateString('pt-BR')} a ${dre.fim.toLocaleDateString('pt-BR')})`);
+  linhas.push(separador, '');
+
+  linhas.push('1. RECEITA BRUTA TOTAL');
+  dre.receitaBruta.linhas.forEach((l) => linhas.push(linhaDRE('+', l.rotulo, l.valor)));
+  if (dre.receitaBruta.outrasReceitas) linhas.push(linhaDRE('+', 'Outras Receitas (Não Classificado)', dre.receitaBruta.outrasReceitas));
+  linhas.push('-'.repeat(50));
+  linhas.push(totalDRE(2, 'RECEITA BRUTA OPERACIONAL', dre.receitaBruta.total), '');
+
+  linhas.push('3. (-) DEDUÇÕES DA RECEITA BRUTA');
+  dre.deducoes.linhas.forEach((l) => linhas.push(linhaDRE('-', l.rotulo, l.valor)));
+  linhas.push('-'.repeat(50));
+  linhas.push(totalDRE(4, 'RECEITA LÍQUIDA OPERACIONAL', dre.receitaLiquida), '');
+
+  linhas.push('5. (-) CUSTOS DOS PRODUTOS E SERVIÇOS VENDIDOS (CPV/CMV/CSP)');
+  dre.custos.linhas.forEach((l) => linhas.push(linhaDRE('-', l.rotulo, l.valor)));
+  linhas.push('-'.repeat(50));
+  linhas.push(totalDRE(6, 'LUCRO BRUTO', dre.lucroBruto), '');
+
+  linhas.push('7. (-) DESPESAS OPERACIONAIS', '');
+  linhas.push(`   ${ROTULO_BLOCO.DESPESAS_PESSOAL}`);
+  dre.despesasOperacionais.pessoal.linhas.forEach((l) => linhas.push(linhaDRE('-', l.rotulo, l.valor)));
+  linhas.push('');
+  linhas.push(`   ${ROTULO_BLOCO.DESPESAS_ADMIN}`);
+  dre.despesasOperacionais.administrativas.linhas.forEach((l) => linhas.push(linhaDRE('-', l.rotulo, l.valor)));
+  if (dre.despesasOperacionais.administrativas.outrasDespesas) {
+    linhas.push(linhaDRE('-', 'Outras Despesas (Não Classificado)', dre.despesasOperacionais.administrativas.outrasDespesas));
+  }
+  linhas.push('');
+  linhas.push(`   ${ROTULO_BLOCO.DESPESAS_VENDAS}`);
+  dre.despesasOperacionais.vendas.linhas.forEach((l) => linhas.push(linhaDRE('-', l.rotulo, l.valor)));
+  linhas.push('-'.repeat(50));
+  linhas.push(totalDRE(8, 'RESULTADO OPERACIONAL (EBITDA)', dre.resultadoOperacional), '');
+
+  linhas.push('9. RESULTADO FINANCEIRO');
+  if (dre.financeiro.rendimentos) linhas.push(linhaDRE('+', 'Rendimentos de Aplicações Financeiras', dre.financeiro.rendimentos));
+  if (dre.financeiro.tarifas) linhas.push(linhaDRE('-', 'Tarifas Bancárias e Manutenção de Conta', dre.financeiro.tarifas));
+  if (dre.financeiro.jurosEmprestimos) linhas.push(linhaDRE('-', 'Juros Pagos sobre Empréstimos Bancários', dre.financeiro.jurosEmprestimos));
+  if (dre.financeiro.multasAtraso) linhas.push(linhaDRE('-', 'Multas e Juros por Atraso de Contas', dre.financeiro.multasAtraso));
+  linhas.push('-'.repeat(50));
+  linhas.push(totalDRE(10, 'LUCRO LÍQUIDO DO EXERCÍCIO', dre.lucroLiquido));
+  linhas.push(separador, '```');
+
+  if (dre.lucroBruto === 0 && dre.receitaBruta.total === 0 && dre.despesasOperacionais.total === 0) {
+    return `Ainda não tenho lançamentos categorizados suficientes nesse período pra montar a DRE. Manda alguns comprovantes e tenta de novo. 📊`;
+  }
+
+  return linhas.join('\n');
+}
+
 module.exports = {
   reconciliar,
+  sincronizarConciliacao,
+  encontrarTransacoesOrfas,
   gerarResumo,
   formatarResumo,
+  formatarDataBR,
   formatarUpsellEspecialista,
   obterSaldoAtual,
   filtrarContasEmAberto,
   projetarFluxoDeCaixa,
   formatarProjecao,
+  gerarDRE,
+  formatarDRE,
 };

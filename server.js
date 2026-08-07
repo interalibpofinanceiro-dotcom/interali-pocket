@@ -10,6 +10,7 @@ const {
 const {
   salvarComprovante,
   buscarTodosLancamentos,
+  atualizarStatusConciliacaoEmLote,
   salvarExtrato,
   buscarExtrato,
   salvarContasAPagar,
@@ -23,6 +24,11 @@ const {
   filtrarContasEmAberto,
   projetarFluxoDeCaixa,
   formatarProjecao,
+  sincronizarConciliacao,
+  encontrarTransacoesOrfas,
+  gerarDRE,
+  formatarDRE,
+  formatarDataBR,
 } = require('./reconciliacao');
 const {
   buscarClientePorNumero,
@@ -92,7 +98,7 @@ function montarMensagemBoasVindas(nome) {
     '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
     '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
     '🧾 Mande boleto ou fatura de cartão de crédito escrevendo "boleto" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco").\n' +
-    '💬 Pergunte "resumo do mês", "resumo da semana" ou "previsão" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
+    '💬 Pergunte "resumo do mês", "resumo da semana", "previsão" ou "DRE do mês" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
     '💡 Dicas rápidas:\n' +
     '• Sempre escreva alguma legenda ao mandar boleto, fatura ou extrato — sem isso eu tento adivinhar o tipo de documento e posso errar.\n' +
     '• Uma foto por mensagem.\n' +
@@ -212,6 +218,26 @@ function formatarResumoComprovante(dados) {
   return linhas.join('\n');
 }
 
+// Recalcula o Status_Conciliacao de todos os lançamentos (histórico inteiro) contra o extrato
+// atual e reescreve só as linhas cujo status mudou. Chamada depois de salvar um comprovante novo
+// ou um extrato novo — os dois lados que afetam o resultado da conciliação. Falha aqui não deve
+// derrubar o fluxo principal (a mensagem pro cliente já foi decidida antes), então quem chama
+// sempre engole erro com .catch().
+async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, extratoAtual) {
+  const [lancamentos, extrato] = await Promise.all([
+    lancamentosExistentes || buscarTodosLancamentos(sheetId),
+    extratoAtual || buscarExtrato(sheetId),
+  ]);
+
+  const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
+  const atualizacoes = lancamentos
+    .map((lancamento) => ({ linha: lancamento.linha, status: statusPorLinha.get(lancamento.linha) || 'Pendente', statusAnterior: lancamento.status_conciliacao }))
+    .filter(({ status, statusAnterior }) => status !== statusAnterior)
+    .map(({ linha, status }) => ({ linha, status }));
+
+  await atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
+}
+
 async function gerarProjecao(sheetId, dias) {
   const [lancamentos, extrato, contasAPagar] = await Promise.all([
     buscarTodosLancamentos(sheetId),
@@ -229,6 +255,15 @@ async function gerarProjecao(sheetId, dias) {
 // quem sabe qual cartão é o cliente, então ele informa isso na legenda da mensagem.
 function extrairNomeCartao(legendaLower) {
   const match = legendaLower.match(/cart[ãa]o\s+([a-zà-ÿ0-9]+(?:\s+[a-zà-ÿ0-9]+){0,2})/i);
+  if (!match) return null;
+  return match[1].trim().replace(/\b\w/g, (letra) => letra.toUpperCase());
+}
+
+// Mesma ideia do cartão, mas pra conta bancária (ex.: "conta Itaú PJ") — só entra em ação se o
+// cliente escrever isso na legenda; caso contrário fica com o que o Claude já identificou no
+// próprio comprovante (campo banco_conta), ou vazio se nenhum dos dois achou nada.
+function extrairNomeConta(legendaLower) {
+  const match = legendaLower.match(/conta\s+([a-zà-ÿ0-9]+(?:\s+[a-zà-ÿ0-9]+){0,2})/i);
   if (!match) return null;
   return match[1].trim().replace(/\b\w/g, (letra) => letra.toUpperCase());
 }
@@ -343,9 +378,18 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
 
+      const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+      const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
+
       await salvarExtrato(sheetId, transacoesNovas);
+      // Recalcula o Status_Conciliacao de tudo agora que o extrato mudou — silencioso, não afeta a resposta.
+      await sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, [...extratoExistente, ...transacoesNovas]).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+
       const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.`);
+      const avisoOrfas = orfas.length > 0
+        ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
+        : '';
+      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
     } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
       const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
@@ -386,6 +430,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           'Da próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉\n\nPergunte "previsão" para ver o fluxo de caixa projetado.'
         );
       } else {
+        // Legenda ("conta Itaú PJ") tem prioridade sobre o que o Claude leu na própria imagem —
+        // só o cliente sabe com certeza qual das contas dele é, quando ele se dá o trabalho de dizer.
+        dadosExtraidos.conta_bancaria = extrairNomeConta(interpretado.legenda) || dadosExtraidos.banco_conta || '';
+
         console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
         const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
@@ -403,6 +451,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           const prefixoMesAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
           const lancamentosDoMes = lancamentosExistentes.filter((l) => (l.data || '').startsWith(prefixoMesAtual));
           await avisarSeLimiteProximo(remetente, cliente, lancamentosDoMes.length + 1);
+
+          // Se esse comprovante bater com uma transação do extrato que já estava na planilha,
+          // marca conciliado agora — não precisa esperar o cliente mandar extrato de novo.
+          await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
         }
       }
     } else {
@@ -414,6 +466,11 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const resumo = gerarResumo(lancamentos, extrato, { periodo });
         const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
         await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
+      } else if (/\bdre\b/.test(corpoLower) || corpoLower.includes('demonstra') || corpoLower.includes('resultado do exerc')) {
+        const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
+        const lancamentos = await buscarTodosLancamentos(sheetId);
+        const dre = gerarDRE(lancamentos, { periodo });
+        await enviarMensagemWhatsApp(remetente, formatarDRE(dre, cliente.nome));
       } else if (!cliente.planoEspecialista && interpretarPedidoEspecialista(interpretado.texto)) {
         const assinatura = await buscarAssinaturaAtivaPorWhatsapp(remetente);
 

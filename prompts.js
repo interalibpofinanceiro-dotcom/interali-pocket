@@ -1,3 +1,5 @@
+const { listaParaPrompt } = require('./dre');
+
 const PROMPT_EXTRACAO = `Você é um especialista em extração de dados financeiros a partir de imagens e PDFs de comprovantes, notas fiscais, recibos e cupons fiscais brasileiros.
 
 Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
@@ -14,6 +16,8 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   "forma_pagamento": "pix | ted | doc | boleto | dinheiro | cartao_credito | cartao_debito | outro",
   "categoria": "categoria de despesa ou receita, definida dinamicamente (ver regras abaixo)",
   "subcategoria": "opcional, mais específica que a categoria, ou null",
+  "grupo_dre": "uma das chaves fixas da lista em CLASSIFICAÇÃO PARA A DRE, abaixo",
+  "banco_conta": "nome do banco/conta de onde saiu ou pra onde entrou o dinheiro, se visível no comprovante (ex.: 'Itaú', 'Nubank'), senão null",
   "itens": [
     {
       "descricao": "nome do item ou serviço",
@@ -24,6 +28,13 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   ],
   "observacoes": "qualquer informação relevante adicional, ou null"
 }
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre):
+Além da categoria/subcategoria dinâmica (livre, por nicho — regras abaixo), todo lançamento também recebe um "grupo_dre" fixo, usado pra montar a Demonstração do Resultado do Exercício. Escolha SEMPRE uma destas chaves (nunca invente uma nova):
+${listaParaPrompt()}
+- Use "nao_classificado" só quando genuinamente não der pra decidir entre as outras opções — é o último recurso, não o padrão.
+- A direção do grupo escolhido precisa ser coerente com "tipo_movimentacao": grupos do bloco RECEITA_BRUTA ou "financeiro_rendimentos" só valem para "entrada"; todos os outros grupos (DEDUCOES, CUSTOS, DESPESAS_*, demais itens FINANCEIRO) só valem para "saida".
+- Pró-labore, salário e comissão são despesa (saida) da empresa que paga, mesmo que pareçam "receita" pra quem recebe.
 
 REGRAS DE CATEGORIZAÇÃO DINÂMICA:
 1. Identifique o nicho de mercado do cliente a partir do contexto do documento ou da mensagem que acompanha (ex.: salão de beleza, barbearia, restaurante, pizzaria, loja de roupas, clínica, escritório de serviços, construção civil, autônomo, etc.).
@@ -110,6 +121,7 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
       "beneficiario": "quem vai receber o pagamento",
       "descricao": "descrição curta do que é a cobrança",
       "categoria": "categoria de despesa, definida dinamicamente igual às regras de comprovantes",
+      "grupo_dre": "uma das chaves fixas de despesa/custo/dedução listadas em CLASSIFICAÇÃO PARA A DRE do prompt de comprovantes (ex.: 'admin_ocupacao', 'custo_cmv') — nunca use uma chave do bloco RECEITA_BRUTA aqui, conta a pagar é sempre despesa",
       "parcela_atual": null,
       "parcela_total": null
     }
