@@ -1,6 +1,20 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 
+// Com FORMATTED_VALUE (o modo de leitura que usamos, ver buscarLinhas), o Sheets devolve número
+// no padrão BR — "199,99", ou "1.234,56" pra valores maiores (ponto como milhar, vírgula como
+// decimal). Number("199,99") vira NaN em JS puro, e todo `Number(x) || 0` do código virava
+// silenciosamente 0. Bug real encontrado em 07/08/2026 no primeiro teste ponta a ponta: resumo,
+// conciliação, previsão e DRE saíam todos zerados, mesmo com o valor certo gravado na planilha —
+// o problema era só na leitura de volta. Esta função troca todo Number(linha[N]) por essa aqui.
+function numeroBR(valor) {
+  if (typeof valor === 'number') return valor;
+  if (valor === null || valor === undefined || valor === '') return 0;
+  const limpo = String(valor).trim().replace(/\./g, '').replace(',', '.');
+  const numero = Number(limpo);
+  return Number.isNaN(numero) ? 0 : numero;
+}
+
 const ABA_LANCAMENTOS = 'Lancamentos';
 // Grupo_DRE, Conta_Bancaria e Status_Conciliacao foram ADICIONADAS no fim em 07/08/2026 (não
 // inseridas no meio) de propósito — clientes que já tinham linhas gravadas com o cabeçalho antigo
@@ -76,6 +90,9 @@ async function buscarLinhas(spreadsheetId, nomeAba, range) {
   const sheets = getSheetsClient();
 
   try {
+    // Fica com FORMATTED_VALUE (padrão) de propósito — UNFORMATTED_VALUE resolveria o problema de
+    // número (ver numeroBR abaixo) mas quebraria as colunas de DATA, que voltariam como número de
+    // série do Sheets (ex.: 46238) em vez de "2026-08-03" — pior o remédio que a doença.
     const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}` });
     return resposta.data.values || [];
   } catch (error) {
@@ -125,7 +142,7 @@ async function buscarTodosLancamentos(spreadsheetId) {
     linha: indice + 2, // número real da linha na planilha (cabeçalho ocupa a 1) — usado pra reescrever só o Status_Conciliacao depois, sem tocar no resto
     data: linha[0] || '',
     hora: linha[1] || '',
-    valor: Number(linha[2]) || 0,
+    valor: numeroBR(linha[2]),
     tipo_movimentacao: linha[3] || '',
     descricao: linha[4] || '',
     estabelecimento_ou_pessoa: linha[5] || '',
@@ -194,9 +211,9 @@ async function buscarExtrato(spreadsheetId) {
   return linhas.map((linha) => ({
     data: linha[0] || '',
     descricao: linha[1] || '',
-    valor: Number(linha[2]) || 0,
+    valor: numeroBR(linha[2]),
     tipo: linha[3] || '',
-    saldo_apos: linha[4] ? Number(linha[4]) : null,
+    saldo_apos: linha[4] ? numeroBR(linha[4]) : null,
   }));
 }
 
@@ -237,13 +254,13 @@ async function buscarContasAPagar(spreadsheetId) {
 
   return linhas.map((linha) => ({
     vencimento: linha[0] || '',
-    valor: Number(linha[1]) || 0,
+    valor: numeroBR(linha[1]),
     cartao: linha[2] || '',
     beneficiario: linha[3] || '',
     descricao: linha[4] || '',
     categoria: linha[5] || '',
-    parcela_atual: linha[6] ? Number(linha[6]) : null,
-    parcela_total: linha[7] ? Number(linha[7]) : null,
+    parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
+    parcela_total: linha[7] ? numeroBR(linha[7]) : null,
     grupo_dre: linha[9] || '',
   }));
 }
