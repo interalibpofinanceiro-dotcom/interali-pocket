@@ -152,16 +152,56 @@ function formatarNumero(valor) {
   return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-// Mesma data + mesmo valor + mesmo tipo já é um sinal forte de comprovante repetido — não exige
-// que o estabelecimento bata também porque a leitura da IA pode variar levemente entre duas fotos
-// do mesmo documento. Fica mais importante com mais de um WhatsApp mandando pro mesmo cliente.
-function encontrarComprovanteDuplicado(lancamentosExistentes, novo) {
-  return lancamentosExistentes.find((lancamento) => (
+// Trava de duplicidade em 3 níveis, olhando data + horário + valor + tipo (pedido do Aroldo,
+// 08/08/2026: "sempre remova duplicidade... vai ler data, horário, valores... e se tiver dúvida,
+// pergunte ao cliente"). Data+valor+tipo batendo já é um sinal forte de repetição — não exige que
+// o estabelecimento bata também porque a leitura da IA pode variar levemente entre duas fotos do
+// mesmo documento. O horário é o que decide entre os três níveis:
+//   - "duplicado": achou candidato com o MESMO horário (quando os dois lados têm horário) → alta
+//     confiança, não salva.
+//   - "ambiguo": achou candidato com data+valor+tipo iguais, mas falta horário de um dos lados (ou
+//     dos dois) pra confirmar ou descartar → não decide sozinho, pergunta pro cliente.
+//   - "novo": ou não achou nenhum candidato, ou os candidatos batem em tudo menos no horário (os
+//     dois lados TÊM horário e são diferentes) → confiança de que é um lançamento diferente mesmo.
+function verificarDuplicidade(lancamentosExistentes, novo) {
+  const candidatos = lancamentosExistentes.filter((lancamento) => (
     lancamento.data === novo.data &&
     Math.abs((lancamento.valor || 0) - (novo.valor || 0)) < 0.01 &&
     lancamento.tipo_movimentacao === novo.tipo_movimentacao
   ));
+
+  if (candidatos.length === 0) return { status: 'novo' };
+
+  const horarioNovo = (novo.hora || '').trim();
+
+  for (const candidato of candidatos) {
+    const horarioExistente = (candidato.hora || '').trim();
+
+    if (horarioNovo && horarioExistente) {
+      if (horarioNovo === horarioExistente) return { status: 'duplicado', candidato };
+      continue; // horário dos dois lados presente e diferente — não é ESSE candidato, tenta o próximo
+    }
+
+    return { status: 'ambiguo', candidato }; // falta horário de pelo menos um lado — não dá pra decidir sozinho
+  }
+
+  return { status: 'novo' }; // todos os candidatos tinham horário e nenhum bateu
 }
+
+// Reconhece a resposta do cliente à pergunta de duplicidade ambígua ("é o mesmo comprovante ou é
+// diferente?"). Heurística por palavra-chave, igual ao resto do bot — não exige resposta exata.
+function interpretarRespostaDuplicidade(texto) {
+  const t = (texto || '').toLowerCase();
+  if (/duplicad|mesmo|j[áa]\s*registr|repetid|^sim\b/.test(t)) return 'duplicado';
+  if (/diferente|n[ãa]o\s*[ée]|\bnovo\b|outro|distint/.test(t)) return 'diferente';
+  return null;
+}
+
+// Comprovante em dúvida (duplicidade ambígua) aguardando o cliente confirmar — Map remetente →
+// { dados, sheetId, criadoEm }. Em memória, reseta a cada deploy — aceitável no volume atual,
+// igual ao cooldown de notificação de lead logo abaixo.
+const PENDENCIAS_DUPLICIDADE = new Map();
+const TIMEOUT_PENDENCIA_DUPLICIDADE_MS = 15 * 60 * 1000;
 
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
@@ -367,6 +407,37 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Cliente tinha um comprovante em dúvida (duplicidade ambígua) esperando resposta — checa
+    // ANTES de qualquer outro processamento, senão a resposta ("diferente", "duplicado") cairia
+    // no fluxo genérico de pergunta livre pro Claude em vez de resolver a pendência.
+    if (!interpretado.tipoMidia && PENDENCIAS_DUPLICIDADE.has(remetente)) {
+      const pendencia = PENDENCIAS_DUPLICIDADE.get(remetente);
+      const expirou = Date.now() - pendencia.criadoEm > TIMEOUT_PENDENCIA_DUPLICIDADE_MS;
+
+      if (!expirou) {
+        const resposta = interpretarRespostaDuplicidade(interpretado.texto);
+
+        if (resposta === 'duplicado') {
+          PENDENCIAS_DUPLICIDADE.delete(remetente);
+          await enviarMensagemWhatsApp(remetente, '👍 Combinado, não registrei de novo.');
+          return res.sendStatus(200);
+        }
+
+        if (resposta === 'diferente') {
+          PENDENCIAS_DUPLICIDADE.delete(remetente);
+          await salvarComprovante(pendencia.sheetId, pendencia.dados);
+          await enviarMensagemWhatsApp(remetente, `✅ Entendido, registrei como lançamento novo!\n\n${formatarResumoComprovante(pendencia.dados)}`);
+          await sincronizarConciliacaoNaPlanilha(pendencia.sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+          return res.sendStatus(200);
+        }
+
+        await enviarMensagemWhatsApp(remetente, 'Não entendi — responde só "duplicado" ou "diferente" pra eu saber o que fazer com aquele comprovante. 🙂');
+        return res.sendStatus(200);
+      }
+
+      PENDENCIAS_DUPLICIDADE.delete(remetente); // expirou — segue o fluxo normal abaixo, trata como mensagem nova
+    }
+
     const sheetId = cliente.sheetId;
 
     if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
@@ -437,12 +508,22 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
         const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
-        const duplicado = encontrarComprovanteDuplicado(lancamentosExistentes, dadosExtraidos);
+        const resultadoDuplicidade = verificarDuplicidade(lancamentosExistentes, dadosExtraidos);
 
-        if (duplicado) {
+        if (resultadoDuplicidade.status === 'duplicado') {
+          const c = resultadoDuplicidade.candidato;
           await enviarMensagemWhatsApp(
             remetente,
-            `⚠️ Esse comprovante parece já estar registrado (${formatarNumero(dadosExtraidos.valor)} em ${dadosExtraidos.data}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+            `⚠️ Esse comprovante já está registrado (${formatarNumero(c.valor)} em ${c.data} às ${c.hora}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+          );
+        } else if (resultadoDuplicidade.status === 'ambiguo') {
+          const c = resultadoDuplicidade.candidato;
+          PENDENCIAS_DUPLICIDADE.set(remetente, { dados: dadosExtraidos, sheetId, criadoEm: Date.now() });
+          await enviarMensagemWhatsApp(
+            remetente,
+            `🤔 Já tenho um lançamento parecido: ${formatarNumero(c.valor)} em ${c.data}${c.hora ? ` às ${c.hora}` : ''} (${c.estabelecimento_ou_pessoa || c.descricao || 'sem descrição'}).\n\n` +
+            `Esse comprovante novo: ${formatarNumero(dadosExtraidos.valor)} em ${dadosExtraidos.data}${dadosExtraidos.hora ? ` às ${dadosExtraidos.hora}` : ''} (${dadosExtraidos.estabelecimento_ou_pessoa || 'sem descrição'}).\n\n` +
+            `É o mesmo comprovante (duplicado) ou é um lançamento diferente? Responde "duplicado" ou "diferente".`
           );
         } else {
           await salvarComprovante(sheetId, dadosExtraidos);
