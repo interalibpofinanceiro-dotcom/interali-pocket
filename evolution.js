@@ -16,15 +16,20 @@ function formatoPlanilhaParaNumeroEvolution(numeroPlanilha) {
   return (numeroPlanilha || '').replace('whatsapp:', '').replace('+', '');
 }
 
-async function chamarEvolutionAPI(caminho, corpo) {
-  const resposta = await fetch(`${EVOLUTION_API_URL}${caminho}`, {
-    method: 'POST',
+async function chamarEvolutionAPI(caminho, corpo, method = 'POST') {
+  const init = {
+    method,
     headers: {
       'Content-Type': 'application/json',
       apikey: EVOLUTION_API_KEY,
     },
-    body: JSON.stringify(corpo),
-  });
+  };
+
+  if (method === 'POST') {
+    init.body = JSON.stringify(corpo);
+  }
+
+  const resposta = await fetch(`${EVOLUTION_API_URL}${caminho}`, init);
 
   if (!resposta.ok) {
     const textoErro = await resposta.text().catch(() => '');
@@ -32,6 +37,10 @@ async function chamarEvolutionAPI(caminho, corpo) {
   }
 
   return resposta.json();
+}
+
+async function testarConexaoEvolution() {
+  return chamarEvolutionAPI('/instance/fetchInstances', undefined, 'GET');
 }
 
 async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
@@ -61,4 +70,5 @@ module.exports = {
   chamarEvolutionAPI,
   enviarMensagemWhatsApp,
   buscarMidiaBase64,
+  testarConexaoEvolution,
 };

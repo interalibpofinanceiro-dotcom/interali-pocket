@@ -148,6 +148,17 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
     .join('');
 }
 
+async function testarAnthropic() {
+  return anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1,
+    system: 'Você está testando a conexão com a API da Anthropic. Responda apenas "pong".',
+    messages: [
+      { role: 'user', content: 'teste' },
+    ],
+  });
+}
+
 async function main() {
   const cliente = 'Valmir Tomé';
   const comprovantePath = path.join(__dirname, 'comprovantes', 'comprovante-valmir-tome.jpg');
@@ -184,4 +195,5 @@ module.exports = {
   extrairContasAPagarDeBuffer,
   consultarFluxoDeCaixa,
   getMediaType,
+  testarAnthropic,
 };

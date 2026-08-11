@@ -6,6 +6,7 @@ const {
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
   consultarFluxoDeCaixa,
+  testarAnthropic,
 } = require('./index');
 const {
   salvarComprovante,
@@ -41,6 +42,7 @@ const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
   buscarMidiaBase64,
+  testarConexaoEvolution,
 } = require('./evolution');
 const {
   validarVoucher,
@@ -327,9 +329,35 @@ function interpretarPedidoEspecialista(texto) {
   return /ativ|quero|sim|bora|pode|manda|isso/.test(t);
 }
 
+// Formatos diferentes de hospedagem/versão da Evolution API embrulham a mensagem de forma
+// diferente dentro de `body.data` (objeto direto vs. array `messages`) — tenta os formatos
+// conhecidos em ordem em vez de assumir só um, senão um payload num formato inesperado
+// quebra silenciosamente lá na frente (remoteJid/message undefined).
+function extrairPayloadMensagem(body) {
+  const data = body.data || body;
+
+  if (data && data.key && data.message) {
+    return data;
+  }
+
+  if (Array.isArray(data.messages) && data.messages.length > 0) {
+    return data.messages[0];
+  }
+
+  if (Array.isArray(data) && data.length > 0 && data[0].key && data[0].message) {
+    return data[0];
+  }
+
+  if (Array.isArray(body.messages) && body.messages.length > 0) {
+    return body.messages[0];
+  }
+
+  return data;
+}
+
 // Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
 function interpretarMensagem(data) {
-  const msg = data.message || {};
+  const msg = data.message || data;
 
   if (msg.imageMessage) {
     return { tipoMidia: 'image', mimeType: msg.imageMessage.mimetype, legenda: (msg.imageMessage.caption || '').toLowerCase() };
@@ -360,17 +388,17 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     return res.sendStatus(200);
   }
 
-  const data = body.data || {};
-  const remoteJid = data.key && data.key.remoteJid;
+  const payload = extrairPayloadMensagem(body);
+  const remoteJid = payload.key && payload.key.remoteJid;
 
   // Ignora eco de mensagens que o próprio agente mandou, e grupos/broadcast (só atende conversa 1:1).
-  if (!remoteJid || (data.key && data.key.fromMe) || !remoteJid.endsWith('@s.whatsapp.net')) {
-    console.log(`Webhook ignorado (sem remoteJid, é eco, ou não é conversa 1:1) | data.key=${JSON.stringify(data.key)}`);
+  if (!remoteJid || (payload.key && payload.key.fromMe) || !remoteJid.endsWith('@s.whatsapp.net')) {
+    console.log(`Webhook ignorado (sem remoteJid, é eco, ou não é conversa 1:1) | data.key=${JSON.stringify(payload.key)}`);
     return res.sendStatus(200);
   }
 
   const remetente = jidParaFormatoPlanilha(remoteJid);
-  const interpretado = interpretarMensagem(data);
+  const interpretado = interpretarMensagem(payload);
 
   console.log(`Mensagem recebida de ${remetente} | mídia: ${interpretado.tipoMidia || 'nenhuma'} | texto: ${interpretado.texto || interpretado.legenda || ''}`);
 
@@ -441,7 +469,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     const sheetId = cliente.sheetId;
 
     if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
-      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
       const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
       const extratoExistente = await buscarExtrato(sheetId);
       const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
@@ -462,7 +490,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         : '';
       await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
     } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
-      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
       const cartao = extrairNomeCartao(interpretado.legenda);
 
@@ -476,7 +504,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
       await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar${sufixoCartao}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
     } else if (interpretado.tipoMidia) {
-      const { buffer, mimeType } = await buscarMidiaBase64(data.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
 
       if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
@@ -875,6 +903,53 @@ app.post('/webhook-asaas', async (req, res) => {
     console.error('Erro ao processar webhook do Asaas:', error.message);
     res.sendStatus(200); // 200 mesmo em erro interno, pra evitar reenvio infinito do Asaas
   }
+});
+
+app.get('/health', async (_req, res) => {
+  const envChecks = {
+    evolution: {
+      url: !!process.env.EVOLUTION_API_URL,
+      key: !!process.env.EVOLUTION_API_KEY,
+      instance: !!process.env.EVOLUTION_INSTANCE,
+    },
+    anthropic: {
+      key: !!process.env.ANTHROPIC_API_KEY,
+    },
+    google: {
+      masterSheetId: !!process.env.GOOGLE_MASTER_SHEET_ID,
+      serviceAccountEmail: !!process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+      privateKey: !!process.env.GOOGLE_PRIVATE_KEY,
+    },
+  };
+
+  const services = {
+    evolution: { configured: envChecks.evolution.url && envChecks.evolution.key && envChecks.evolution.instance },
+    anthropic: { configured: envChecks.anthropic.key },
+  };
+
+  if (services.evolution.configured) {
+    try {
+      const instances = await testarConexaoEvolution();
+      services.evolution.reachable = true;
+      services.evolution.instances = Array.isArray(instances) ? instances.length : undefined;
+      services.evolution.instance = process.env.EVOLUTION_INSTANCE;
+    } catch (error) {
+      services.evolution.reachable = false;
+      services.evolution.error = error.message;
+    }
+  }
+
+  if (services.anthropic.configured) {
+    try {
+      await testarAnthropic();
+      services.anthropic.reachable = true;
+    } catch (error) {
+      services.anthropic.reachable = false;
+      services.anthropic.error = error.message;
+    }
+  }
+
+  res.json({ ok: true, envChecks, services });
 });
 
 app.listen(PORT, () => {
