@@ -126,6 +126,14 @@ const TEMPLATE_ADMIN_NOVO_LEAD = { nome: 'admin_novo_lead_pocket', idioma: 'pt_B
 const TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO = { nome: 'admin_pagamento_confirmado_pocket', idioma: 'pt_BR' }; // 3 vars: nome, whatsapp, plano
 const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; // 2 vars: tipo do aviso, detalhe (1 linha só — sem \n)
 
+// "Avisador" dos relatórios proativos (resumo/previsão semanal ou mensal, disparados por
+// /tarefas/relatorio e /tarefas/previsao) — o conteúdo de verdade (lista de categorias de despesa,
+// linhas de previsão) tem tamanho variável demais pra caber num template rígido da Meta, então o
+// bot manda só esse "avisador" fixo primeiro; quando o cliente responde qualquer coisa, abre a
+// janela de 24h e AÍ SIM o relatório completo sai em texto livre (igual já funciona quando o
+// cliente pede "resumo do mês" direto). 1 var: rótulo do que ficou pronto (ex.: "resumo da semana").
+const TEMPLATE_RELATORIO_PRONTO = { nome: 'relatorio_pronto_pocket', idioma: 'pt_BR' };
+
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
 const PLANOS = {
@@ -225,6 +233,13 @@ function interpretarRespostaDuplicidade(texto) {
 // igual ao cooldown de notificação de lead logo abaixo.
 const PENDENCIAS_DUPLICIDADE = new Map();
 const TIMEOUT_PENDENCIA_DUPLICIDADE_MS = 15 * 60 * 1000;
+
+// Relatório proativo avisado (template) esperando o cliente responder qualquer coisa pra liberar
+// o envio do conteúdo de verdade em texto livre — Map remetente → { tipo: 'resumo'|'previsao',
+// periodo, dias, criadoEm }. Timeout bem mais folgado que o de duplicidade (7 dias) porque não é
+// uma pergunta urgente, é só "quando você quiser ver, responde que eu mando".
+const PENDENCIAS_RELATORIO = new Map();
+const TIMEOUT_PENDENCIA_RELATORIO_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
@@ -449,6 +464,30 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
     const sheetId = cliente.sheetId;
 
+    // Cliente tinha um relatório proativo avisado (template "seu resumo está pronto") esperando
+    // ele responder qualquer coisa pra abrir a janela de 24h — checa ANTES do fluxo normal, senão
+    // a resposta ("oi", "manda") cairia na pergunta livre pro Claude à toa. Resolve a pendência de
+    // qualquer jeito (entregue ou expirada) pra não ficar reaparecendo em mensagens futuras.
+    if (!interpretado.tipoMidia && PENDENCIAS_RELATORIO.has(remetente)) {
+      const pendenciaRelatorio = PENDENCIAS_RELATORIO.get(remetente);
+      const expirouRelatorio = Date.now() - pendenciaRelatorio.criadoEm > TIMEOUT_PENDENCIA_RELATORIO_MS;
+      PENDENCIAS_RELATORIO.delete(remetente);
+
+      if (!expirouRelatorio) {
+        if (pendenciaRelatorio.tipo === 'previsao') {
+          const projecao = await gerarProjecao(sheetId, pendenciaRelatorio.dias);
+          await enviarMensagemWhatsApp(remetente, formatarProjecao(projecao));
+        } else {
+          const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
+          const resumo = gerarResumo(lancamentos, extrato, { periodo: pendenciaRelatorio.periodo });
+          const upsell = pendenciaRelatorio.periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
+          await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
+        }
+        return res.sendStatus(200);
+      }
+      // expirou (mais de 7 dias sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
+    }
+
     if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
@@ -671,19 +710,20 @@ app.all('/tarefas/relatorio/:periodo', async (req, res) => {
       ? clientes.filter((cliente) => cliente.numeroWhatsapp === req.query.numero)
       : clientes;
 
+    // Não manda o resumo completo direto — é o bot falando primeiro, sem o cliente ter mandado
+    // nada, e o conteúdo (lista de categorias de tamanho variável) não cabe num template rígido.
+    // Manda só o "avisador" (template) e guarda a pendência; o resumo de verdade sai em texto
+    // livre assim que o cliente responder qualquer coisa (ver bloco PENDENCIAS_RELATORIO no webhook).
+    const rotulo = periodo === 'semana' ? 'resumo da semana' : periodo === 'dia' ? 'resumo do dia' : 'resumo do mês';
     const resultados = [];
     for (const cliente of alvo) {
-      const [lancamentos, extrato] = await Promise.all([
-        buscarTodosLancamentos(cliente.sheetId),
-        buscarExtrato(cliente.sheetId),
-      ]);
-      const resumo = gerarResumo(lancamentos, extrato, { periodo });
-      const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
-      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarResumo(resumo) + upsell);
+      PENDENCIAS_RELATORIO.set(cliente.numeroWhatsapp, { tipo: 'resumo', periodo, criadoEm: Date.now() });
+      await enviarTemplateWhatsApp(cliente.numeroWhatsapp, TEMPLATE_RELATORIO_PRONTO.nome, TEMPLATE_RELATORIO_PRONTO.idioma, [rotulo])
+        .catch((erro) => console.error(`Falha ao avisar ${cliente.numeroWhatsapp} sobre relatório pronto:`, erro.message));
       resultados.push(cliente.numeroWhatsapp);
     }
 
-    res.json({ ok: true, periodo, enviados: resultados });
+    res.json({ ok: true, periodo, avisados: resultados });
   } catch (error) {
     console.error('Erro ao enviar relatório proativo:', error.message);
     res.status(500).json({ erro: error.message });
@@ -703,14 +743,19 @@ app.all('/tarefas/previsao', async (req, res) => {
       ? clientes.filter((cliente) => cliente.numeroWhatsapp === req.query.numero)
       : clientes;
 
+    // Mesma lógica do relatório acima: só o "avisador" via template, a previsão de verdade sai
+    // em texto livre quando o cliente responder (lista de contas a pagar também é variável demais
+    // pra caber num template).
+    const rotulo = `previsão de ${dias} dias`;
     const resultados = [];
     for (const cliente of alvo) {
-      const projecao = await gerarProjecao(cliente.sheetId, dias);
-      await enviarMensagemWhatsApp(cliente.numeroWhatsapp, formatarProjecao(projecao));
+      PENDENCIAS_RELATORIO.set(cliente.numeroWhatsapp, { tipo: 'previsao', dias, criadoEm: Date.now() });
+      await enviarTemplateWhatsApp(cliente.numeroWhatsapp, TEMPLATE_RELATORIO_PRONTO.nome, TEMPLATE_RELATORIO_PRONTO.idioma, [rotulo])
+        .catch((erro) => console.error(`Falha ao avisar ${cliente.numeroWhatsapp} sobre previsão pronta:`, erro.message));
       resultados.push(cliente.numeroWhatsapp);
     }
 
-    res.json({ ok: true, dias, enviados: resultados });
+    res.json({ ok: true, dias, avisados: resultados });
   } catch (error) {
     console.error('Erro ao enviar previsão proativa:', error.message);
     res.status(500).json({ erro: error.message });
