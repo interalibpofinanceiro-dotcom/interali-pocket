@@ -1,0 +1,42 @@
+name: Relatórios Proativos - Interali Pocket
+
+# Chama os endpoints /tarefas/relatorio/:periodo do server.js (Railway) em horários fixos —
+# necessário porque a hospedagem não sustenta um cron interno confiável. Ver
+# CLAUDE.MD/CONTEXTO.md e HISTORICO-COMPLETO.md no repositório de documentação pro contexto
+# completo (o server.js só manda um "avisador" via template; o relatório de verdade sai quando
+# o cliente responde).
+on:
+  schedule:
+    # Toda segunda-feira às 08:00 (horário de Brasília, UTC-3) — resumo da semana
+    - cron: '0 11 * * 1'
+    # Todo dia 1 do mês às 08:00 (horário de Brasília) — resumo do mês
+    - cron: '0 11 1 * *'
+  workflow_dispatch:
+    inputs:
+      periodo:
+        description: 'Período do relatório'
+        required: false
+        default: 'semana'
+        type: choice
+        options: [dia, semana, mes]
+
+jobs:
+  disparar-relatorio:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Define o período (agendado vs. disparo manual)
+        id: periodo
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "valor=${{ inputs.periodo }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "0 11 1 * *" ]; then
+            echo "valor=mes" >> "$GITHUB_OUTPUT"
+          else
+            echo "valor=semana" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Chama /tarefas/relatorio/${{ steps.periodo.outputs.valor }}
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/relatorio/${{ steps.periodo.outputs.valor }}?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n"
+          cat resposta.json
