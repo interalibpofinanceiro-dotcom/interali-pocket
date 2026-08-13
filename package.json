@@ -1,7 +1,7 @@
 {
   "name": "interali-pocket",
   "version": "1.0.0",
-  "description": "Interali Pocket - Assistente financeiro via WhatsApp (Evolution API) com Claude para extração de comprovantes/notas fiscais e consulta de fluxo de caixa",
+  "description": "Interali Pocket - Assistente financeiro via WhatsApp (Cloud API oficial da Meta) com Claude para extração de comprovantes/notas fiscais e consulta de fluxo de caixa",
   "main": "index.js",
   "type": "commonjs",
   "engines": {

@@ -42,8 +42,11 @@ const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
   buscarMidiaBase64,
-  testarConexaoEvolution,
-} = require('./evolution');
+  testarConexaoWhatsApp,
+  extrairMensagemDoWebhook,
+  interpretarMensagem,
+  verificarWebhook,
+} = require('./whatsapp');
 const {
   validarVoucher,
   queimarVoucher,
@@ -59,8 +62,7 @@ const { buscarOuCriarCliente, criarAssinatura, buscarLinkPagamento, atualizarVal
 const app = express();
 
 // Log de TODA requisição que chega, antes de qualquer outra coisa — inclusive as que não vão
-// bater em nenhuma rota. Sem isso, um caminho ou método inesperado (ex.: a Evolution mandando
-// pra "/webhook/messages-upsert" em vez de "/webhook") não deixa rastro nenhum nos logs.
+// bater em nenhuma rota. Sem isso, um caminho ou método inesperado não deixa rastro nenhum nos logs.
 app.use((req, _res, next) => {
   console.log(`Requisição recebida: ${req.method} ${req.originalUrl}`);
   next();
@@ -71,9 +73,8 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // type: '*/*' porque nem toda implementação de webhook manda o header Content-Type
 // exatamente como "application/json" — sem isso, o body chegaria vazio silenciosamente.
-// limit maior que o padrão (100kb) porque a Evolution API inclui thumbnails/dados em base64
-// no próprio payload do webhook de imagem e documento — sem isso, toda mensagem com mídia
-// era rejeitada com PayloadTooLargeError antes de chegar no handler (bug real encontrado em produção).
+// limit maior que o padrão (100kb): herdado da época da Evolution API (mandava thumbnail/base64
+// no próprio payload); a Cloud API oficial só manda o id da mídia, mas não custa manter a folga.
 app.use(express.json({ type: '*/*', limit: '50mb' }));
 
 const RELATORIO_SECRET = process.env.RELATORIO_SECRET;
@@ -329,76 +330,36 @@ function interpretarPedidoEspecialista(texto) {
   return /ativ|quero|sim|bora|pode|manda|isso/.test(t);
 }
 
-// Formatos diferentes de hospedagem/versão da Evolution API embrulham a mensagem de forma
-// diferente dentro de `body.data` (objeto direto vs. array `messages`) — tenta os formatos
-// conhecidos em ordem em vez de assumir só um, senão um payload num formato inesperado
-// quebra silenciosamente lá na frente (remoteJid/message undefined).
-function extrairPayloadMensagem(body) {
-  const data = body.data || body;
+// Verificação do webhook exigida pela Meta ao configurar a URL no Business Manager — GET com
+// "hub.mode=subscribe" e "hub.verify_token" batendo com WHATSAPP_WEBHOOK_VERIFY_TOKEN. Sem isso a
+// Meta recusa salvar a URL do webhook. Mesma regex de caminho do POST, por consistência.
+app.get(/^\/webhook(\/.*)?$/, (req, res) => {
+  const desafio = verificarWebhook(req.query);
 
-  if (data && data.key && data.message) {
-    return data;
+  if (desafio === null) {
+    console.log('Verificação de webhook recusada — hub.verify_token não bateu com WHATSAPP_WEBHOOK_VERIFY_TOKEN.');
+    return res.sendStatus(403);
   }
 
-  if (Array.isArray(data.messages) && data.messages.length > 0) {
-    return data.messages[0];
-  }
+  return res.status(200).send(desafio);
+});
 
-  if (Array.isArray(data) && data.length > 0 && data[0].key && data[0].message) {
-    return data[0];
-  }
-
-  if (Array.isArray(body.messages) && body.messages.length > 0) {
-    return body.messages[0];
-  }
-
-  return data;
-}
-
-// Extrai texto simples e dados de mídia de uma mensagem do formato Evolution (messages.upsert).
-function interpretarMensagem(data) {
-  const msg = data.message || data;
-
-  if (msg.imageMessage) {
-    return { tipoMidia: 'image', mimeType: msg.imageMessage.mimetype, legenda: (msg.imageMessage.caption || '').toLowerCase() };
-  }
-  if (msg.documentMessage) {
-    return { tipoMidia: 'document', mimeType: msg.documentMessage.mimetype, legenda: (msg.documentMessage.caption || '').toLowerCase() };
-  }
-
-  const texto = msg.conversation || (msg.extendedTextMessage && msg.extendedTextMessage.text) || '';
-  return { tipoMidia: null, texto: texto.trim() };
-}
-
-// Regex em vez de string fixa: se "Webhook by Events" estiver ligado na Evolution, ela manda
-// pra "/webhook/<nome-do-evento>" (ex.: "/webhook/messages-upsert") em vez de só "/webhook" —
-// isso aceita os dois casos, então não depende de lembrar de manter aquele toggle desligado.
 app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   const body = req.body || {};
 
-  // Log cru de tudo que chega, mesmo eventos que vamos ignorar — sem isso, um payload em
-  // formato inesperado (ex.: nome do evento diferente do previsto) não deixa nenhum rastro nos logs.
-  console.log(`Webhook recebido | event=${body.event} | chaves do body=${Object.keys(body).join(',')}`);
+  // Log cru de tudo que chega — sem isso, um payload em formato inesperado não deixa rastro nos logs.
+  console.log(`Webhook recebido | object=${body.object} | chaves do body=${Object.keys(body).join(',')}`);
 
-  // Só nos interessa evento de mensagem recebida; ignora connection.update, qrcode.updated etc.
-  // Normaliza porque versões/telas diferentes da Evolution API usam grafias diferentes pro mesmo evento
-  // (ex.: "messages.upsert" vs "MESSAGES_UPSERT").
-  const eventoNormalizado = (body.event || '').toString().toUpperCase().replace(/[.\s]/g, '_');
-  if (eventoNormalizado !== 'MESSAGES_UPSERT') {
+  const msg = extrairMensagemDoWebhook(body);
+
+  // Sem "messages" no payload (ex.: evento "statuses" — confirmação de entrega/leitura de uma
+  // mensagem que o próprio bot mandou) — nada a processar, só confirma recebimento pra Meta.
+  if (!msg) {
     return res.sendStatus(200);
   }
 
-  const payload = extrairPayloadMensagem(body);
-  const remoteJid = payload.key && payload.key.remoteJid;
-
-  // Ignora eco de mensagens que o próprio agente mandou, e grupos/broadcast (só atende conversa 1:1).
-  if (!remoteJid || (payload.key && payload.key.fromMe) || !remoteJid.endsWith('@s.whatsapp.net')) {
-    console.log(`Webhook ignorado (sem remoteJid, é eco, ou não é conversa 1:1) | data.key=${JSON.stringify(payload.key)}`);
-    return res.sendStatus(200);
-  }
-
-  const remetente = jidParaFormatoPlanilha(remoteJid);
-  const interpretado = interpretarMensagem(payload);
+  const remetente = jidParaFormatoPlanilha(msg.from);
+  const interpretado = interpretarMensagem(msg);
 
   console.log(`Mensagem recebida de ${remetente} | mídia: ${interpretado.tipoMidia || 'nenhuma'} | texto: ${interpretado.texto || interpretado.legenda || ''}`);
 
@@ -469,7 +430,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     const sheetId = cliente.sheetId;
 
     if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
-      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
       const extratoExistente = await buscarExtrato(sheetId);
       const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
@@ -490,7 +451,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         : '';
       await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
     } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
-      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
       const cartao = extrairNomeCartao(interpretado.legenda);
 
@@ -504,7 +465,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
       await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar${sufixoCartao}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
     } else if (interpretado.tipoMidia) {
-      const { buffer, mimeType } = await buscarMidiaBase64(payload.key.id);
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
 
       if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
@@ -907,10 +868,10 @@ app.post('/webhook-asaas', async (req, res) => {
 
 app.get('/health', async (_req, res) => {
   const envChecks = {
-    evolution: {
-      url: !!process.env.EVOLUTION_API_URL,
-      key: !!process.env.EVOLUTION_API_KEY,
-      instance: !!process.env.EVOLUTION_INSTANCE,
+    whatsapp: {
+      phoneNumberId: !!process.env.WHATSAPP_PHONE_NUMBER_ID,
+      accessToken: !!process.env.WHATSAPP_ACCESS_TOKEN,
+      webhookVerifyToken: !!process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN,
     },
     anthropic: {
       key: !!process.env.ANTHROPIC_API_KEY,
@@ -923,19 +884,20 @@ app.get('/health', async (_req, res) => {
   };
 
   const services = {
-    evolution: { configured: envChecks.evolution.url && envChecks.evolution.key && envChecks.evolution.instance },
+    whatsapp: { configured: envChecks.whatsapp.phoneNumberId && envChecks.whatsapp.accessToken },
     anthropic: { configured: envChecks.anthropic.key },
   };
 
-  if (services.evolution.configured) {
+  if (services.whatsapp.configured) {
     try {
-      const instances = await testarConexaoEvolution();
-      services.evolution.reachable = true;
-      services.evolution.instances = Array.isArray(instances) ? instances.length : undefined;
-      services.evolution.instance = process.env.EVOLUTION_INSTANCE;
+      const info = await testarConexaoWhatsApp();
+      services.whatsapp.reachable = true;
+      services.whatsapp.numero = info.display_phone_number;
+      services.whatsapp.nomeVerificado = info.verified_name;
+      services.whatsapp.qualidade = info.quality_rating;
     } catch (error) {
-      services.evolution.reachable = false;
-      services.evolution.error = error.message;
+      services.whatsapp.reachable = false;
+      services.whatsapp.error = error.message;
     }
   }
 
@@ -954,6 +916,6 @@ app.get('/health', async (_req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Servidor Interali Pocket rodando na porta ${PORT}`);
-  console.log(`Webhook: POST http://localhost:${PORT}/webhook`);
-  console.log(`Instância Evolution configurada: ${process.env.EVOLUTION_INSTANCE}`);
+  console.log(`Webhook: POST http://localhost:${PORT}/webhook (verificação GET também nesse mesmo caminho)`);
+  console.log(`Phone Number ID configurado: ${process.env.WHATSAPP_PHONE_NUMBER_ID}`);
 });

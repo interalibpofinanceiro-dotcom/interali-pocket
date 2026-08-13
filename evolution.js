@@ -1,3 +1,7 @@
+// ⚠️ SUPERADO em 13/08/2026 — ninguém mais importa este arquivo (server.js e os CLIs agora usam
+// `whatsapp.js`, que fala com a WhatsApp Cloud API oficial da Meta). Mantido só de referência
+// (Evolution API/Baileys, não-oficial) caso precise voltar a usar no futuro. Ver
+// CLAUDE.MD/HISTORICO-COMPLETO.md seção 14 pro contexto da migração.
 require('dotenv').config();
 
 const EVOLUTION_API_URL = (process.env.EVOLUTION_API_URL || '').replace(/\/$/, '');

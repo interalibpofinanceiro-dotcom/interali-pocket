@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { adicionarCliente } = require('./clientes');
-const { enviarMensagemWhatsApp } = require('./evolution');
+const { enviarMensagemWhatsApp } = require('./whatsapp');
 
 const [, , numero, nome, sheetId] = process.argv;
 
