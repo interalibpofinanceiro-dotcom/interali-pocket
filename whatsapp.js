@@ -85,6 +85,34 @@ async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
   return ultimaResposta;
 }
 
+// Manda mensagem de TEMPLATE — obrigatório pra falar primeiro com alguém que nunca mandou
+// mensagem pro número, ou fora da janela de 24h de atendimento (texto livre é rejeitado pela
+// Cloud API nesses casos; só template pré-aprovado pode "abrir" a conversa). `parametros` é um
+// array de strings, na MESMA ORDEM das variáveis {{1}}, {{2}}... do corpo do template aprovado
+// no WhatsApp Manager — precisa bater exatamente, senão a Meta rejeita o envio.
+async function enviarTemplateWhatsApp(numeroDestinoPlanilha, nomeTemplate, idioma, parametros = []) {
+  const to = formatoPlanilhaParaNumero(numeroDestinoPlanilha);
+
+  const template = {
+    name: nomeTemplate,
+    language: { code: idioma },
+  };
+
+  if (parametros.length > 0) {
+    template.components = [{
+      type: 'body',
+      parameters: parametros.map((texto) => ({ type: 'text', text: String(texto) })),
+    }];
+  }
+
+  return chamarGraphAPI(`/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'template',
+    template,
+  });
+}
+
 // Baixa o binário (imagem/PDF) de uma mídia recebida, a partir do id que vem no webhook — a Cloud
 // API não manda o arquivo direto no payload, só o id. É preciso 2 passos: 1) pedir a URL temporária
 // de download (expira em poucos minutos), 2) baixar o binário dessa URL, com o mesmo token Bearer.
@@ -146,6 +174,7 @@ module.exports = {
   formatoPlanilhaParaNumero,
   chamarGraphAPI,
   enviarMensagemWhatsApp,
+  enviarTemplateWhatsApp,
   buscarMidiaBase64,
   testarConexaoWhatsApp,
   extrairMensagemDoWebhook,

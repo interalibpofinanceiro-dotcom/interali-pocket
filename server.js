@@ -41,6 +41,7 @@ const {
 const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
+  enviarTemplateWhatsApp,
   buscarMidiaBase64,
   testarConexaoWhatsApp,
   extrairMensagemDoWebhook,
@@ -110,6 +111,12 @@ function montarMensagemBoasVindas(nome) {
     (SUPORTE_TEXTO ? `\n\n${SUPORTE_TEXTO}` : '')
   );
 }
+
+// Template de boas-vindas submetido pra aprovação da Meta em 13/08/2026 (WhatsApp Manager →
+// Modelos de mensagem, ID 1949215835763557, categoria UTILITY). 1 variável: nome do cliente.
+// Corpo aprovado (não pode divergir do que foi submetido, senão a Meta rejeita o envio):
+//   "Olá, {{1}}! Seu Interali Pocket já está ativo 🤖💰 [...instruções de uso...]"
+const TEMPLATE_BOAS_VINDAS = { nome: 'boas_vindas_pocket', idioma: 'pt_BR' };
 
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
@@ -844,10 +851,20 @@ app.post('/webhook-asaas', async (req, res) => {
 
     const numerosParaAvisar = [numeroAtivacao, assinatura.whatsappAtivacao2].filter(Boolean);
     for (const numero of numerosParaAvisar) {
+      // Esse é o PRIMEIRO contato do bot com esse número (cliente pagou pelo site, nunca mandou
+      // mensagem antes) — fora da janela de 24h de atendimento, a Cloud API rejeita texto livre
+      // nesse caso. Só um template pré-aprovado consegue "abrir" a conversa. Ver TEMPLATE_BOAS_VINDAS.
+      await enviarTemplateWhatsApp(numero, TEMPLATE_BOAS_VINDAS.nome, TEMPLATE_BOAS_VINDAS.idioma, [assinatura.nome || 'cliente'])
+        .catch((erro) => console.error('Falha ao mandar template de boas-vindas pro cliente novo:', erro.message));
+
+      // Detalhe do plano/upsell Especialista — best-effort, texto livre. Só chega de fato se já
+      // existir uma janela de 24h aberta com esse número (ex.: cliente mandou mensagem antes de
+      // pagar); caso contrário falha silenciosamente, sem prejuízo — o essencial (ativação + como
+      // usar o bot) já foi garantido pelo template acima.
       await enviarMensagemWhatsApp(
         numero,
-        `🎉 Pagamento confirmado! Seu Interali Pocket (${assinatura.plano}) já está ativo.${linhaReuniao}\n\n` + montarMensagemBoasVindas(assinatura.nome)
-      ).catch((erro) => console.error('Falha ao mandar boas-vindas pro cliente novo:', erro.message));
+        `🎉 Pagamento confirmado! Seu plano: ${assinatura.plano}.${linhaReuniao}`
+      ).catch(() => {});
     }
 
     if (ADMIN_WHATSAPP_NUMBER) {
