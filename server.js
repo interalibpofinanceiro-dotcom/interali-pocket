@@ -118,6 +118,14 @@ function montarMensagemBoasVindas(nome) {
 //   "Olá, {{1}}! Seu Interali Pocket já está ativo 🤖💰 [...instruções de uso...]"
 const TEMPLATE_BOAS_VINDAS = { nome: 'boas_vindas_pocket', idioma: 'pt_BR' };
 
+// Templates de aviso pro ADMIN, submetidos em 13/08/2026 junto com o de boas-vindas — cobrem
+// todo aviso que o bot manda pro admin (Aroldo) sem ele ter mandado mensagem recente (fora da
+// janela de 24h, precisa de template pra garantir entrega). Dois dedicados (lead e pagamento
+// confirmado, os eventos de maior valor) + um genérico (demais avisos administrativos).
+const TEMPLATE_ADMIN_NOVO_LEAD = { nome: 'admin_novo_lead_pocket', idioma: 'pt_BR' }; // 1 var: número do lead
+const TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO = { nome: 'admin_pagamento_confirmado_pocket', idioma: 'pt_BR' }; // 3 vars: nome, whatsapp, plano
+const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; // 2 vars: tipo do aviso, detalhe (1 linha só — sem \n)
+
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
 const PLANOS = {
@@ -152,10 +160,15 @@ async function notificarAdminSobreLead(remetente) {
   if (agora - ultimaNotificacao < COOLDOWN_NOTIFICACAO_LEAD_MS) return;
   ULTIMA_NOTIFICACAO_LEAD.set(remetente, agora);
 
+  // Template primeiro — garante a entrega mesmo se o admin não tiver mensagem recente com o bot.
+  await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_ADMIN_NOVO_LEAD.nome, TEMPLATE_ADMIN_NOVO_LEAD.idioma, [remetente])
+    .catch((erro) => console.error('Falha ao notificar admin sobre lead (template):', erro.message));
+
+  // Texto livre com o comando pronto pra copiar — best-effort, só chega se já houver sessão aberta.
   await enviarMensagemWhatsApp(
     ADMIN_WHATSAPP_NUMBER,
     `🔔 Novo lead no Interali Pocket: ${remetente} tentou mandar mensagem e ainda não está cadastrado.\n\nPra liberar: npm run cadastrar-cliente -- "${remetente}" "Nome" "ID_DA_PLANILHA"`
-  ).catch((erro) => console.error('Falha ao notificar admin sobre lead:', erro.message));
+  ).catch(() => {});
 }
 
 function formatarNumero(valor) {
@@ -567,10 +580,15 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           );
 
           if (ADMIN_WHATSAPP_NUMBER) {
+            await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
+              'Upgrade Especialista ativado',
+              `${cliente.nome} (${remetente}) — ${novoNome}, R$ ${novoValor.toFixed(2)} — agendar reunião de diagnóstico`,
+            ]).catch((erro) => console.error('Falha ao notificar admin sobre upgrade especialista (template):', erro.message));
+
             await enviarMensagemWhatsApp(
               ADMIN_WHATSAPP_NUMBER,
               `🧑‍💼 Upgrade Especialista ativado sozinho via WhatsApp!\n\n👤 ${cliente.nome}\n📱 ${remetente}\n📋 ${novoNome} (R$ ${novoValor.toFixed(2)})\n\nAgendar a reunião de diagnóstico com esse cliente!`
-            ).catch((erro) => console.error('Falha ao notificar admin sobre upgrade especialista:', erro.message));
+            ).catch(() => {});
           }
         } else {
           // Sem assinatura Asaas rastreada (ex.: cliente cadastrado manualmente, fora do
@@ -580,10 +598,15 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
             `Show, ${cliente.nome || ''}! Registrei seu interesse na Análise Mensal com Especialista — a equipe vai entrar em contato por aqui pra confirmar o pagamento e agendar.`
           );
           if (ADMIN_WHATSAPP_NUMBER) {
+            await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
+              'Pedido de Especialista sem assinatura rastreada',
+              `${cliente.nome} (${remetente}) — combinar cobrança manual`,
+            ]).catch((erro) => console.error('Falha ao notificar admin sobre pedido de especialista sem assinatura (template):', erro.message));
+
             await enviarMensagemWhatsApp(
               ADMIN_WHATSAPP_NUMBER,
               `🧑‍💼 Cliente pediu upgrade do Especialista pelo WhatsApp, mas não achei assinatura Asaas rastreada pra esse número (provável cadastro manual) — precisa combinar a cobrança manual.\n\n👤 ${cliente.nome}\n📱 ${remetente}`
-            ).catch((erro) => console.error('Falha ao notificar admin sobre pedido de especialista sem assinatura:', erro.message));
+            ).catch(() => {});
           }
         }
       } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
@@ -613,10 +636,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
     if (ADMIN_WHATSAPP_NUMBER) {
       const nomeCliente = cliente ? cliente.nome : '(não identificado)';
+
+      await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
+        'Erro processando mensagem',
+        `${nomeCliente} (${remetente}) — tipo ${interpretado.tipoMidia || 'texto'} — ${error.message}`,
+      ]).catch((erroNotificacao) => console.error('Falha ao notificar admin sobre erro de processamento (template):', erroNotificacao.message));
+
       await enviarMensagemWhatsApp(
         ADMIN_WHATSAPP_NUMBER,
         `⚠️ Erro processando mensagem no Interali Pocket\n\n👤 ${nomeCliente}\n📱 ${remetente}\n📎 Tipo: ${interpretado.tipoMidia || 'texto'}\n❌ ${error.message}`
-      ).catch((erroNotificacao) => console.error('Falha ao notificar admin sobre erro de processamento:', erroNotificacao.message));
+      ).catch(() => {});
     }
   }
 
@@ -788,10 +817,20 @@ app.post('/api/assinar', async (req, res) => {
     const linhaEspecialista = comEspecialista ? '\n🧑‍💼 Com Análise Mensal com Especialista' : '';
     const linhaAtivacao = numeroAtivacao !== numeroFormatado ? `\n📲 Ativação: ${numeroAtivacao}` : '';
     const linhaAtivacao2 = numeroAtivacao2 ? `\n📲 2º número de ativação: ${numeroAtivacao2}` : '';
+
+    const detalheUmaLinha = `${nome} (${numeroFormatado}) — ${nomePlanoCompleto}, R$ ${valorFinal.toFixed(2)}`
+      + (voucherAplicado ? ` | voucher ${voucherAplicado}` : '')
+      + (comEspecialista ? ' | com Especialista' : '')
+      + (numeroAtivacao !== numeroFormatado ? ` | ativação ${numeroAtivacao}` : '');
+    await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
+      'Novo checkout iniciado (aguardando pagamento)',
+      detalheUmaLinha,
+    ]).catch((erro) => console.error('Falha ao notificar admin sobre assinatura (template):', erro.message));
+
     await enviarMensagemWhatsApp(
       ADMIN_WHATSAPP_NUMBER,
       `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${nomePlanoCompleto} (R$ ${valorFinal.toFixed(2)})${linhaVoucher}${linhaEspecialista}${linhaAtivacao}${linhaAtivacao2}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
-    ).catch((erro) => console.error('Falha ao notificar admin sobre assinatura:', erro.message));
+    ).catch(() => {});
   }
 
   res.json({ ok: true, plano: { ...planoFinal, nome: nomePlanoCompleto, valor: valorFinal }, redirectUrl: linkPagamento });
@@ -868,12 +907,20 @@ app.post('/webhook-asaas', async (req, res) => {
     }
 
     if (ADMIN_WHATSAPP_NUMBER) {
+      // Template primeiro — garante a entrega desse aviso (pagamento confirmado é o evento mais
+      // importante do sistema) mesmo se o admin não tiver mensagem recente com o bot.
+      await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO.nome, TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO.idioma, [
+        assinatura.nome || 'cliente',
+        numeroAtivacao,
+        assinatura.plano,
+      ]).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática (template):', erro.message));
+
       const avisoEspecialista = assinatura.planoEspecialista ? '\n🧑‍💼 Com Especialista — agendar a reunião de diagnóstico com esse cliente!' : '';
       const linhaSegundoNumero = assinatura.whatsappAtivacao2 ? `\n📲 2º número ativado: ${assinatura.whatsappAtivacao2}` : '';
       await enviarMensagemWhatsApp(
         ADMIN_WHATSAPP_NUMBER,
         `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${numeroAtivacao}${linhaSegundoNumero}\n📋 ${assinatura.plano}${avisoEspecialista}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
-      ).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática:', erro.message));
+      ).catch(() => {});
     }
 
     res.sendStatus(200);

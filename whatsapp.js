@@ -85,6 +85,14 @@ async function enviarMensagemWhatsApp(numeroDestinoPlanilha, texto) {
   return ultimaResposta;
 }
 
+// A Meta proíbe quebra de linha, tab e mais de 4 espaços seguidos DENTRO do valor de uma
+// variável de template (o texto fixo do corpo pode ter `\n` à vontade, só o valor da variável
+// não pode) — sem isso o envio é rejeitado. Aplicado automaticamente em todo `enviarTemplateWhatsApp`
+// pra quem chama não precisar lembrar disso toda vez (ex.: `error.message` às vezes vem com quebra).
+function sanitizarParametroTemplate(texto) {
+  return String(texto ?? '').replace(/[\r\n\t]+/g, ' ').replace(/ {5,}/g, '    ').trim();
+}
+
 // Manda mensagem de TEMPLATE — obrigatório pra falar primeiro com alguém que nunca mandou
 // mensagem pro número, ou fora da janela de 24h de atendimento (texto livre é rejeitado pela
 // Cloud API nesses casos; só template pré-aprovado pode "abrir" a conversa). `parametros` é um
@@ -101,7 +109,7 @@ async function enviarTemplateWhatsApp(numeroDestinoPlanilha, nomeTemplate, idiom
   if (parametros.length > 0) {
     template.components = [{
       type: 'body',
-      parameters: parametros.map((texto) => ({ type: 'text', text: String(texto) })),
+      parameters: parametros.map((texto) => ({ type: 'text', text: sanitizarParametroTemplate(texto) })),
     }];
   }
 
