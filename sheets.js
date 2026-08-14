@@ -37,6 +37,34 @@ const CABECALHO_CONTAS_A_PAGAR = [
   'Grupo_DRE',
 ];
 
+// Itens individuais de cada comprovante/nota (ex.: "Queijo Muçarela 5kg", "Azeitona Verde 2kg") —
+// o Claude já extrai isso (campo `itens[]`, ver prompts.js) mas até 13/08/2026 era descartado na
+// hora de salvar, só ficava a categoria geral do documento inteiro. Guardado numa aba separada
+// (não dentro de Lancamentos, que é uma linha por documento) pra permitir responder perguntas tipo
+// "quanto comprei de queijo esse mês?" com precisão. `Lancamento_Linha` liga cada item de volta
+// pro lançamento pai (linha real na aba Lancamentos), só pra rastreabilidade/debug.
+const ABA_ITENS = 'ItensComprovante';
+const CABECALHO_ITENS = [
+  'Data', 'Lancamento_Linha', 'Estabelecimento_Pessoa', 'Descricao', 'Quantidade', 'Valor_Unitario', 'Valor_Total', 'Registrado_Em',
+];
+
+// Despesas/receitas fixas recorrentes (ex.: "todo dia 10 pago marketing R$1.000") — cadastradas
+// uma vez pelo comando "recorrente:" (ver server.js) e lançadas automaticamente todo mês pelo
+// endpoint /tarefas/despesas-fixas (chamado pelo cron diário do GitHub Actions). `Ultimo_Lancamento_Mes`
+// guarda o "AAAA-MM" do último mês em que já foi lançada, pra não lançar duas vezes no mesmo mês.
+const ABA_DESPESAS_FIXAS = 'DespesasFixas';
+const CABECALHO_DESPESAS_FIXAS = [
+  'Descricao', 'Valor', 'Dia_Do_Mes', 'Tipo', 'Estabelecimento_Pessoa', 'Categoria', 'Subcategoria', 'Grupo_DRE',
+  'Ativo', 'Registrado_Em', 'Ultimo_Lancamento_Mes',
+];
+
+// Extrai o número da linha real a partir do "updatedRange" que a API do Sheets devolve depois de
+// um append (ex.: "Lancamentos!A5:O5" -> 5) — usado pra ligar os itens de volta pro lançamento pai.
+function extrairNumeroLinha(updatedRange) {
+  const match = (updatedRange || '').match(/![A-Z]+(\d+):/);
+  return match ? Number(match[1]) : null;
+}
+
 function getAuthClient() {
   const privateKey = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
   return new google.auth.JWT(
@@ -103,6 +131,8 @@ async function buscarLinhas(spreadsheetId, nomeAba, range) {
   }
 }
 
+// Devolve o número da linha real onde o lançamento caiu (ver extrairNumeroLinha) — quem chama usa
+// isso pra ligar os itens do documento (salvarItens) de volta a este lançamento específico.
 async function salvarComprovante(spreadsheetId, dados) {
   const sheets = getSheetsClient();
 
@@ -126,12 +156,122 @@ async function salvarComprovante(spreadsheetId, dados) {
     'Pendente', // status inicial — atualizado pra "Conciliado..." quando bater com o extrato (ver sincronizarConciliacao em reconciliacao.js)
   ];
 
-  await sheets.spreadsheets.values.append({
+  const resposta = await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: `${ABA_LANCAMENTOS}!A:O`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [linha] },
+  });
+
+  return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
+}
+
+// Salva os itens individuais de um documento (campo `itens[]` da extração — ver prompts.js) numa
+// aba própria, ligados ao lançamento pai por `lancamentoLinha`. Automático: não depende de
+// configuração nenhuma por cliente/nicho, é só persistir o que o Claude já identifica sozinho.
+async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancamentoLinha }) {
+  if (!itens || itens.length === 0) {
+    return;
+  }
+
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ITENS, CABECALHO_ITENS);
+
+  const registradoEm = new Date().toISOString();
+  const linhas = itens.map((item) => [
+    data || '',
+    lancamentoLinha ?? '',
+    estabelecimento || '',
+    item.descricao || '',
+    item.quantidade ?? '',
+    item.valor_unitario ?? '',
+    item.valor_total ?? '',
+    registradoEm,
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${ABA_ITENS}!A:H`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linhas },
+  });
+}
+
+async function buscarTodosItens(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_ITENS, 'A2:H');
+
+  return linhas.map((linha) => ({
+    data: linha[0] || '',
+    lancamento_linha: linha[1] || '',
+    estabelecimento_ou_pessoa: linha[2] || '',
+    descricao: linha[3] || '',
+    quantidade: linha[4] ? numeroBR(linha[4]) : null,
+    valor_unitario: linha[5] ? numeroBR(linha[5]) : null,
+    valor_total: linha[6] ? numeroBR(linha[6]) : null,
+  }));
+}
+
+async function salvarDespesaFixa(spreadsheetId, dados) {
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_DESPESAS_FIXAS, CABECALHO_DESPESAS_FIXAS);
+
+  const linha = [
+    dados.descricao || '',
+    dados.valor || 0,
+    dados.dia_do_mes || '',
+    dados.tipo_movimentacao || 'saida',
+    dados.estabelecimento_ou_pessoa || '',
+    dados.categoria || '',
+    dados.subcategoria || '',
+    dados.grupo_dre || '',
+    'Sim', // Ativo — cadastro novo sempre começa ativo
+    new Date().toISOString(),
+    '', // Ultimo_Lancamento_Mes — vazio até o primeiro auto-lançamento
+  ];
+
+  const resposta = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${ABA_DESPESAS_FIXAS}!A:K`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: [linha] },
+  });
+
+  return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
+}
+
+async function buscarDespesasFixas(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_DESPESAS_FIXAS, 'A2:K');
+
+  return linhas.map((linha, indice) => ({
+    linha: indice + 2,
+    descricao: linha[0] || '',
+    valor: numeroBR(linha[1]),
+    dia_do_mes: linha[2] ? Number(linha[2]) : null,
+    tipo_movimentacao: linha[3] || 'saida',
+    estabelecimento_ou_pessoa: linha[4] || '',
+    categoria: linha[5] || '',
+    subcategoria: linha[6] || '',
+    grupo_dre: linha[7] || '',
+    ativo: (linha[8] || '').toLowerCase() === 'sim',
+    ultimo_lancamento_mes: linha[10] || '',
+  }));
+}
+
+// Marca que a despesa fixa já foi lançada neste mês (AAAA-MM), pra /tarefas/despesas-fixas não
+// lançar de novo se rodar mais de uma vez no mesmo mês.
+async function marcarDespesaFixaLancada(spreadsheetId, linha, mesAno) {
+  const sheets = getSheetsClient();
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_DESPESAS_FIXAS}!K${linha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[mesAno]] },
   });
 }
 
@@ -273,4 +413,9 @@ module.exports = {
   buscarExtrato,
   salvarContasAPagar,
   buscarContasAPagar,
+  salvarItens,
+  buscarTodosItens,
+  salvarDespesaFixa,
+  buscarDespesasFixas,
+  marcarDespesaFixaLancada,
 };

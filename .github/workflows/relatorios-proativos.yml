@@ -1,20 +1,26 @@
-name: Relatórios Proativos - Interali Pocket
+name: Tarefas Proativas - Interali Pocket
 
-# Chama os endpoints /tarefas/relatorio/:periodo do server.js (Railway) em horários fixos —
-# necessário porque a hospedagem não sustenta um cron interno confiável. Ver
-# CLAUDE.MD/CONTEXTO.md e HISTORICO-COMPLETO.md no repositório de documentação pro contexto
-# completo (o server.js só manda um "avisador" via template; o relatório de verdade sai quando
-# o cliente responde).
+# Chama os endpoints /tarefas/* do server.js (Railway) em horários fixos — necessário porque a
+# hospedagem não sustenta um cron interno confiável. Ver CLAUDE.MD/CONTEXTO.md e
+# HISTORICO-COMPLETO.md no repositório de documentação pro contexto completo.
+#
+# 2 tarefas, 2 jobs (cada um só roda no seu próprio agendamento, ou nos dois via disparo manual):
+# - disparar-relatorio: resumo semanal (toda segunda) / mensal (dia 1) — manda só o "avisador"
+#   via template; o relatório de verdade sai quando o cliente responde.
+# - disparar-despesas-fixas: todo dia, lança sozinho toda despesa/receita fixa recorrente
+#   (comando "recorrente:") cujo dia bate com hoje.
 on:
   schedule:
     # Toda segunda-feira às 08:00 (horário de Brasília, UTC-3) — resumo da semana
     - cron: '0 11 * * 1'
     # Todo dia 1 do mês às 08:00 (horário de Brasília) — resumo do mês
     - cron: '0 11 1 * *'
+    # Todo dia às 08:00 (horário de Brasília) — despesas/receitas fixas recorrentes
+    - cron: '0 11 * * *'
   workflow_dispatch:
     inputs:
       periodo:
-        description: 'Período do relatório'
+        description: 'Período do relatório (também dispara despesas fixas junto)'
         required: false
         default: 'semana'
         type: choice
@@ -22,6 +28,7 @@ on:
 
 jobs:
   disparar-relatorio:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 11 * * 1' || github.event.schedule == '0 11 1 * *'
     runs-on: ubuntu-latest
     steps:
       - name: Define o período (agendado vs. disparo manual)
@@ -38,5 +45,15 @@ jobs:
       - name: Chama /tarefas/relatorio/${{ steps.periodo.outputs.valor }}
         run: |
           curl -sf -X POST "https://pocket.interali.com.br/tarefas/relatorio/${{ steps.periodo.outputs.valor }}?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n"
+          cat resposta.json
+
+  disparar-despesas-fixas:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 11 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chama /tarefas/despesas-fixas
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/despesas-fixas?chave=${{ secrets.RELATORIO_SECRET }}" \
             -o resposta.json -w "\nHTTP %{http_code}\n"
           cat resposta.json

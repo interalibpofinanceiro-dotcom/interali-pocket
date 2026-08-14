@@ -2,7 +2,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PROMPT_EXTRACAO, PROMPT_CONSULTA, PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR } = require('./prompts');
+const { PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA, PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR } = require('./prompts');
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -67,6 +67,53 @@ async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
   return extrairJSON(textoResposta);
 }
 
+// Lançamento manual por texto — sem imagem, então manda a data de hoje explicitamente junto (o
+// Claude não tem noção confiável da data atual sozinho, e a mensagem quase sempre é relativa a
+// "hoje"/"ontem"/"dia N" — ver REGRAS SOBRE A DATA em PROMPT_EXTRACAO_TEXTO).
+async function extrairComprovanteDeTexto(texto) {
+  const hoje = new Date().toISOString().slice(0, 10); // "AAAA-MM-DD"
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 1024,
+    system: PROMPT_EXTRACAO_TEXTO,
+    messages: [
+      {
+        role: 'user',
+        content: `Data de hoje: ${hoje}\n\nMensagem do cliente: ${texto}`,
+      },
+    ],
+  });
+
+  const textoResposta = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  return extrairJSON(textoResposta);
+}
+
+// Cadastro de despesa/receita fixa recorrente (comando "recorrente:" — ver server.js). Não
+// depende da data de hoje (é uma REGRA, não um lançamento pontual — "dia_do_mes" se repete todo
+// mês), então não precisa mandar a data como em extrairComprovanteDeTexto.
+async function extrairDespesaFixaDeTexto(texto) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 512,
+    system: PROMPT_DESPESA_FIXA,
+    messages: [
+      { role: 'user', content: texto },
+    ],
+  });
+
+  const textoResposta = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  return extrairJSON(textoResposta);
+}
+
 async function extrairComprovante(imagePath) {
   const imageBuffer = fs.readFileSync(imagePath);
   const mediaType = getMediaType(imagePath);
@@ -99,6 +146,39 @@ async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
 
   const resultado = extrairJSON(textoResposta);
   return resultado.transacoes || [];
+}
+
+// Relatório de vendas do sistema/PDV/app de delivery (iFood, Rappi, InstaDelivery, etc. — o prompt
+// não trava num app específico, ver PROMPT_VENDAS). Manda a data de hoje junto, mesmo motivo de
+// extrairComprovanteDeTexto: relatórios "de hoje" costumam não repetir a data em cada linha.
+async function extrairVendasDeBuffer(fileBuffer, mediaType) {
+  const hoje = new Date().toISOString().slice(0, 10);
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4096,
+    system: PROMPT_VENDAS,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: `Data de hoje: ${hoje}\n\nExtraia todas as vendas deste relatório seguindo o formato JSON definido.`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const textoResposta = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  const resultado = extrairJSON(textoResposta);
+  return resultado.vendas || [];
 }
 
 async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
@@ -191,6 +271,9 @@ if (require.main === module) {
 module.exports = {
   extrairComprovante,
   extrairComprovanteDeBuffer,
+  extrairComprovanteDeTexto,
+  extrairDespesaFixaDeTexto,
+  extrairVendasDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
   consultarFluxoDeCaixa,

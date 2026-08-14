@@ -3,6 +3,9 @@ const path = require('path');
 const express = require('express');
 const {
   extrairComprovanteDeBuffer,
+  extrairComprovanteDeTexto,
+  extrairDespesaFixaDeTexto,
+  extrairVendasDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
   consultarFluxoDeCaixa,
@@ -16,6 +19,11 @@ const {
   buscarExtrato,
   salvarContasAPagar,
   buscarContasAPagar,
+  salvarItens,
+  buscarTodosItens,
+  salvarDespesaFixa,
+  buscarDespesasFixas,
+  marcarDespesaFixaLancada,
 } = require('./sheets');
 const {
   gerarResumo,
@@ -102,6 +110,9 @@ function montarMensagemBoasVindas(nome) {
     '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
     '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
     '🧾 Mande boleto ou fatura de cartão de crédito escrevendo "boleto" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco").\n' +
+    '🛵 Mande o relatório de vendas do seu sistema/app de delivery (iFood, Rappi, PDV, etc.) escrevendo "vendas" ou "sistema" na legenda, para eu registrar cada venda certinha.\n' +
+    '✍️ Não tem comprovante pra tirar foto (ex.: mensalidade, honorário)? Escreva "lançar: " + o que foi (ex.: "lançar: paguei 300 de contador hoje") que eu registro do mesmo jeito.\n' +
+    '🔁 Despesa/receita que se repete todo mês (ex.: marketing, contador)? Escreva "recorrente: " + o valor e o dia (ex.: "recorrente: todo dia 10 pago marketing 1000") que eu cadastro e lanço sozinho todo mês, sem precisar mandar de novo.\n' +
     '💬 Pergunte "resumo do mês", "resumo da semana", "previsão" ou "DRE do mês" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
     '💡 Dicas rápidas:\n' +
     '• Sempre escreva alguma legenda ao mandar boleto, fatura ou extrato — sem isso eu tento adivinhar o tipo de documento e posso errar.\n' +
@@ -228,11 +239,35 @@ function interpretarRespostaDuplicidade(texto) {
   return null;
 }
 
-// Comprovante em dúvida (duplicidade ambígua) aguardando o cliente confirmar — Map remetente →
-// { dados, sheetId, criadoEm }. Em memória, reseta a cada deploy — aceitável no volume atual,
-// igual ao cooldown de notificação de lead logo abaixo.
+// Lançamentos em dúvida (duplicidade ambígua) aguardando o cliente confirmar, um de cada vez —
+// Map remetente → { fila: [{ dados, sheetId, candidato }], criadoEm }. É uma FILA (não um item só)
+// porque um relatório de vendas do sistema (feature de 13/08/2026) pode gerar várias vendas
+// ambíguas de uma vez — o cliente confirma uma, aí pergunta a próxima, até esvaziar. Em memória,
+// reseta a cada deploy — aceitável no volume atual, igual ao cooldown de notificação de lead logo abaixo.
 const PENDENCIAS_DUPLICIDADE = new Map();
 const TIMEOUT_PENDENCIA_DUPLICIDADE_MS = 15 * 60 * 1000;
+
+// Adiciona um item ambíguo ao FIM da fila de confirmação do cliente — cria a fila se ainda não
+// existir. `criadoEm` sempre atualiza pro do item mais recente, pra não expirar cedo demais uma
+// fila que ainda está sendo alimentada (ex.: no meio do processamento de um relatório de vendas).
+function enfileirarDuplicidadeAmbigua(remetente, dados, sheetId, candidato) {
+  const pendencia = PENDENCIAS_DUPLICIDADE.get(remetente) || { fila: [], criadoEm: Date.now() };
+  pendencia.fila.push({ dados, sheetId, candidato });
+  pendencia.criadoEm = Date.now();
+  PENDENCIAS_DUPLICIDADE.set(remetente, pendencia);
+}
+
+// Pergunta ao cliente sobre o item na frente da fila — mesmo texto usado tanto quando a pergunta é
+// feita pela primeira vez quanto quando se avança pro próximo item da fila depois de resolver o anterior.
+async function perguntarProximaDuplicidadeAmbigua(remetente, item) {
+  const { dados, candidato: c } = item;
+  await enviarMensagemWhatsApp(
+    remetente,
+    `🤔 Já tenho um lançamento parecido: ${formatarNumero(c.valor)} em ${c.data}${c.hora ? ` às ${c.hora}` : ''} (${c.estabelecimento_ou_pessoa || c.descricao || 'sem descrição'}).\n\n` +
+    `Esse lançamento novo: ${formatarNumero(dados.valor)} em ${dados.data}${dados.hora ? ` às ${dados.hora}` : ''} (${dados.estabelecimento_ou_pessoa || 'sem descrição'}).\n\n` +
+    `É o mesmo lançamento (duplicado) ou é diferente? Responde "duplicado" ou "diferente".`
+  );
+}
 
 // Relatório proativo avisado (template) esperando o cliente responder qualquer coisa pra liberar
 // o envio do conteúdo de verdade em texto livre — Map remetente → { tipo: 'resumo'|'previsao',
@@ -251,6 +286,135 @@ function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
     existente.tipo === nova.tipo &&
     (existente.descricao || '') === (nova.descricao || '')
   )));
+}
+
+// Salva o lançamento e, se o documento tinha itens detalhados (ex.: nota de fornecedor com
+// "Queijo Muçarela", "Azeitona Verde"...), salva eles também numa aba própria, ligados a este
+// lançamento — automático, sem precisar de configuração por cliente/nicho (o Claude já identifica
+// os itens sozinho na extração, só precisava parar de descartar isso ao salvar). Falha ao salvar
+// os itens não derruba o fluxo principal (o lançamento em si já está salvo) — só loga.
+async function salvarComprovanteComItens(sheetId, dados) {
+  const linhaLancamento = await salvarComprovante(sheetId, dados);
+
+  if (Array.isArray(dados.itens) && dados.itens.length > 0) {
+    await salvarItens(sheetId, dados.itens, {
+      data: dados.data,
+      estabelecimento: dados.estabelecimento_ou_pessoa,
+      lancamentoLinha: linhaLancamento,
+    }).catch((erro) => console.error('Falha ao salvar itens do comprovante:', erro.message));
+  }
+
+  return linhaLancamento;
+}
+
+// Classifica um lançamento contra uma lista de referência e executa a ação (salva direto, ou
+// enfileira pra confirmação — nunca manda mensagem, quem chama decide como comunicar, já que o
+// jeito certo de avisar é diferente pra 1 lançamento (foto/texto) vs. vários de uma vez (lote de
+// vendas do sistema)). `lancamentosParaComparar` é passado de fora (não busca sozinho) pra permitir
+// ir comparando contra uma lista que cresce durante um lote, pegando duplicata DENTRO do próprio lote.
+async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosParaComparar) {
+  const resultado = verificarDuplicidade(lancamentosParaComparar, dadosExtraidos);
+
+  if (resultado.status === 'duplicado') {
+    return { status: 'duplicado', candidato: resultado.candidato };
+  }
+
+  if (resultado.status === 'ambiguo') {
+    enfileirarDuplicidadeAmbigua(remetente, dadosExtraidos, sheetId, resultado.candidato);
+    return { status: 'ambiguo', candidato: resultado.candidato };
+  }
+
+  const linhaLancamento = await salvarComprovanteComItens(sheetId, dadosExtraidos);
+  return { status: 'novo', linhaLancamento };
+}
+
+// Processa um lançamento já extraído (de foto de comprovante OU do comando "lançar:" por texto) —
+// checa duplicidade e decide se salva direto, avisa que já existe, ou pergunta pro cliente. Mesmo
+// fluxo nos dois casos, só muda de onde veio o `dadosExtraidos` (imagem vs. texto).
+async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos) {
+  const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+  const resultado = await classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosExistentes);
+
+  if (resultado.status === 'duplicado') {
+    const c = resultado.candidato;
+    await enviarMensagemWhatsApp(
+      remetente,
+      `⚠️ Esse lançamento já está registrado (${formatarNumero(c.valor)} em ${c.data} às ${c.hora}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+    );
+    return;
+  }
+
+  if (resultado.status === 'ambiguo') {
+    await perguntarProximaDuplicidadeAmbigua(remetente, { dados: dadosExtraidos, candidato: resultado.candidato });
+    return;
+  }
+
+  await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+
+  const prefixoMesAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
+  const lancamentosDoMes = lancamentosExistentes.filter((l) => (l.data || '').startsWith(prefixoMesAtual));
+  await avisarSeLimiteProximo(remetente, cliente, lancamentosDoMes.length + 1);
+
+  // Se esse lançamento bater com uma transação do extrato que já estava na planilha, marca
+  // conciliado agora — não precisa esperar o cliente mandar extrato de novo.
+  await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+}
+
+// Processa um LOTE de vendas extraídas de um relatório do sistema/PDV/app de delivery (ver
+// PROMPT_VENDAS) — cada venda passa pela mesma checagem de duplicidade de um lançamento comum
+// (pedido de 13/08/2026 do Aroldo: "quando ocorrer, informar que esse já foi lançado... se ele
+// insistir que é pra lançar, lance"). Isso cobre o caso real de uma venda aparecer tanto no
+// relatório do app quanto depois no extrato bancário ou da fatura do cartão. Diferente de um
+// lançamento único, aqui manda um RESUMO agregado no final em vez de uma mensagem por venda — se
+// sobrar item ambíguo, pergunta um de cada vez (mesma fila usada pra lançamento único).
+async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
+  if (!vendas || vendas.length === 0) {
+    await enviarMensagemWhatsApp(remetente, 'Não consegui identificar nenhuma venda nesse relatório. Confere se a imagem/PDF está legível e tenta de novo.');
+    return;
+  }
+
+  const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+  // Cópia local que cresce a cada venda salva — pega duplicata DENTRO do próprio lote também
+  // (ex.: o mesmo pedido aparecendo 2x no relatório por engano do app).
+  const lancamentosParaComparar = [...lancamentosExistentes];
+
+  let novas = 0;
+  let valorNovas = 0;
+  let jaRegistradas = 0;
+  let ambiguas = 0;
+
+  for (const venda of vendas) {
+    const dados = { ...venda, tipo_movimentacao: venda.tipo_movimentacao || 'entrada' };
+    const resultado = await classificarESalvarLancamento(remetente, sheetId, dados, lancamentosParaComparar);
+
+    if (resultado.status === 'novo') {
+      novas += 1;
+      valorNovas += dados.valor || 0;
+      lancamentosParaComparar.push({ ...dados, hora: dados.hora || '' });
+    } else if (resultado.status === 'duplicado') {
+      jaRegistradas += 1;
+    } else {
+      ambiguas += 1;
+    }
+  }
+
+  const partes = [`✅ Relatório de vendas processado! ${novas} venda(s) nova(s) registrada(s) (${formatarNumero(valorNovas)}).`];
+  if (jaRegistradas > 0) {
+    partes.push(`${jaRegistradas} já estava(m) registrada(s) (bateu com comprovante ou lançamento anterior) — ignorei pra não duplicar.`);
+  }
+  if (ambiguas > 0) {
+    partes.push(`${ambiguas} parecida(s) com lançamento(s) existente(s) — vou te perguntar uma por vez pra confirmar.`);
+  }
+  await enviarMensagemWhatsApp(remetente, partes.join(' '));
+
+  // Se sobrou pendência ambígua, já dispara a pergunta do primeiro item da fila — senão o cliente
+  // não saberia que precisa responder algo.
+  const pendencia = PENDENCIAS_DUPLICIDADE.get(remetente);
+  if (pendencia && pendencia.fila.length > 0) {
+    await perguntarProximaDuplicidadeAmbigua(remetente, pendencia.fila[0]);
+  }
+
+  await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação (vendas):', erro.message));
 }
 
 // Avisa uma vez ao cruzar ~90% do limite mensal do plano, e uma vez ao atingir/passar 100% —
@@ -365,6 +529,39 @@ function interpretarPedidoEspecialista(texto) {
   return /ativ|quero|sim|bora|pode|manda|isso/.test(t);
 }
 
+// Reconhece o comando de lançamento manual por texto: "lançar: gastei 500 com marketing hoje",
+// "registrar - recebi 300 de fulano". Exige a palavra de comando bem no início da mensagem —
+// diferente das outras heurísticas por palavra-chave deste arquivo (que só disparam leitura), aqui
+// o resultado é GRAVAR um lançamento novo; confundir uma pergunta comum ("quanto eu gastei esse
+// mês?") com um pedido de lançamento e criar um registro errado por engano é bem mais grave do que
+// simplesmente responder a pergunta errada, então o gatilho precisa ser inequívoco.
+function interpretarComandoLancamento(texto) {
+  const match = (texto || '').trim().match(/^(?:lan[çc]ar|registrar|anotar)\s*[:\-]\s*(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+// Reconhece o comando de cadastro de despesa/receita FIXA recorrente: "recorrente: todo dia 10
+// pago marketing 1000", "fixa - recebo 2000 de aluguel todo dia 5". Mesmo motivo da exigência de
+// gatilho explícito do comando acima — aqui o risco é pior ainda, porque uma regra recorrente mal
+// cadastrada continua lançando todo mês até alguém notar.
+function interpretarComandoDespesaFixa(texto) {
+  const match = (texto || '').trim().match(/^(?:recorrente|despesa\s*fixa|fixa)\s*[:\-]\s*(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function formatarResumoDespesaFixa(dados) {
+  const tipoTexto = dados.tipo_movimentacao === 'entrada' ? 'Entrada' : 'Saída';
+  return (
+    '✅ Despesa/receita fixa cadastrada!\n\n' +
+    `📅 Todo dia ${dados.dia_do_mes}\n` +
+    `💰 Valor: ${formatarNumero(dados.valor)}\n` +
+    `↕️ Tipo: ${tipoTexto}\n` +
+    `🏷️ Categoria: ${dados.categoria || 'Não Classificado'}\n` +
+    `📝 ${dados.descricao || ''}\n\n` +
+    'A partir do próximo mês (ou hoje, se já for o dia certo), eu lanço isso sozinho automaticamente, sem precisar mandar de novo.'
+  );
+}
+
 // Verificação do webhook exigida pela Meta ao configurar a URL no Business Manager — GET com
 // "hub.mode=subscribe" e "hub.verify_token" batendo com WHATSAPP_WEBHOOK_VERIFY_TOKEN. Sem isso a
 // Meta recusa salvar a URL do webhook. Mesma regex de caminho do POST, por consistência.
@@ -431,35 +628,42 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       return res.sendStatus(200);
     }
 
-    // Cliente tinha um comprovante em dúvida (duplicidade ambígua) esperando resposta — checa
+    // Cliente tinha lançamento(s) em dúvida (duplicidade ambígua) esperando resposta — checa
     // ANTES de qualquer outro processamento, senão a resposta ("diferente", "duplicado") cairia
-    // no fluxo genérico de pergunta livre pro Claude em vez de resolver a pendência.
+    // no fluxo genérico de pergunta livre pro Claude em vez de resolver a pendência. Resolve um
+    // item da FILA por resposta — se sobrar mais algum (ex.: vieram vários de um relatório de
+    // vendas), já pergunta o próximo em seguida, sem o cliente precisar mandar nada de novo.
     if (!interpretado.tipoMidia && PENDENCIAS_DUPLICIDADE.has(remetente)) {
       const pendencia = PENDENCIAS_DUPLICIDADE.get(remetente);
       const expirou = Date.now() - pendencia.criadoEm > TIMEOUT_PENDENCIA_DUPLICIDADE_MS;
 
-      if (!expirou) {
+      if (!expirou && pendencia.fila.length > 0) {
         const resposta = interpretarRespostaDuplicidade(interpretado.texto);
+        const itemAtual = pendencia.fila[0];
 
         if (resposta === 'duplicado') {
-          PENDENCIAS_DUPLICIDADE.delete(remetente);
+          pendencia.fila.shift();
           await enviarMensagemWhatsApp(remetente, '👍 Combinado, não registrei de novo.');
+        } else if (resposta === 'diferente') {
+          pendencia.fila.shift();
+          await salvarComprovanteComItens(itemAtual.sheetId, itemAtual.dados);
+          await enviarMensagemWhatsApp(remetente, `✅ Entendido, registrei como lançamento novo!\n\n${formatarResumoComprovante(itemAtual.dados)}`);
+          await sincronizarConciliacaoNaPlanilha(itemAtual.sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+        } else {
+          await enviarMensagemWhatsApp(remetente, 'Não entendi — responde só "duplicado" ou "diferente" pra eu saber o que fazer com aquele lançamento. 🙂');
           return res.sendStatus(200);
         }
 
-        if (resposta === 'diferente') {
+        if (pendencia.fila.length > 0) {
+          await perguntarProximaDuplicidadeAmbigua(remetente, pendencia.fila[0]);
+        } else {
           PENDENCIAS_DUPLICIDADE.delete(remetente);
-          await salvarComprovante(pendencia.sheetId, pendencia.dados);
-          await enviarMensagemWhatsApp(remetente, `✅ Entendido, registrei como lançamento novo!\n\n${formatarResumoComprovante(pendencia.dados)}`);
-          await sincronizarConciliacaoNaPlanilha(pendencia.sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
-          return res.sendStatus(200);
         }
 
-        await enviarMensagemWhatsApp(remetente, 'Não entendi — responde só "duplicado" ou "diferente" pra eu saber o que fazer com aquele comprovante. 🙂');
         return res.sendStatus(200);
       }
 
-      PENDENCIAS_DUPLICIDADE.delete(remetente); // expirou — segue o fluxo normal abaixo, trata como mensagem nova
+      PENDENCIAS_DUPLICIDADE.delete(remetente); // expirou (ou fila já vazia) — segue o fluxo normal abaixo, trata como mensagem nova
     }
 
     const sheetId = cliente.sheetId;
@@ -509,6 +713,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
         : '';
       await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
+    } else if (interpretado.tipoMidia && /\bvend|\bsistema\b|\bpdv\b|ifood|rappi|delivery|aiqfome/.test(interpretado.legenda)) {
+      // Relatório de vendas do sistema/PDV/app de delivery — não trava num app específico (ver
+      // PROMPT_VENDAS), o gatilho é só a legenda mencionar "venda(s)", "sistema", "pdv" ou o nome
+      // de algum app conhecido. Cada venda vira um lançamento normal, passando pela mesma checagem
+      // de duplicidade de um comprovante — cobre o caso de a mesma venda aparecer depois no
+      // extrato bancário ou na fatura do cartão.
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
+      const vendas = await extrairVendasDeBuffer(buffer, mimeType);
+      console.log(`Relatório de vendas processado: ${vendas.length} venda(s) identificada(s)`);
+      await processarLoteVendas(remetente, cliente, sheetId, vendas);
     } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
@@ -555,41 +769,26 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
         console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
-        const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
-        const resultadoDuplicidade = verificarDuplicidade(lancamentosExistentes, dadosExtraidos);
-
-        if (resultadoDuplicidade.status === 'duplicado') {
-          const c = resultadoDuplicidade.candidato;
-          await enviarMensagemWhatsApp(
-            remetente,
-            `⚠️ Esse comprovante já está registrado (${formatarNumero(c.valor)} em ${c.data} às ${c.hora}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
-          );
-        } else if (resultadoDuplicidade.status === 'ambiguo') {
-          const c = resultadoDuplicidade.candidato;
-          PENDENCIAS_DUPLICIDADE.set(remetente, { dados: dadosExtraidos, sheetId, criadoEm: Date.now() });
-          await enviarMensagemWhatsApp(
-            remetente,
-            `🤔 Já tenho um lançamento parecido: ${formatarNumero(c.valor)} em ${c.data}${c.hora ? ` às ${c.hora}` : ''} (${c.estabelecimento_ou_pessoa || c.descricao || 'sem descrição'}).\n\n` +
-            `Esse comprovante novo: ${formatarNumero(dadosExtraidos.valor)} em ${dadosExtraidos.data}${dadosExtraidos.hora ? ` às ${dadosExtraidos.hora}` : ''} (${dadosExtraidos.estabelecimento_ou_pessoa || 'sem descrição'}).\n\n` +
-            `É o mesmo comprovante (duplicado) ou é um lançamento diferente? Responde "duplicado" ou "diferente".`
-          );
-        } else {
-          await salvarComprovante(sheetId, dadosExtraidos);
-          await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
-
-          const prefixoMesAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
-          const lancamentosDoMes = lancamentosExistentes.filter((l) => (l.data || '').startsWith(prefixoMesAtual));
-          await avisarSeLimiteProximo(remetente, cliente, lancamentosDoMes.length + 1);
-
-          // Se esse comprovante bater com uma transação do extrato que já estava na planilha,
-          // marca conciliado agora — não precisa esperar o cliente mandar extrato de novo.
-          await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
-        }
+        await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
       }
     } else {
       const corpoLower = (interpretado.texto || '').toLowerCase();
+      const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
+      const comandoDespesaFixa = interpretarComandoDespesaFixa(interpretado.texto);
 
-      if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
+      if (comandoLancamento) {
+        // Lançamento manual por texto — sem foto, então não passa pela extração de imagem; usa
+        // extrairComprovanteDeTexto (mesma categorização dinâmica por nicho, mesmo grupo_dre) e
+        // depois entra no MESMO fluxo de checagem de duplicidade/salvamento que a foto usa.
+        const dadosExtraidos = await extrairComprovanteDeTexto(comandoLancamento);
+        console.log('Lançamento manual extraído do texto:', JSON.stringify(dadosExtraidos, null, 2));
+        await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+      } else if (comandoDespesaFixa) {
+        const dadosDespesaFixa = await extrairDespesaFixaDeTexto(comandoDespesaFixa);
+        console.log('Despesa fixa cadastrada:', JSON.stringify(dadosDespesaFixa, null, 2));
+        await salvarDespesaFixa(sheetId, dadosDespesaFixa);
+        await enviarMensagemWhatsApp(remetente, formatarResumoDespesaFixa(dadosDespesaFixa));
+      } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
         const resumo = gerarResumo(lancamentos, extrato, { periodo });
@@ -653,12 +852,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const projecao = await gerarProjecao(sheetId, dias);
         await enviarMensagemWhatsApp(remetente, formatarProjecao(projecao));
       } else if (corpoLower.length > 0) {
-        const [lancamentos, extrato, contasAPagar] = await Promise.all([
+        // `itensComprovantes` entra como 4ª fonte de dados — permite responder perguntas
+        // específicas de item (ex.: "quanto comprei de queijo esse mês?", "quantas pizzas
+        // vendemos hoje?") com precisão, em vez de só a categoria geral do documento inteiro.
+        const [lancamentos, extrato, contasAPagar, itensComprovantes] = await Promise.all([
           buscarTodosLancamentos(sheetId),
           buscarExtrato(sheetId),
           buscarContasAPagar(sheetId),
+          buscarTodosItens(sheetId),
         ]);
-        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar });
+        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes });
         await enviarMensagemWhatsApp(remetente, resposta);
       } else {
         await enviarMensagemWhatsApp(remetente, montarMensagemBoasVindas(cliente.nome));
@@ -758,6 +961,70 @@ app.all('/tarefas/previsao', async (req, res) => {
     res.json({ ok: true, dias, avisados: resultados });
   } catch (error) {
     console.error('Erro ao enviar previsão proativa:', error.message);
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+// Endpoint pro cron DIÁRIO (diferente dos dois acima, semanal/mensal) — chamado todo dia pelo
+// GitHub Actions, lança automaticamente toda despesa/receita fixa (ver comando "recorrente:")
+// cujo Dia_Do_Mes bate com hoje e que ainda não foi lançada neste mês (Ultimo_Lancamento_Mes).
+// Não manda template de aviso pro cliente — é opcional/best-effort (só chega se já houver sessão
+// aberta), porque isso sozinho não justifica pedir aprovação de mais um template só pra isso; o
+// essencial (o lançamento em si, refletido no resumo/DRE) já acontece de qualquer forma.
+app.all('/tarefas/despesas-fixas', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+
+  const hoje = new Date();
+  const diaHoje = hoje.getDate();
+  const mesAnoAtual = hoje.toISOString().slice(0, 7); // "AAAA-MM"
+
+  try {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const alvo = req.query.numero
+      ? clientes.filter((cliente) => cliente.numeroWhatsapp === req.query.numero)
+      : clientes;
+
+    const lancados = [];
+
+    for (const cliente of alvo) {
+      const despesasFixas = await buscarDespesasFixas(cliente.sheetId);
+      const devidas = despesasFixas.filter((d) => d.ativo && d.dia_do_mes === diaHoje && d.ultimo_lancamento_mes !== mesAnoAtual);
+
+      for (const despesa of devidas) {
+        const dados = {
+          data: hoje.toISOString().slice(0, 10),
+          hora: null,
+          valor: despesa.valor,
+          tipo_movimentacao: despesa.tipo_movimentacao,
+          descricao: despesa.descricao,
+          estabelecimento_ou_pessoa: despesa.estabelecimento_ou_pessoa,
+          categoria: despesa.categoria,
+          subcategoria: despesa.subcategoria,
+          grupo_dre: despesa.grupo_dre,
+          observacoes: 'Lançado automaticamente (despesa/receita fixa recorrente).',
+        };
+
+        await salvarComprovanteComItens(cliente.sheetId, dados);
+        await marcarDespesaFixaLancada(cliente.sheetId, despesa.linha, mesAnoAtual);
+
+        await enviarMensagemWhatsApp(
+          cliente.numeroWhatsapp,
+          `⚙️ Lancei automaticamente sua despesa fixa: ${formatarResumoComprovante(dados)}`
+        ).catch(() => {});
+
+        lancados.push({ cliente: cliente.numeroWhatsapp, descricao: despesa.descricao, valor: despesa.valor });
+      }
+
+      if (devidas.length > 0) {
+        await sincronizarConciliacaoNaPlanilha(cliente.sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação (despesas fixas):', erro.message));
+      }
+    }
+
+    res.json({ ok: true, dia: diaHoje, lancados });
+  } catch (error) {
+    console.error('Erro ao lançar despesas fixas:', error.message);
     res.status(500).json({ erro: error.message });
   }
 });
