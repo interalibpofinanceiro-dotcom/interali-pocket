@@ -114,19 +114,20 @@ const SUPORTE_TEXTO = ADMIN_WHATSAPP_NUMBER
 function montarMensagemBoasVindas(nome) {
   return (
     `Olá, ${nome || ''}! Sou o assistente financeiro da Interali Pocket 🤖\n\n` +
-    '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
+    '📸 Comprovante JÁ PAGO (recibo, nota, PIX enviado)? Só mandar a foto, sem precisar de legenda.\n' +
+    '🧾 Boleto ou fatura de cartão AINDA NÃO PAGO? Precisa escrever "boleto", "fatura" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco") — sem isso eu posso achar que já foi pago e lançar como gasto de hoje em vez de conta a pagar.\n' +
     '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
-    '🧾 Mande boleto ou fatura de cartão de crédito escrevendo "boleto" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco").\n' +
     '📤 Tem dinheiro pra RECEBER de alguém (nota fiscal, venda parcelada)? Mande a foto escrevendo "receber" na legenda, ou escreva "receber: " + valor e vencimento (ex.: "receber: 500 do João dia 20") que eu incluo na sua previsão.\n' +
     '🛵 Mande o relatório de vendas do seu sistema/app de delivery (iFood, Rappi, PDV, etc.) escrevendo "vendas" ou "sistema" na legenda, para eu registrar cada venda certinha.\n' +
     '✍️ Não tem comprovante pra tirar foto (ex.: mensalidade, honorário)? Escreva "lançar: " + o que foi (ex.: "lançar: paguei 300 de contador hoje") que eu registro do mesmo jeito.\n' +
-    '🔁 Despesa/receita que se repete todo mês (ex.: marketing, contador)? Escreva "recorrente: " + o valor e o dia (ex.: "recorrente: todo dia 10 pago marketing 1000") que eu cadastro e lanço sozinho todo mês, sem precisar mandar de novo.\n' +
+    '🔁 Entrada ou saída que se repete todo mês/semana, sem boleto nem extrato (ex.: mensalidade de cliente, aluguel)? Escreva "recorrente: " dizendo se é RECEBIMENTO ou PAGAMENTO + valor + dia (ex.: "recorrente: recebo 500 da Empresa X todo dia 10", ou "recorrente: pago 1000 de marketing todo dia 10") — se não disser "recebo" ou "pago", eu assumo pagamento (saída) por padrão, então melhor deixar claro.\n' +
     '💬 Pergunte "resumo do mês", "resumo da semana", "previsão" ou "DRE do mês" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
     '💡 Dicas rápidas:\n' +
-    '• Sempre escreva alguma legenda ao mandar boleto, fatura ou extrato — sem isso eu tento adivinhar o tipo de documento e posso errar.\n' +
+    '• Comprovante = já pago, só a foto. Boleto/fatura = ainda não pago, sempre com legenda.\n' +
     '• Uma foto por mensagem.\n' +
     '• Foto legível, sem cortar número.\n' +
-    '• Se tiver mais de um cartão de crédito, sempre diga o nome do banco na legenda.' +
+    '• Se tiver mais de um cartão de crédito, sempre diga o nome do banco na legenda.\n' +
+    '• Pode mandar "ajuda" ou "menu" a qualquer momento pra ver essa lista de novo.' +
     (SUPORTE_TEXTO ? `\n\n${SUPORTE_TEXTO}` : '')
   );
 }
@@ -202,12 +203,40 @@ function formatarNumero(valor) {
   return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
+// Formata o timestamp ISO de Registrado_Em (quando o Pocket de fato gravou o lançamento) pra
+// "DD/MM/AAAA HH:mm" em pt-BR. Separado de formatarDataBR (reconciliacao.js) porque aquela função
+// espera só "AAAA-MM-DD" (data do comprovante/compra) e quebra com um ISO completo — as duas datas
+// são propositalmente diferentes (pedido do Aroldo, 14/08/2026, depois da confusão da Sirlene: ela
+// leu "enviado em 13.08" como "você mandou isso em 13.08", quando na verdade era a data da compra
+// no comprovante, não a data em que o Pocket registrou).
+function formatarDataHoraBR(isoString) {
+  if (!isoString) return '';
+  const data = new Date(isoString);
+  if (Number.isNaN(data.getTime())) return '';
+  return data.toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+// CNPJ/CPF identifica o ESTABELECIMENTO ou a PESSOA, não a transação — se repete em toda nota
+// fiscal do mesmo lugar (prompts.js manda a IA preencher `documento_identificacao` com CNPJ/CPF
+// quando não há um ID de transação de verdade). Não serve pro atalho "ID bate = duplicado" abaixo:
+// bug real encontrado em 14/08/2026 — Aroldo mandou dois comprovantes do mesmo estabelecimento,
+// R$4,50 e R$23,58 (compras diferentes), e o segundo foi descartado como duplicado só porque o
+// CNPJ do documento batia com um lançamento já salvo daquele mesmo lugar. Só conta como ID forte de
+// verdade um identificador que existe uma vez só POR TRANSAÇÃO: chave Pix (E2E), linha digitável de
+// boleto, chave de acesso de NFC-e etc. — nenhum desses tem o formato de CPF (11 dígitos) ou CNPJ
+// (14 dígitos).
+function idEhTransacaoUnica(id) {
+  const digitos = id.replace(/\D/g, '');
+  return digitos.length !== 11 && digitos.length !== 14;
+}
+
 // Trava de duplicidade, olhando ID da transação + data + horário + valor + tipo (pedido do
 // Aroldo, 08/08/2026 e reforçado em 14/08/2026: "verifique o ID_Transacao... se não houver ID,
 // verifique Data+Hora+Valor+Tipo"). Dois níveis de checagem, na ordem:
 //
-// 1) ID_Transação (chave Pix, nº do boleto etc. — campo `documento_identificacao`): se os dois
-//    lados TÊM um ID preenchido e ele bate, é o sinal mais forte que existe — nem olha o resto.
+// 1) ID_Transação (chave Pix, nº do boleto etc. — campo `documento_identificacao`, exceto quando
+//    for CNPJ/CPF, ver idEhTransacaoUnica acima): se os dois lados TÊM um ID preenchido e ele bate,
+//    é o sinal mais forte que existe — nem olha o resto.
 // 2) Data+valor+tipo — sinal forte de repetição já sem precisar bater estabelecimento (a leitura
 //    da IA pode variar levemente entre duas fotos do mesmo documento). O horário decide entre os
 //    três níveis clássicos: "duplicado" (mesmo horário nos dois lados), "ambiguo" (falta horário
@@ -220,7 +249,7 @@ function formatarNumero(valor) {
 // completar a linha existente com os detalhes certos do que rejeitar ou perguntar à toa.
 function verificarDuplicidade(lancamentosExistentes, novo) {
   const idNovo = (novo.documento_identificacao || '').trim();
-  if (idNovo) {
+  if (idNovo && idEhTransacaoUnica(idNovo)) {
     const candidatoPorId = lancamentosExistentes.find((l) => (l.documento_identificacao || '').trim() === idNovo);
     if (candidatoPorId) {
       return candidatoPorId.status_conciliacao === 'PENDENTE_COMPROVANTE'
@@ -275,6 +304,13 @@ function interpretarRespostaDuplicidade(texto) {
 const PENDENCIAS_DUPLICIDADE = new Map();
 const TIMEOUT_PENDENCIA_DUPLICIDADE_MS = 15 * 60 * 1000;
 
+// Remetente → timestamp do último erro de processamento (catch geral do webhook, mais abaixo) —
+// usado só pra reconhecer o padrão "documento deu erro, cliente reenviou o mesmo" e não chamar de
+// duplicidade o que pro cliente é a primeira vez que deu certo (ver uso em processarLancamentoExtraido).
+// Mesma lógica de expiração em memória das outras filas acima.
+const ERROS_RECENTES_PROCESSAMENTO = new Map();
+const TIMEOUT_ERRO_RECENTE_PROCESSAMENTO_MS = 15 * 60 * 1000;
+
 // Adiciona um item ambíguo ao FIM da fila de confirmação do cliente — cria a fila se ainda não
 // existir. `criadoEm` sempre atualiza pro do item mais recente, pra não expirar cedo demais uma
 // fila que ainda está sendo alimentada (ex.: no meio do processamento de um relatório de vendas).
@@ -314,6 +350,49 @@ function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
     existente.tipo === nova.tipo &&
     (existente.descricao || '') === (nova.descricao || '')
   )));
+}
+
+// Mesma ideia de filtrarTransacoesNovas (extrato) acima, aplicada a conta a pagar/receber — ATÉ
+// 14/08/2026 salvarContasAPagar/salvarContasAReceber gravavam direto, sem checar nada, então
+// reenviar a mesma foto de boleto/fatura/nota (por engano, ou depois de um erro de leitura) duplicava
+// a conta inteira na previsão de fluxo de caixa toda vez que chegasse de novo (pedido do Aroldo,
+// 14/08/2026: "o cliente precisa ter certeza que vai ser lançado... 100% funcional"). Chave de
+// comparação: Vencimento + Valor + Beneficiário/Cliente + Parcela_Atual — a parcela entra na
+// comparação pra não confundir duas parcelas legítimas de vencimentos diferentes (isso já é coberto
+// pelo Vencimento também, mas reforça o caso de reprocessar a fatura inteira de novo).
+function filtrarContasAPagarNovas(contasExtraidas, contasExistentes) {
+  return contasExtraidas.filter((nova) => !contasExistentes.some((existente) => (
+    existente.vencimento === nova.vencimento &&
+    Math.abs((existente.valor || 0) - (nova.valor || 0)) < 0.01 &&
+    (existente.beneficiario || '').trim().toLowerCase() === (nova.beneficiario || '').trim().toLowerCase() &&
+    (existente.parcela_atual || null) === (nova.parcela_atual || null)
+  )));
+}
+
+function filtrarContasAReceberNovas(contasExtraidas, contasExistentes) {
+  return contasExtraidas.filter((nova) => !contasExistentes.some((existente) => (
+    existente.vencimento === nova.vencimento &&
+    Math.abs((existente.valor || 0) - (nova.valor || 0)) < 0.01 &&
+    (existente.cliente_devedor || '').trim().toLowerCase() === (nova.cliente_devedor || '').trim().toLowerCase() &&
+    (existente.parcela_atual || null) === (nova.parcela_atual || null)
+  )));
+}
+
+// Regra recorrente cadastrada duas vezes = a mesma despesa/receita lançada em dobro TODO MÊS (ou
+// toda semana) pra sempre, até alguém notar — risco já citado no comentário de
+// interpretarComandoDespesaFixa acima, mas até 14/08/2026 nada impedia de fato o recadastro. Chave
+// de comparação: Descrição + Valor + Tipo + o mesmo dia de recorrência (mês OU semana — só uma das
+// duas é preenchida por cadastro), e só entre as regras ainda ATIVAS (uma regra já desativada não
+// deve travar um recadastro legítimo).
+function existeDespesaFixaParecida(nova, despesasFixasExistentes) {
+  return despesasFixasExistentes.some((existente) => (
+    existente.ativo &&
+    (existente.descricao || '').trim().toLowerCase() === (nova.descricao || '').trim().toLowerCase() &&
+    Math.abs((existente.valor || 0) - (nova.valor || 0)) < 0.01 &&
+    existente.tipo_movimentacao === (nova.tipo_movimentacao || 'saida') &&
+    (existente.dia_do_mes || null) === (nova.dia_do_mes || null) &&
+    (existente.dia_da_semana ?? null) === (nova.dia_da_semana ?? null)
+  ));
 }
 
 // Salva o lançamento e, se o documento tinha itens detalhados (ex.: nota de fornecedor com
@@ -385,9 +464,23 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
 
   if (resultado.status === 'duplicado') {
     const c = resultado.candidato;
+
+    // Reenvio do MESMO comprovante logo depois de um erro de leitura (pedido do Aroldo, 14/08/2026,
+    // caso da Sirlene): a 1ª tentativa costuma ter salvo certinho antes de travar em outra etapa (ex.:
+    // RespostaCortadaError na resposta ao cliente), então o cliente nunca viu a confirmação — só o
+    // "não consegui processar". Manda de novo, a checagem de duplicidade bate (é o mesmo lançamento) e
+    // aí, em vez de assustar com "duplicidade" (pro cliente é a 1ª vez que dá certo), confirma normal.
+    const erroRecenteEm = ERROS_RECENTES_PROCESSAMENTO.get(remetente);
+    if (erroRecenteEm && Date.now() - erroRecenteEm < TIMEOUT_ERRO_RECENTE_PROCESSAMENTO_MS) {
+      ERROS_RECENTES_PROCESSAMENTO.delete(remetente);
+      await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+      return;
+    }
+
+    const dataLancamento = formatarDataHoraBR(c.registrado_em);
     await enviarMensagemWhatsApp(
       remetente,
-      `⚠️ *Aviso de Conciliação:* Este comprovante de ${formatarNumero(dadosExtraidos.valor)} (${dadosExtraidos.estabelecimento_ou_pessoa || dadosExtraidos.descricao || 'sem descrição'}) enviado em ${dadosExtraidos.data} já foi lançado anteriormente (${c.data}${c.hora ? ` às ${c.hora}` : ''}). Para manter seu caixa correto, a duplicidade foi ignorada.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+      `⚠️ *Aviso de Conciliação:* Este comprovante de ${formatarNumero(dadosExtraidos.valor)} (${dadosExtraidos.estabelecimento_ou_pessoa || dadosExtraidos.descricao || 'sem descrição'}), com data de compra ${dadosExtraidos.data}, já está lançado no seu caixa${dataLancamento ? ` (lançado em ${dataLancamento})` : ''}. Para manter seu caixa correto, a duplicidade foi ignorada.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
     );
     return;
   }
@@ -502,7 +595,8 @@ function formatarResumoComprovante(dados) {
   const linhas = [
     '✅ Comprovante processado!',
     '',
-    `📅 Data: ${dados.data || 'não identificada'}`,
+    `📅 Data da compra: ${dados.data || 'não identificada'}`,
+    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`,
     `💰 Valor: ${formatarNumero(dados.valor)}`,
     `↕️ Tipo: ${dados.tipo_movimentacao === 'entrada' ? 'Entrada' : 'Saída'}`,
     `🏢 ${dados.estabelecimento_ou_pessoa || 'Não identificado'}`,
@@ -744,7 +838,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     cliente = await buscarClientePorNumero(remetente);
 
     if (!cliente) {
-      await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso.');
+      await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso: (41) 98788-5732.');
       await notificarAdminSobreLead(remetente);
       return res.sendStatus(200);
     }
@@ -869,9 +963,14 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
 
-      await salvarContasAPagar(sheetId, contas);
+      const contasAPagarExistentes = await buscarContasAPagar(sheetId);
+      const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
+      const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
+
+      await salvarContasAPagar(sheetId, contasAPagarNovas);
       const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar${sufixoCartao}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+      const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao}${avisoContasAPagarDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
     } else if (interpretado.tipoMidia && /receber|cobran[çc]a/.test(interpretado.legenda)) {
       // Conta a RECEBER (14/08/2026) — nota fiscal emitida, contrato, venda parcelada — dinheiro
       // que um terceiro ainda vai pagar PRO cliente. Espelha o fluxo de boleto/fatura acima, sentido
@@ -882,8 +981,13 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       console.log(`Contas a receber processadas: ${contas.length} conta(s)`);
 
-      await salvarContasAReceber(sheetId, contas);
-      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a receber.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
+      const contasAReceberExistentes = await buscarContasAReceber(sheetId);
+      const contasAReceberNovas = filtrarContasAReceberNovas(contas, contasAReceberExistentes);
+      const contasAReceberDuplicadas = contas.length - contasAReceberNovas.length;
+
+      await salvarContasAReceber(sheetId, contasAReceberNovas);
+      const avisoContasAReceberDuplicadas = contasAReceberDuplicadas > 0 ? ` (${contasAReceberDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAReceberNovas.length} conta(s) a receber${avisoContasAReceberDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
     } else if (interpretado.tipoMidia) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
@@ -902,11 +1006,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
         console.log(`Fatura de cartão detectada sem legenda apropriada — reprocessada como ${contas.length} conta(s) a pagar${cartao ? ` | cartão: ${cartao}` : ''}`);
 
-        await salvarContasAPagar(sheetId, contas);
+        const contasAPagarExistentes = await buscarContasAPagar(sheetId);
+        const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
+        const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
+
+        await salvarContasAPagar(sheetId, contasAPagarNovas);
         const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
+        const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
         await enviarMensagemWhatsApp(
           remetente,
-          `✅ Essa imagem é uma fatura de cartão com ${contas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único.\n\n` +
+          `✅ Essa imagem é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n\n` +
           'Da próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉\n\nPergunte "previsão" para ver o fluxo de caixa projetado.'
         );
       } else {
@@ -934,13 +1043,31 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       } else if (comandoDespesaFixa) {
         const dadosDespesaFixa = await extrairDespesaFixaDeTexto(comandoDespesaFixa);
         console.log('Despesa fixa cadastrada:', JSON.stringify(dadosDespesaFixa, null, 2));
-        await salvarDespesaFixa(sheetId, dadosDespesaFixa);
-        await enviarMensagemWhatsApp(remetente, formatarResumoDespesaFixa(dadosDespesaFixa));
+
+        const despesasFixasExistentes = await buscarDespesasFixas(sheetId);
+        if (existeDespesaFixaParecida(dadosDespesaFixa, despesasFixasExistentes)) {
+          await enviarMensagemWhatsApp(
+            remetente,
+            `Você já tem uma recorrência ativa igual a essa cadastrada — não criei outra, pra não lançar em dobro todo mês/semana.\n\n${formatarResumoDespesaFixa(dadosDespesaFixa)}`
+          );
+        } else {
+          await salvarDespesaFixa(sheetId, dadosDespesaFixa);
+          await enviarMensagemWhatsApp(remetente, formatarResumoDespesaFixa(dadosDespesaFixa));
+        }
       } else if (comandoContaAReceber) {
         const dadosContaAReceber = await extrairContaAReceberDeTexto(comandoContaAReceber);
         console.log('Conta a receber cadastrada:', JSON.stringify(dadosContaAReceber, null, 2));
-        await salvarContasAReceber(sheetId, [dadosContaAReceber]);
-        await enviarMensagemWhatsApp(remetente, formatarResumoContaAReceber(dadosContaAReceber));
+
+        const contasAReceberExistentes = await buscarContasAReceber(sheetId);
+        if (filtrarContasAReceberNovas([dadosContaAReceber], contasAReceberExistentes).length === 0) {
+          await enviarMensagemWhatsApp(
+            remetente,
+            `Essa conta a receber já está registrada — não dupliquei.\n\n${formatarResumoContaAReceber(dadosContaAReceber)}`
+          );
+        } else {
+          await salvarContasAReceber(sheetId, [dadosContaAReceber]);
+          await enviarMensagemWhatsApp(remetente, formatarResumoContaAReceber(dadosContaAReceber));
+        }
       } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
@@ -1004,6 +1131,13 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const dias = corpoLower.includes('semana') ? 7 : 30;
         const projecao = await gerarProjecao(sheetId, dias);
         await enviarMensagemWhatsApp(remetente, formatarProjecao(projecao));
+      } else if (/^(ajuda|menu|comandos?|como\s*funciona|instru[çc][õo]es|oi|ol[áa]|e\s*a[íi]|bom\s*dia|boa\s*tarde|boa\s*noite)\b/i.test(corpoLower.trim())) {
+        // Pedido do Aroldo, 14/08/2026: o guia de uso (montarMensagemBoasVindas) já existia, mas só
+        // disparava com o corpo da mensagem literalmente vazio — na prática inalcançável, então
+        // "oi"/"bom dia"/"ajuda" caíam direto na pergunta livre pra IA (o mesmo caminho propenso ao
+        // bug da resposta vazia, ver acima). Checado por ÚLTIMO antes da pergunta livre — depois de
+        // resumo/previsão/especialista — pra não roubar prioridade de "oi, quero o resumo do mês".
+        await enviarMensagemWhatsApp(remetente, montarMensagemBoasVindas(cliente.nome));
       } else if (corpoLower.length > 0) {
         // `itensComprovantes` entra como 4ª fonte de dados — permite responder perguntas
         // específicas de item (ex.: "quanto comprei de queijo esse mês?", "quantas pizzas
@@ -1019,7 +1153,20 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // DA NOTA DO CONSULTOR em prompts.js).
         const pendenciasDuvida = lancamentos.filter((l) => l.status_conciliacao === 'PENDENTE_DUVIDA').length;
         const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes, pendenciasDuvida });
-        await enviarMensagemWhatsApp(remetente, resposta);
+
+        // Bug real encontrado em 14/08/2026 (caso do Aroldo, mensagem sobre recebimento recorrente
+        // da Verc Contabilidade): consultarFluxoDeCaixa pode voltar com texto vazio quando a
+        // mensagem não é uma PERGUNTA de verdade (é um comando que não bateu com nenhum gatilho
+        // determinístico acima — ex.: cadastro de recorrente sem escrever "recorrente:" no início).
+        // Mandar body vazio pro WhatsApp Cloud API derruba com 400 ("text.body is required") e
+        // estoura pro catch genérico. Em vez de deixar quebrar, cai num fallback que já orienta o
+        // comando certo pra cadastro recorrente (entrada OU saída, sem precisar de extrato/boleto).
+        await enviarMensagemWhatsApp(
+          remetente,
+          resposta && resposta.trim()
+            ? resposta
+            : 'Não consegui entender isso como uma pergunta sobre o seu caixa. Se é pra CADASTRAR um lançamento recorrente (entrada ou saída que se repete todo mês ou toda semana, sem precisar de boleto nem extrato — ex.: um cliente que paga sempre no mesmo dia), escreve assim: "recorrente: recebo R$500 da Empresa X todo dia 10". Se é outra coisa, me explica de outro jeito que eu tento de novo.'
+        );
       } else {
         await enviarMensagemWhatsApp(remetente, montarMensagemBoasVindas(cliente.nome));
       }
@@ -1027,16 +1174,36 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   } catch (error) {
     console.error('Erro ao processar mensagem:', error.message);
 
+    // Marca o horário do erro pra esse remetente — se ele reenviar o mesmo documento logo em
+    // seguida e a checagem de duplicidade bater, processarLancamentoExtraido trata como confirmação
+    // normal em vez de aviso de duplicidade (ver ERROS_RECENTES_PROCESSAMENTO acima).
+    if (remetente) ERROS_RECENTES_PROCESSAMENTO.set(remetente, Date.now());
+
     // RespostaCortadaError (index.js, 14/08/2026) — a IA cortou a resposta no meio, geralmente
     // porque o documento tem mais informação do que o tipo de leitura escolhido processa de uma
     // vez (ex.: extrato de várias páginas mandado sem a legenda "extrato"). Dá pra orientar o
     // cliente direito nesse caso específico, em vez do genérico "chama o suporte".
-    const mensagemErroCliente = error.name === 'RespostaCortadaError'
-      ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
-        'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
-      : SUPORTE_TEXTO
-        ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-        : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+    //
+    // Caso à parte (pedido do Aroldo, 14/08/2026): se a legenda JÁ era "extrato" e mesmo assim
+    // cortou, dizer "escreve extrato na legenda" de novo é inútil — o cliente já fez isso certo, o
+    // problema é o extrato ser grande/ilegível demais pra ler de uma vez. Manda um lembrete
+    // específico com dicas de como reenviar (em partes, PDF original em vez de foto, etc.) em vez
+    // do texto genérico.
+    const jaEraExtrato = interpretado.tipoMidia && (interpretado.legenda || '').toLowerCase().includes('extrato');
+
+    const mensagemErroCliente = error.name === 'RespostaCortadaError' && jaEraExtrato
+      ? 'Não consegui ler esse extrato direito — ele deve ter mais páginas ou transações do que eu processo de uma vez só.\n\n' +
+        'Tenta assim:\n' +
+        '1️⃣ Manda em partes menores (ex.: um período mais curto, ou página por página).\n' +
+        '2️⃣ Se for foto da tela, tira com boa luz e sem cortar nenhum número.\n' +
+        '3️⃣ Se tiver o PDF original do banco, manda ele em vez de print/foto — costuma ler muito melhor.\n\n' +
+        'Pode reenviar já com "extrato" na legenda de novo.'
+      : error.name === 'RespostaCortadaError'
+        ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
+          'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
+        : SUPORTE_TEXTO
+          ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+          : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
 
     await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
 

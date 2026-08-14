@@ -351,6 +351,7 @@ async function buscarTodosLancamentos(spreadsheetId) {
     categoria: linha[8] || '',
     subcategoria: linha[9] || '',
     observacoes: linha[10] || '',
+    registrado_em: linha[11] || '',
     grupo_dre: linha[12] || '',
     conta_bancaria: linha[13] || '',
     status_conciliacao: linha[14] || '',
