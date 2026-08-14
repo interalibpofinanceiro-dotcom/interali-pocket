@@ -10,9 +10,41 @@ const anthropic = new Anthropic({
 
 const CLAUDE_MODEL = 'claude-sonnet-5';
 
+// Erro específico de "resposta incompleta" — deixa o server.js dar uma mensagem mais útil pro
+// cliente (ex.: "tenta com a legenda certa") em vez do genérico "chama o suporte", que não ajuda
+// em nada quando o problema é isso (bug real de 14/08/2026: extrato de várias páginas mandado sem
+// a legenda "extrato" caía no formato de comprovante único, que tem um limite de resposta menor —
+// a IA tentava listar tudo mesmo assim, estourava o limite e cortava a resposta no meio do JSON).
+class RespostaCortadaError extends Error {
+  constructor(mensagem) {
+    super(mensagem);
+    this.name = 'RespostaCortadaError';
+  }
+}
+
+// Junta o texto da resposta e confere se ela foi CORTADA por atingir max_tokens antes de terminar
+// — sinal oficial da API (`stop_reason`), mais confiável que só tentar o JSON.parse e ver se falha
+// (um JSON incompleto pode até "por acaso" ter chaves/colchetes balanceados em algum ponto).
+function extrairTextoResposta(response) {
+  const texto = response.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('');
+
+  if (response.stop_reason === 'max_tokens') {
+    throw new RespostaCortadaError('A resposta da IA ficou grande demais e foi cortada antes de terminar — provavelmente o documento tem mais informação do que esse tipo de leitura processa de uma vez (ex.: extrato de várias páginas mandado sem a legenda certa).');
+  }
+
+  return texto;
+}
+
 function extrairJSON(texto) {
   const semCercas = texto.trim().replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
-  return JSON.parse(semCercas.trim());
+  try {
+    return JSON.parse(semCercas.trim());
+  } catch (erroOriginal) {
+    throw new RespostaCortadaError(`Não consegui interpretar a resposta da IA (formato inesperado ou incompleto): ${erroOriginal.message}`);
+  }
 }
 
 function getMediaType(filePath) {
@@ -43,7 +75,9 @@ function construirBlocoConteudo(buffer, mediaType) {
 async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 1024,
+    // 2048 em vez de 1024 (14/08/2026) — folga extra pra documentos com mais itens do que o normal
+    // (ex.: nota de fornecedor com muita linha), sem chegar nem perto do limite de extrato (4096).
+    max_tokens: 2048,
     system: PROMPT_EXTRACAO,
     messages: [
       {
@@ -59,12 +93,7 @@ async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  return extrairJSON(textoResposta);
+  return extrairJSON(extrairTextoResposta(response));
 }
 
 // Lançamento manual por texto — sem imagem, então manda a data de hoje explicitamente junto (o
@@ -85,12 +114,7 @@ async function extrairComprovanteDeTexto(texto) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  return extrairJSON(textoResposta);
+  return extrairJSON(extrairTextoResposta(response));
 }
 
 // Cadastro de despesa/receita fixa recorrente (comando "recorrente:" — ver server.js). Não
@@ -106,12 +130,7 @@ async function extrairDespesaFixaDeTexto(texto) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  return extrairJSON(textoResposta);
+  return extrairJSON(extrairTextoResposta(response));
 }
 
 async function extrairComprovante(imagePath) {
@@ -139,12 +158,7 @@ async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  const resultado = extrairJSON(textoResposta);
+  const resultado = extrairJSON(extrairTextoResposta(response));
   return resultado.transacoes || [];
 }
 
@@ -172,12 +186,7 @@ async function extrairVendasDeBuffer(fileBuffer, mediaType) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  const resultado = extrairJSON(textoResposta);
+  const resultado = extrairJSON(extrairTextoResposta(response));
   return resultado.vendas || [];
 }
 
@@ -200,12 +209,7 @@ async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
     ],
   });
 
-  const textoResposta = response.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('');
-
-  const resultado = extrairJSON(textoResposta);
+  const resultado = extrairJSON(extrairTextoResposta(response));
   return resultado.contas || [];
 }
 
@@ -279,4 +283,5 @@ module.exports = {
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,
+  RespostaCortadaError,
 };

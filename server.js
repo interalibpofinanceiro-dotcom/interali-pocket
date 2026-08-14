@@ -870,9 +870,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   } catch (error) {
     console.error('Erro ao processar mensagem:', error.message);
 
-    const mensagemErroCliente = SUPORTE_TEXTO
-      ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-      : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+    // RespostaCortadaError (index.js, 14/08/2026) — a IA cortou a resposta no meio, geralmente
+    // porque o documento tem mais informação do que o tipo de leitura escolhido processa de uma
+    // vez (ex.: extrato de várias páginas mandado sem a legenda "extrato"). Dá pra orientar o
+    // cliente direito nesse caso específico, em vez do genérico "chama o suporte".
+    const mensagemErroCliente = error.name === 'RespostaCortadaError'
+      ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
+        'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
+      : SUPORTE_TEXTO
+        ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+        : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
 
     await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
 
