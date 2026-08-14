@@ -42,6 +42,13 @@ const GRUPOS_DRE = [
   { chave: 'financeiro_juros_emprestimos', bloco: 'FINANCEIRO', rotulo: 'Juros Pagos sobre Empréstimos Bancários' },
   { chave: 'financeiro_multas_atraso', bloco: 'FINANCEIRO', rotulo: 'Multas e Juros por Atraso de Contas' },
 
+  // Bloco à parte (14/08/2026, pedido do Aroldo) — compra de equipamento, reforma, imobilizado.
+  // Contabilmente NÃO é despesa do exercício (não entra no DRE/lucro líquido, vai pro balanço/
+  // imobilizado) — por isso `gerarDRE()` em reconciliacao.js NUNCA soma este bloco em nenhum
+  // total. Fica só marcado e consultável (ex.: "quanto investi em equipamento esse mês?"), pra
+  // não misturar com despesa operacional nem inflar custo indevidamente.
+  { chave: 'investimento_imobilizado', bloco: 'INVESTIMENTO', rotulo: 'Compra de Equipamentos, Reforma e Imobilizado' },
+
   { chave: 'nao_classificado', bloco: 'NAO_CLASSIFICADO', rotulo: 'Não Classificado' },
 ];
 

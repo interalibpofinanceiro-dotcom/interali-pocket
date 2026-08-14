@@ -16,16 +16,17 @@ function numeroBR(valor) {
 }
 
 const ABA_LANCAMENTOS = 'Lancamentos';
-// Grupo_DRE, Conta_Bancaria e Status_Conciliacao foram ADICIONADAS no fim em 07/08/2026 (não
-// inseridas no meio) de propósito — clientes que já tinham linhas gravadas com o cabeçalho antigo
-// de 12 colunas continuam lendo certo, essas 3 colunas novas é que ficam em branco pra eles até o
-// próximo lançamento/sincronização.
+// Grupo_DRE, Conta_Bancaria e Status_Conciliacao foram ADICIONADAS no fim em 07/08/2026, e
+// Observacao_Conciliacao em 14/08/2026 (não inseridas no meio) de propósito — clientes que já
+// tinham linhas gravadas com cabeçalho mais curto continuam lendo certo, as colunas novas é que
+// ficam em branco pra eles até o próximo lançamento/sincronização.
 const CABECALHO_LANCAMENTOS = [
   'Data', 'Hora', 'Valor', 'Tipo', 'Descricao', 'Estabelecimento_Pessoa',
   'Documento', 'Forma_Pagamento', 'Categoria', 'Subcategoria', 'Observacoes', 'Registrado_Em',
-  'Grupo_DRE', 'Conta_Bancaria', 'Status_Conciliacao',
+  'Grupo_DRE', 'Conta_Bancaria', 'Status_Conciliacao', 'Observacao_Conciliacao',
 ];
 const COLUNA_STATUS_CONCILIACAO = 'O'; // precisa bater com a posição de Status_Conciliacao acima (15ª coluna)
+const COLUNA_OBSERVACAO_CONCILIACAO = 'P'; // 16ª coluna — detalhe do Status_Conciliacao (ex.: motivo da dúvida)
 
 const ABA_EXTRATO = 'Extrato';
 const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em'];
@@ -133,6 +134,10 @@ async function buscarLinhas(spreadsheetId, nomeAba, range) {
 
 // Devolve o número da linha real onde o lançamento caiu (ver extrairNumeroLinha) — quem chama usa
 // isso pra ligar os itens do documento (salvarItens) de volta a este lançamento específico.
+// `dados.status_conciliacao`/`dados.observacao_conciliacao` são opcionais — por padrão começa
+// "Pendente" (aguardando aparecer no extrato, o caso normal de todo comprovante novo); quem
+// registra um lançamento a partir de um extrato órfão (sem comprovante) passa "PENDENTE_COMPROVANTE"
+// explicitamente (ver processarExtratoOrfaos em server.js).
 async function salvarComprovante(spreadsheetId, dados) {
   const sheets = getSheetsClient();
 
@@ -153,18 +158,54 @@ async function salvarComprovante(spreadsheetId, dados) {
     new Date().toISOString(),
     dados.grupo_dre || '',
     dados.conta_bancaria || '',
-    'Pendente', // status inicial — atualizado pra "Conciliado..." quando bater com o extrato (ver sincronizarConciliacao em reconciliacao.js)
+    dados.status_conciliacao || 'Pendente', // atualizado pra CONCILIADO_OK/PENDENTE_DUVIDA quando bater com o extrato (ver sincronizarConciliacao em reconciliacao.js)
+    dados.observacao_conciliacao || '',
   ];
 
   const resposta = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_LANCAMENTOS}!A:O`,
+    range: `${ABA_LANCAMENTOS}!A:P`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [linha] },
   });
 
   return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
+}
+
+// Atualiza um lançamento JÁ EXISTENTE no lugar (reescreve a linha inteira, A:P) — usado quando um
+// comprovante de verdade chega depois pra "completar" um lançamento que tinha sido registrado
+// automaticamente a partir do extrato (status PENDENTE_COMPROVANTE, sem detalhe nenhum ainda).
+// Em vez de criar uma linha nova (duplicando) ou descartar o comprovante (perdendo a categoria
+// certa que ele traz), enriquece a linha existente com os dados reais e marca CONCILIADO_OK.
+async function atualizarLancamento(spreadsheetId, linha, dados) {
+  const sheets = getSheetsClient();
+
+  const valores = [
+    dados.data || '',
+    dados.hora || '',
+    dados.valor || 0,
+    dados.tipo_movimentacao || '',
+    dados.descricao || '',
+    dados.estabelecimento_ou_pessoa || '',
+    dados.documento_identificacao || '',
+    dados.forma_pagamento || '',
+    dados.categoria || '',
+    dados.subcategoria || '',
+    dados.observacoes || '',
+    new Date().toISOString(),
+    dados.grupo_dre || '',
+    dados.conta_bancaria || '',
+    dados.status_conciliacao || 'CONCILIADO_OK',
+    dados.observacao_conciliacao || '',
+  ];
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_LANCAMENTOS}!A${linha}:P${linha}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [valores] },
+  });
 }
 
 // Salva os itens individuais de um documento (campo `itens[]` da extração — ver prompts.js) numa
@@ -276,7 +317,7 @@ async function marcarDespesaFixaLancada(spreadsheetId, linha, mesAno) {
 }
 
 async function buscarTodosLancamentos(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_LANCAMENTOS, 'A2:O');
+  const linhas = await buscarLinhas(spreadsheetId, ABA_LANCAMENTOS, 'A2:P');
 
   return linhas.map((linha, indice) => ({
     linha: indice + 2, // número real da linha na planilha (cabeçalho ocupa a 1) — usado pra reescrever só o Status_Conciliacao depois, sem tocar no resto
@@ -294,12 +335,13 @@ async function buscarTodosLancamentos(spreadsheetId) {
     grupo_dre: linha[12] || '',
     conta_bancaria: linha[13] || '',
     status_conciliacao: linha[14] || '',
+    observacao_conciliacao: linha[15] || '',
   }));
 }
 
-// Atualiza só a coluna Status_Conciliacao das linhas informadas, sem reescrever o resto do
-// lançamento — chamada depois de rodar sincronizarConciliacao() (reconciliacao.js). Um único
-// batchUpdate mesmo quando várias linhas mudam, pra não gastar uma chamada de API por linha.
+// Atualiza Status_Conciliacao + Observacao_Conciliacao das linhas informadas, sem reescrever o
+// resto do lançamento — chamada depois de rodar sincronizarConciliacao() (reconciliacao.js). Um
+// único batchUpdate mesmo quando várias linhas mudam, pra não gastar uma chamada de API por linha.
 async function atualizarStatusConciliacaoEmLote(spreadsheetId, atualizacoes) {
   if (!atualizacoes || atualizacoes.length === 0) return;
 
@@ -309,10 +351,13 @@ async function atualizarStatusConciliacaoEmLote(spreadsheetId, atualizacoes) {
     spreadsheetId,
     requestBody: {
       valueInputOption: 'RAW',
-      data: atualizacoes.map(({ linha, status }) => ({
-        range: `${ABA_LANCAMENTOS}!${COLUNA_STATUS_CONCILIACAO}${linha}`,
-        values: [[status]],
-      })),
+      data: atualizacoes.flatMap(({ linha, status, observacao }) => {
+        const celulas = [{ range: `${ABA_LANCAMENTOS}!${COLUNA_STATUS_CONCILIACAO}${linha}`, values: [[status]] }];
+        if (observacao !== undefined) {
+          celulas.push({ range: `${ABA_LANCAMENTOS}!${COLUNA_OBSERVACAO_CONCILIACAO}${linha}`, values: [[observacao]] });
+        }
+        return celulas;
+      }),
     },
   });
 }
@@ -407,6 +452,7 @@ async function buscarContasAPagar(spreadsheetId) {
 
 module.exports = {
   salvarComprovante,
+  atualizarLancamento,
   buscarTodosLancamentos,
   atualizarStatusConciliacaoEmLote,
   salvarExtrato,

@@ -36,15 +36,21 @@ function formatarDataBR(strData) {
 // aproximado (até 15%/R$5, o que for maior) — cobre desconto/juro/arredondamento entre o que o
 // comprovante mostra e o que efetivamente saiu do banco. Quando cai na 2ª passada, o par vem
 // marcado com `divergencia` (extrato − lançamento) em vez de ficar "não conciliado" à toa.
+//
+// Também detecta AMBIGUIDADE genuína (14/08/2026): se mais de UMA transação do extrato é candidata
+// válida pro mesmo lançamento (ex.: duas saídas de R$50 no mesmo dia), escolher a "melhor" por
+// pontuação seria um palpite, não uma conciliação de verdade — o par vem marcado com `ambiguo: true`
+// pra virar PENDENTE_DUVIDA em vez de CONCILIADO_OK (ver sincronizarConciliacao).
 function reconciliar(lancamentos, extrato) {
   const extratoDisponivel = extrato.map((transacao) => ({ ...transacao, usado: false }));
   const conciliados = [];
   const somenteNosComprovantes = [];
 
-  const encontrarIndice = (lancamento, comDivergencia) => {
+  // Devolve TODOS os candidatos válidos (não só o melhor), ordenados por pontuação — quem chama
+  // decide se usa o 1º (melhor par) e se há empate suficiente pra marcar ambiguidade.
+  const encontrarCandidatos = (lancamento, comDivergencia) => {
     const dataLancamento = paraData(lancamento.data);
-    let melhorIndice = -1;
-    let melhorPontuacao = Infinity;
+    const candidatos = [];
 
     extratoDisponivel.forEach((transacao, indice) => {
       if (transacao.usado) return;
@@ -64,27 +70,29 @@ function reconciliar(lancamentos, extrato) {
 
       // Desempate: menor diferença de valor primeiro (par mais provável), depois menor diferença de data.
       const pontuacao = diferencaValor * 1000 + diferencaDias;
-      if (pontuacao < melhorPontuacao) {
-        melhorPontuacao = pontuacao;
-        melhorIndice = indice;
-      }
+      candidatos.push({ indice, pontuacao });
     });
 
-    return melhorIndice;
+    candidatos.sort((a, b) => a.pontuacao - b.pontuacao);
+    return candidatos;
   };
 
   for (const lancamento of lancamentos) {
-    let indice = encontrarIndice(lancamento, false);
+    let candidatos = encontrarCandidatos(lancamento, false);
     let divergencia = null;
 
-    if (indice < 0) {
-      indice = encontrarIndice(lancamento, true);
-      if (indice >= 0) divergencia = extratoDisponivel[indice].valor - lancamento.valor;
+    if (candidatos.length === 0) {
+      candidatos = encontrarCandidatos(lancamento, true);
+      if (candidatos.length > 0) divergencia = extratoDisponivel[candidatos[0].indice].valor - lancamento.valor;
     }
 
-    if (indice >= 0) {
+    if (candidatos.length > 0) {
+      const indice = candidatos[0].indice;
+      // Ambíguo = existe mais de 1 candidato válido, ou seja, a escolha do "melhor" seria um
+      // palpite — não conta como empate se só sobrou 1 opção mesmo com pontuações parecidas.
+      const ambiguo = candidatos.length > 1;
       extratoDisponivel[indice].usado = true;
-      conciliados.push({ lancamento, transacao: extratoDisponivel[indice], divergencia });
+      conciliados.push({ lancamento, transacao: extratoDisponivel[indice], divergencia, ambiguo });
     } else {
       somenteNosComprovantes.push(lancamento);
     }
@@ -97,20 +105,42 @@ function reconciliar(lancamentos, extrato) {
 
 // Recalcula o Status_Conciliacao de CADA lançamento (histórico inteiro, não só o período de um
 // resumo) — usado depois de salvar um comprovante ou um extrato novo, pra manter a coluna
-// Status_Conciliacao da planilha sempre correta. Retorna um Map linha → status (só as linhas que
-// mudaram precisam ser reescritas — quem chama compara com o status atual antes de gravar).
+// Status_Conciliacao da planilha sempre correta. Retorna um Map linha → { status, observacao }
+// (só as linhas que mudaram precisam ser reescritas — quem chama compara com o status atual antes
+// de gravar). Vocabulário (14/08/2026, padronizado a pedido do Aroldo):
+//   - CONCILIADO_OK       — bateu com o extrato (exato ou com pequena divergência de valor).
+//   - PENDENTE_DUVIDA     — bateu, mas havia MAIS de uma transação candidata no extrato (ambíguo de
+//                           verdade, não dá pra escolher sozinho qual é a certa).
+//   - PENDENTE_COMPROVANTE — lançamento nasceu do EXTRATO (sem comprovante nenhum ainda, ver
+//                           processarExtratoOrfaos em server.js) — "congelado": mesmo que bata com
+//                           o próprio extrato que o originou, o status só muda pra CONCILIADO_OK
+//                           quando o comprovante de verdade chegar e completar a linha (ver
+//                           classificarESalvarLancamento em server.js), nunca por este sincronismo
+//                           genérico — senão perderia o sentido de "ainda falta o comprovante".
+//   - Pendente            — comprovante normal, ainda não apareceu no extrato (o estado do dia a
+//                           dia, não é problema nenhum — só espera o próximo extrato confirmar).
 function sincronizarConciliacao(lancamentos, extrato) {
   const { conciliados, somenteNosComprovantes } = reconciliar(lancamentos, extrato);
   const statusPorLinha = new Map();
 
-  for (const { lancamento, divergencia } of conciliados) {
-    statusPorLinha.set(
-      lancamento.linha,
-      divergencia !== null ? `Conciliado (divergência de ${formatarMoeda(Math.abs(divergencia))})` : 'Conciliado (Extrato)'
-    );
+  for (const { lancamento, divergencia, ambiguo } of conciliados) {
+    if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
+      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
+    } else if (ambiguo) {
+      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_DUVIDA', observacao: `Mais de uma transação do extrato com valor parecido (${formatarMoeda(lancamento.valor)}) nessa data — confirme qual é a correta.` });
+    } else {
+      const observacao = divergencia !== null
+        ? `Conciliado com divergência de ${formatarMoeda(Math.abs(divergencia))} (desconto/juros/arredondamento).`
+        : '';
+      statusPorLinha.set(lancamento.linha, { status: 'CONCILIADO_OK', observacao });
+    }
   }
   for (const lancamento of somenteNosComprovantes) {
-    statusPorLinha.set(lancamento.linha, 'Pendente');
+    if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
+      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
+    } else {
+      statusPorLinha.set(lancamento.linha, { status: 'Pendente', observacao: '' });
+    }
   }
 
   return statusPorLinha;

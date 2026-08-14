@@ -13,6 +13,7 @@ const {
 } = require('./index');
 const {
   salvarComprovante,
+  atualizarLancamento,
   buscarTodosLancamentos,
   atualizarStatusConciliacaoEmLote,
   salvarExtrato,
@@ -35,6 +36,7 @@ const {
   formatarProjecao,
   sincronizarConciliacao,
   encontrarTransacoesOrfas,
+  reconciliar,
   gerarDRE,
   formatarDRE,
   formatarDataBR,
@@ -194,18 +196,33 @@ function formatarNumero(valor) {
   return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
 
-// Trava de duplicidade em 3 níveis, olhando data + horário + valor + tipo (pedido do Aroldo,
-// 08/08/2026: "sempre remova duplicidade... vai ler data, horário, valores... e se tiver dúvida,
-// pergunte ao cliente"). Data+valor+tipo batendo já é um sinal forte de repetição — não exige que
-// o estabelecimento bata também porque a leitura da IA pode variar levemente entre duas fotos do
-// mesmo documento. O horário é o que decide entre os três níveis:
-//   - "duplicado": achou candidato com o MESMO horário (quando os dois lados têm horário) → alta
-//     confiança, não salva.
-//   - "ambiguo": achou candidato com data+valor+tipo iguais, mas falta horário de um dos lados (ou
-//     dos dois) pra confirmar ou descartar → não decide sozinho, pergunta pro cliente.
-//   - "novo": ou não achou nenhum candidato, ou os candidatos batem em tudo menos no horário (os
-//     dois lados TÊM horário e são diferentes) → confiança de que é um lançamento diferente mesmo.
+// Trava de duplicidade, olhando ID da transação + data + horário + valor + tipo (pedido do
+// Aroldo, 08/08/2026 e reforçado em 14/08/2026: "verifique o ID_Transacao... se não houver ID,
+// verifique Data+Hora+Valor+Tipo"). Dois níveis de checagem, na ordem:
+//
+// 1) ID_Transação (chave Pix, nº do boleto etc. — campo `documento_identificacao`): se os dois
+//    lados TÊM um ID preenchido e ele bate, é o sinal mais forte que existe — nem olha o resto.
+// 2) Data+valor+tipo — sinal forte de repetição já sem precisar bater estabelecimento (a leitura
+//    da IA pode variar levemente entre duas fotos do mesmo documento). O horário decide entre os
+//    três níveis clássicos: "duplicado" (mesmo horário nos dois lados), "ambiguo" (falta horário
+//    de um lado, não dá pra decidir sozinho) ou "novo" (horários diferentes nos dois lados).
+//
+// Em QUALQUER um dos dois níveis, se o candidato encontrado tiver Status_Conciliacao =
+// PENDENTE_COMPROVANTE (nasceu do extrato, sem comprovante nenhum ainda — ver
+// processarExtratoOrfaos), o resultado vira "completar" em vez de "duplicado"/"ambiguo": esse
+// lançamento novo provavelmente É o comprovante que faltava, não uma repetição — melhor
+// completar a linha existente com os detalhes certos do que rejeitar ou perguntar à toa.
 function verificarDuplicidade(lancamentosExistentes, novo) {
+  const idNovo = (novo.documento_identificacao || '').trim();
+  if (idNovo) {
+    const candidatoPorId = lancamentosExistentes.find((l) => (l.documento_identificacao || '').trim() === idNovo);
+    if (candidatoPorId) {
+      return candidatoPorId.status_conciliacao === 'PENDENTE_COMPROVANTE'
+        ? { status: 'completar', candidato: candidatoPorId }
+        : { status: 'duplicado', candidato: candidatoPorId };
+    }
+  }
+
   const candidatos = lancamentosExistentes.filter((lancamento) => (
     lancamento.data === novo.data &&
     Math.abs((lancamento.valor || 0) - (novo.valor || 0)) < 0.01 &&
@@ -213,6 +230,11 @@ function verificarDuplicidade(lancamentosExistentes, novo) {
   ));
 
   if (candidatos.length === 0) return { status: 'novo' };
+
+  const candidatoPendenteComprovante = candidatos.find((c) => c.status_conciliacao === 'PENDENTE_COMPROVANTE');
+  if (candidatoPendenteComprovante) {
+    return { status: 'completar', candidato: candidatoPendenteComprovante };
+  }
 
   const horarioNovo = (novo.hora || '').trim();
 
@@ -315,6 +337,17 @@ async function salvarComprovanteComItens(sheetId, dados) {
 async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosParaComparar) {
   const resultado = verificarDuplicidade(lancamentosParaComparar, dadosExtraidos);
 
+  if (resultado.status === 'completar') {
+    // Já existia um lançamento PENDENTE_COMPROVANTE (nasceu do extrato, sem detalhe nenhum) —
+    // completa a linha existente com os dados reais do comprovante em vez de criar uma nova.
+    await atualizarLancamento(sheetId, resultado.candidato.linha, {
+      ...dadosExtraidos,
+      status_conciliacao: 'CONCILIADO_OK',
+      observacao_conciliacao: 'Comprovante recebido — completou o lançamento que tinha vindo do extrato/fatura.',
+    });
+    return { status: 'completar', linhaLancamento: resultado.candidato.linha };
+  }
+
   if (resultado.status === 'duplicado') {
     return { status: 'duplicado', candidato: resultado.candidato };
   }
@@ -335,11 +368,20 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
   const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
   const resultado = await classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosExistentes);
 
+  if (resultado.status === 'completar') {
+    await enviarMensagemWhatsApp(
+      remetente,
+      `🔗 *Conciliação:* esse comprovante já tinha um lançamento pendente vindo do extrato bancário — completei ele com os detalhes certos, sem duplicar!\n\n${formatarResumoComprovante(dadosExtraidos)}`
+    );
+    await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+    return;
+  }
+
   if (resultado.status === 'duplicado') {
     const c = resultado.candidato;
     await enviarMensagemWhatsApp(
       remetente,
-      `⚠️ Esse lançamento já está registrado (${formatarNumero(c.valor)} em ${c.data} às ${c.hora}) — não salvei de novo pra não contar duas vezes.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
+      `⚠️ *Aviso de Conciliação:* Este comprovante de ${formatarNumero(dadosExtraidos.valor)} (${dadosExtraidos.estabelecimento_ou_pessoa || dadosExtraidos.descricao || 'sem descrição'}) enviado em ${dadosExtraidos.data} já foi lançado anteriormente (${c.data}${c.hora ? ` às ${c.hora}` : ''}). Para manter seu caixa correto, a duplicidade foi ignorada.\n\nSe não for duplicado, me avisa que eu registro mesmo assim.`
     );
     return;
   }
@@ -382,6 +424,7 @@ async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
   let valorNovas = 0;
   let jaRegistradas = 0;
   let ambiguas = 0;
+  let completadas = 0;
 
   for (const venda of vendas) {
     const dados = { ...venda, tipo_movimentacao: venda.tipo_movimentacao || 'entrada' };
@@ -391,6 +434,14 @@ async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
       novas += 1;
       valorNovas += dados.valor || 0;
       lancamentosParaComparar.push({ ...dados, hora: dados.hora || '' });
+    } else if (resultado.status === 'completar') {
+      completadas += 1;
+      // Atualiza a cópia em memória (mesma linha, dados novos, status já CONCILIADO_OK) pra não
+      // deixar o resto do lote comparando contra a versão antiga (PENDENTE_COMPROVANTE) dessa linha.
+      const indiceExistente = lancamentosParaComparar.findIndex((l) => l.linha === resultado.linhaLancamento);
+      if (indiceExistente >= 0) {
+        lancamentosParaComparar[indiceExistente] = { ...dados, linha: resultado.linhaLancamento, hora: dados.hora || '', status_conciliacao: 'CONCILIADO_OK' };
+      }
     } else if (resultado.status === 'duplicado') {
       jaRegistradas += 1;
     } else {
@@ -399,6 +450,9 @@ async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
   }
 
   const partes = [`✅ Relatório de vendas processado! ${novas} venda(s) nova(s) registrada(s) (${formatarNumero(valorNovas)}).`];
+  if (completadas > 0) {
+    partes.push(`${completadas} já tinha(m) vindo do extrato e foi(ram) completada(s) com os detalhes certos agora.`);
+  }
   if (jaRegistradas > 0) {
     partes.push(`${jaRegistradas} já estava(m) registrada(s) (bateu com comprovante ou lançamento anterior) — ignorei pra não duplicar.`);
   }
@@ -473,11 +527,45 @@ async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, 
 
   const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
   const atualizacoes = lancamentos
-    .map((lancamento) => ({ linha: lancamento.linha, status: statusPorLinha.get(lancamento.linha) || 'Pendente', statusAnterior: lancamento.status_conciliacao }))
+    .map((lancamento) => {
+      const novo = statusPorLinha.get(lancamento.linha) || { status: 'Pendente', observacao: '' };
+      return { linha: lancamento.linha, status: novo.status, observacao: novo.observacao, statusAnterior: lancamento.status_conciliacao };
+    })
     .filter(({ status, statusAnterior }) => status !== statusAnterior)
-    .map(({ linha, status }) => ({ linha, status }));
+    .map(({ linha, status, observacao }) => ({ linha, status, observacao }));
 
   await atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
+}
+
+// Registra automaticamente na aba Lancamentos toda transação do EXTRATO que não tem nenhum
+// lançamento correspondente (nem exato, nem dentro da tolerância) — pedido do Aroldo, 14/08/2026:
+// "se não encontrar correspondência, registre a nova linha... Comprovante original pendente".
+// Cobre entrada E saída (diferente do aviso "recebimento sem nota" no chat, que é só entrada —
+// esse continua existindo do jeito que já era, só que agora a transação também fica REGISTRADA,
+// não só perguntada). Cada uma nasce com status PENDENTE_COMPROVANTE — fica "congelada" nesse
+// status pelo sincronizarConciliacao (ver reconciliacao.js) até o comprovante de verdade chegar e
+// completar a linha (ver "completar" em classificarESalvarLancamento).
+async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
+  const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
+  let registrados = 0;
+
+  for (const transacao of somenteNoExtrato) {
+    await salvarComprovanteComItens(sheetId, {
+      data: transacao.data,
+      hora: '',
+      valor: transacao.valor,
+      tipo_movimentacao: transacao.tipo,
+      descricao: transacao.descricao || '',
+      estabelecimento_ou_pessoa: transacao.descricao || '',
+      categoria: 'Não Classificado',
+      grupo_dre: 'nao_classificado',
+      status_conciliacao: 'PENDENTE_COMPROVANTE',
+      observacao_conciliacao: 'Lançado via extrato/fatura. Comprovante original pendente.',
+    });
+    registrados += 1;
+  }
+
+  return registrados;
 }
 
 async function gerarProjecao(sheetId, dias) {
@@ -703,16 +791,30 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
       const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
+      const extratoTotal = [...extratoExistente, ...transacoesNovas];
 
       await salvarExtrato(sheetId, transacoesNovas);
-      // Recalcula o Status_Conciliacao de tudo agora que o extrato mudou — silencioso, não afeta a resposta.
-      await sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, [...extratoExistente, ...transacoesNovas]).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+
+      // Registra automaticamente na planilha toda transação do extrato sem lançamento
+      // correspondente (entrada OU saída — mais amplo que o aviso "recebimento sem nota" logo
+      // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
+      // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
+      // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
+      const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
+        console.error('Falha ao registrar órfãos do extrato:', erro.message);
+        return 0;
+      });
+
+      // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
+      // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
+      await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
 
       const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
+      const avisoRegistrados = registrados > 0 ? ` ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
       const avisoOrfas = orfas.length > 0
         ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
         : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
+      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.${avisoRegistrados}\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
     } else if (interpretado.tipoMidia && /\bvend|\bsistema\b|\bpdv\b|ifood|rappi|delivery|aiqfome/.test(interpretado.legenda)) {
       // Relatório de vendas do sistema/PDV/app de delivery — não trava num app específico (ver
       // PROMPT_VENDAS), o gatilho é só a legenda mencionar "venda(s)", "sistema", "pdv" ou o nome
@@ -861,7 +963,11 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           buscarContasAPagar(sheetId),
           buscarTodosItens(sheetId),
         ]);
-        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes });
+        // pendenciasDuvida: quantos lançamentos estão PENDENTE_DUVIDA agora — o prompt usa isso
+        // pra fechar a resposta com a "Nota do Consultor" lembrando da reunião mensal (ver REGRA
+        // DA NOTA DO CONSULTOR em prompts.js).
+        const pendenciasDuvida = lancamentos.filter((l) => l.status_conciliacao === 'PENDENTE_DUVIDA').length;
+        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes, pendenciasDuvida });
         await enviarMensagemWhatsApp(remetente, resposta);
       } else {
         await enviarMensagemWhatsApp(remetente, montarMensagemBoasVindas(cliente.nome));
