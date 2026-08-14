@@ -2,7 +2,10 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA, PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR } = require('./prompts');
+const {
+  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA,
+  PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
+} = require('./prompts');
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -213,6 +216,51 @@ async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
   return resultado.contas || [];
 }
 
+// Conta a RECEBER a partir de foto/PDF (nota fiscal emitida, contrato, venda parcelada) — ver
+// PROMPT_CONTA_A_RECEBER. Espelha extrairContasAPagarDeBuffer, sentido inverso.
+async function extrairContasAReceberDeBuffer(fileBuffer, mediaType) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 4096,
+    system: PROMPT_CONTA_A_RECEBER,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: 'Extraia as contas a receber deste documento seguindo o formato JSON definido.',
+          },
+        ],
+      },
+    ],
+  });
+
+  const resultado = extrairJSON(extrairTextoResposta(response));
+  return resultado.contas || [];
+}
+
+// Conta a RECEBER por texto ("receber: 500 do João dia 20") — manda a data de hoje, mesmo motivo
+// de extrairComprovanteDeTexto (vencimento relativo tipo "dia 20" precisa de referência real).
+async function extrairContaAReceberDeTexto(texto) {
+  const hoje = new Date().toISOString().slice(0, 10);
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 512,
+    system: PROMPT_CONTA_A_RECEBER_TEXTO,
+    messages: [
+      {
+        role: 'user',
+        content: `Data de hoje: ${hoje}\n\nMensagem do cliente: ${texto}`,
+      },
+    ],
+  });
+
+  return extrairJSON(extrairTextoResposta(response));
+}
+
 async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
@@ -280,6 +328,8 @@ module.exports = {
   extrairVendasDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
+  extrairContasAReceberDeBuffer,
+  extrairContaAReceberDeTexto,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

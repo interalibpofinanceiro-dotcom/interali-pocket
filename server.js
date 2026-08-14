@@ -8,6 +8,8 @@ const {
   extrairVendasDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
+  extrairContasAReceberDeBuffer,
+  extrairContaAReceberDeTexto,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -20,6 +22,8 @@ const {
   buscarExtrato,
   salvarContasAPagar,
   buscarContasAPagar,
+  salvarContasAReceber,
+  buscarContasAReceber,
   salvarItens,
   buscarTodosItens,
   salvarDespesaFixa,
@@ -32,6 +36,7 @@ const {
   formatarUpsellEspecialista,
   obterSaldoAtual,
   filtrarContasEmAberto,
+  filtrarContasEmAbertoReceber,
   projetarFluxoDeCaixa,
   formatarProjecao,
   sincronizarConciliacao,
@@ -112,6 +117,7 @@ function montarMensagemBoasVindas(nome) {
     '📸 Mande a foto de um comprovante, nota fiscal ou recibo para eu registrar.\n' +
     '🏦 Mande o extrato do banco (foto ou PDF) escrevendo "extrato" na legenda, para eu conciliar.\n' +
     '🧾 Mande boleto ou fatura de cartão de crédito escrevendo "boleto" ou "cartão + nome do banco" na legenda (ex.: "cartão Bradesco").\n' +
+    '📤 Tem dinheiro pra RECEBER de alguém (nota fiscal, venda parcelada)? Mande a foto escrevendo "receber" na legenda, ou escreva "receber: " + valor e vencimento (ex.: "receber: 500 do João dia 20") que eu incluo na sua previsão.\n' +
     '🛵 Mande o relatório de vendas do seu sistema/app de delivery (iFood, Rappi, PDV, etc.) escrevendo "vendas" ou "sistema" na legenda, para eu registrar cada venda certinha.\n' +
     '✍️ Não tem comprovante pra tirar foto (ex.: mensalidade, honorário)? Escreva "lançar: " + o que foi (ex.: "lançar: paguei 300 de contador hoje") que eu registro do mesmo jeito.\n' +
     '🔁 Despesa/receita que se repete todo mês (ex.: marketing, contador)? Escreva "recorrente: " + o valor e o dia (ex.: "recorrente: todo dia 10 pago marketing 1000") que eu cadastro e lanço sozinho todo mês, sem precisar mandar de novo.\n' +
@@ -569,15 +575,17 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
 }
 
 async function gerarProjecao(sheetId, dias) {
-  const [lancamentos, extrato, contasAPagar] = await Promise.all([
+  const [lancamentos, extrato, contasAPagar, contasAReceber] = await Promise.all([
     buscarTodosLancamentos(sheetId),
     buscarExtrato(sheetId),
     buscarContasAPagar(sheetId),
+    buscarContasAReceber(sheetId),
   ]);
 
   const saldoAtual = obterSaldoAtual(extrato);
   const contasEmAberto = filtrarContasEmAberto(contasAPagar, lancamentos);
-  return projetarFluxoDeCaixa(saldoAtual, contasEmAberto, dias);
+  const contasReceberEmAberto = filtrarContasEmAbertoReceber(contasAReceber, lancamentos);
+  return projetarFluxoDeCaixa(saldoAtual, contasEmAberto, contasReceberEmAberto, dias);
 }
 
 // Extrai o nome do cartão da legenda (ex.: "lançar como Cartão Bradesco" → "Bradesco"),
@@ -637,16 +645,41 @@ function interpretarComandoDespesaFixa(texto) {
   return match ? match[1].trim() : null;
 }
 
+// Reconhece o comando de cadastro de conta a RECEBER por texto: "receber: 500 do João dia 20".
+// Mesmo motivo de gatilho explícito das outras heurísticas de comando deste arquivo.
+function interpretarComandoContaAReceber(texto) {
+  const match = (texto || '').trim().match(/^(?:receber|a\s*receber|cobran[çc]a)\s*[:\-]\s*(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function formatarResumoContaAReceber(dados) {
+  const parcela = dados.parcela_atual && dados.parcela_total ? ` (${dados.parcela_atual}/${dados.parcela_total})` : '';
+  return (
+    '✅ Conta a receber registrada!\n\n' +
+    `📅 Vencimento: ${dados.vencimento}${parcela}\n` +
+    `💰 Valor: ${formatarNumero(dados.valor)}\n` +
+    `👤 ${dados.cliente_devedor || 'Não identificado'}\n` +
+    `📝 ${dados.descricao || ''}\n\n` +
+    'Isso já entra na sua "previsão" — assim que o dinheiro cair (bater com um lançamento de entrada perto dessa data e valor), some sozinho da lista de pendências.'
+  );
+}
+
+const NOMES_DIA_SEMANA = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+
 function formatarResumoDespesaFixa(dados) {
   const tipoTexto = dados.tipo_movimentacao === 'entrada' ? 'Entrada' : 'Saída';
+  const recorrencia = dados.frequencia === 'semanal' && dados.dia_da_semana !== null && dados.dia_da_semana !== undefined
+    ? `Toda ${NOMES_DIA_SEMANA[dados.dia_da_semana]}`
+    : `Todo dia ${dados.dia_do_mes}`;
+  const proximaVez = dados.frequencia === 'semanal' ? 'a partir dessa semana (ou hoje, se já for o dia certo)' : 'a partir do próximo mês (ou hoje, se já for o dia certo)';
   return (
     '✅ Despesa/receita fixa cadastrada!\n\n' +
-    `📅 Todo dia ${dados.dia_do_mes}\n` +
+    `📅 ${recorrencia}\n` +
     `💰 Valor: ${formatarNumero(dados.valor)}\n` +
     `↕️ Tipo: ${tipoTexto}\n` +
     `🏷️ Categoria: ${dados.categoria || 'Não Classificado'}\n` +
     `📝 ${dados.descricao || ''}\n\n` +
-    'A partir do próximo mês (ou hoje, se já for o dia certo), eu lanço isso sozinho automaticamente, sem precisar mandar de novo.'
+    `${proximaVez[0].toUpperCase()}${proximaVez.slice(1)}, eu lanço isso sozinho automaticamente, sem precisar mandar de novo.`
   );
 }
 
@@ -839,6 +872,18 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       await salvarContasAPagar(sheetId, contas);
       const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
       await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a pagar${sufixoCartao}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+    } else if (interpretado.tipoMidia && /receber|cobran[çc]a/.test(interpretado.legenda)) {
+      // Conta a RECEBER (14/08/2026) — nota fiscal emitida, contrato, venda parcelada — dinheiro
+      // que um terceiro ainda vai pagar PRO cliente. Espelha o fluxo de boleto/fatura acima, sentido
+      // inverso: legenda "receber" ou "cobrança" aciona PROMPT_CONTA_A_RECEBER em vez do de contas
+      // a pagar.
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
+      const contas = await extrairContasAReceberDeBuffer(buffer, mimeType);
+
+      console.log(`Contas a receber processadas: ${contas.length} conta(s)`);
+
+      await salvarContasAReceber(sheetId, contas);
+      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contas.length} conta(s) a receber.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
     } else if (interpretado.tipoMidia) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
@@ -877,6 +922,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const corpoLower = (interpretado.texto || '').toLowerCase();
       const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
       const comandoDespesaFixa = interpretarComandoDespesaFixa(interpretado.texto);
+      const comandoContaAReceber = interpretarComandoContaAReceber(interpretado.texto);
 
       if (comandoLancamento) {
         // Lançamento manual por texto — sem foto, então não passa pela extração de imagem; usa
@@ -890,6 +936,11 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         console.log('Despesa fixa cadastrada:', JSON.stringify(dadosDespesaFixa, null, 2));
         await salvarDespesaFixa(sheetId, dadosDespesaFixa);
         await enviarMensagemWhatsApp(remetente, formatarResumoDespesaFixa(dadosDespesaFixa));
+      } else if (comandoContaAReceber) {
+        const dadosContaAReceber = await extrairContaAReceberDeTexto(comandoContaAReceber);
+        console.log('Conta a receber cadastrada:', JSON.stringify(dadosContaAReceber, null, 2));
+        await salvarContasAReceber(sheetId, [dadosContaAReceber]);
+        await enviarMensagemWhatsApp(remetente, formatarResumoContaAReceber(dadosContaAReceber));
       } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
@@ -1091,7 +1142,8 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
 
   const hoje = new Date();
   const diaHoje = hoje.getDate();
-  const mesAnoAtual = hoje.toISOString().slice(0, 7); // "AAAA-MM"
+  const diaSemanaHoje = hoje.getDay(); // 0=domingo...6=sábado, igual ao "dia_da_semana" do prompt
+  const hojeISO = hoje.toISOString().slice(0, 10); // "AAAA-MM-DD"
 
   try {
     const clientes = await listarClientesAtivos({ ignorarCache: true });
@@ -1103,11 +1155,19 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
 
     for (const cliente of alvo) {
       const despesasFixas = await buscarDespesasFixas(cliente.sheetId);
-      const devidas = despesasFixas.filter((d) => d.ativo && d.dia_do_mes === diaHoje && d.ultimo_lancamento_mes !== mesAnoAtual);
+      // Devida se: está ativa, ainda não foi lançada HOJE (mesma checagem serve pra mensal e
+      // semanal — cada uma só bate no dia certo dela mesmo, uma vez por ciclo), e o dia bate —
+      // seja por Dia_Do_Mes (mensal) ou Dia_Da_Semana (semanal, ex.: "toda segunda-feira").
+      const devidas = despesasFixas.filter((d) => {
+        if (!d.ativo || d.ultima_data_lancamento === hojeISO) return false;
+        if (d.dia_do_mes && d.dia_do_mes === diaHoje) return true;
+        if (d.dia_da_semana !== null && d.dia_da_semana === diaSemanaHoje) return true;
+        return false;
+      });
 
       for (const despesa of devidas) {
         const dados = {
-          data: hoje.toISOString().slice(0, 10),
+          data: hojeISO,
           hora: null,
           valor: despesa.valor,
           tipo_movimentacao: despesa.tipo_movimentacao,
@@ -1120,7 +1180,7 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
         };
 
         await salvarComprovanteComItens(cliente.sheetId, dados);
-        await marcarDespesaFixaLancada(cliente.sheetId, despesa.linha, mesAnoAtual);
+        await marcarDespesaFixaLancada(cliente.sheetId, despesa.linha, hojeISO);
 
         await enviarMensagemWhatsApp(
           cliente.numeroWhatsapp,

@@ -196,19 +196,93 @@ REGRAS:
 - Se não conseguir identificar nenhuma cobrança, retorne "contas" como array vazio [].
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
+// Contas a RECEBER (14/08/2026) — espelha PROMPT_CONTA_A_PAGAR mas em sentido inverso: nota
+// fiscal EMITIDA pelo cliente, venda parcelada, contrato de serviço prestado — dinheiro que um
+// TERCEIRO ainda vai pagar PRO cliente, não o contrário. Legenda "receber"/"cobrança" no WhatsApp
+// aciona este prompt em vez do de contas a pagar (ver server.js).
+const PROMPT_CONTA_A_RECEBER = `Você é um especialista em leitura de notas fiscais, contratos, recibos de venda parcelada ou qualquer documento brasileiro (imagem ou PDF) que comprove um valor que UM TERCEIRO AINDA VAI PAGAR para o cliente (não o contrário — isso não é uma conta que o cliente deve, é uma que ele tem A RECEBER).
+
+Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "contas": [
+    {
+      "vencimento": "YYYY-MM-DD",
+      "valor": 0.00,
+      "cliente_devedor": "nome de quem vai pagar (o cliente/comprador do seu cliente)",
+      "descricao": "descrição curta do que é a cobrança (ex.: 'Venda de produto', 'Prestação de serviço')",
+      "documento": "número da nota fiscal/contrato/fatura, se visível, senão null",
+      "categoria": "categoria de receita, definida dinamicamente igual às regras de comprovantes",
+      "grupo_dre": "uma das chaves do bloco RECEITA_BRUTA da lista em CLASSIFICAÇÃO PARA A DRE do prompt de comprovantes (ex.: 'receita_venda_mercadorias', 'receita_prestacao_servicos') — nunca uma chave de despesa aqui, conta a receber é sempre receita",
+      "parcela_atual": null,
+      "parcela_total": null
+    }
+  ]
+}
+
+REGRAS:
+- Se for uma cobrança única: retorne um único item em "contas".
+- Se for uma venda PARCELADA com várias parcelas futuras visíveis no documento, retorne um item por parcela, cada uma com seu próprio "vencimento" e "parcela_atual"/"parcela_total" preenchidos.
+- "valor" é sempre positivo.
+- Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente (e o próximo ano se o mês/dia já tiver passado no ano corrente).
+- Categorize seguindo a mesma lógica dinâmica por nicho de mercado usada para comprovantes, sempre como RECEITA (ex.: "Receita - Vendas", "Receita - Honorários"), ou "Não Classificado" se não for possível inferir.
+- Se não conseguir identificar nenhuma cobrança a receber, retorne "contas" como array vazio [].
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
+// Cadastro de conta a receber por TEXTO — ex.: "receber: 500 do cliente João dia 20", "receber:
+// vou receber 1200 da empresa XPTO por um serviço, vence dia 30". Mesma ideia do "lançar:", só que
+// pro sentido inverso e sem data implícita de "hoje" (é sempre um vencimento FUTURO).
+const PROMPT_CONTA_A_RECEBER_TEXTO = `Você é um especialista em extrair contas A RECEBER a partir de uma mensagem de texto curta que um cliente brasileiro escreveu no WhatsApp — ex.: "vou receber 500 do João dia 20", "tenho 1200 a receber da empresa XPTO por um serviço, vence dia 30 desse mês".
+
+Sua tarefa é interpretar essa mensagem e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "vencimento": "YYYY-MM-DD",
+  "valor": 0.00,
+  "cliente_devedor": "nome de quem vai pagar, se mencionado, senão null",
+  "descricao": "descrição curta do que é a cobrança, com as próprias palavras do cliente",
+  "documento": null,
+  "categoria": "categoria de receita, definida dinamicamente (ver regras abaixo)",
+  "grupo_dre": "uma das chaves do bloco RECEITA_BRUTA da lista abaixo",
+  "parcela_atual": null,
+  "parcela_total": null
+}
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre):
+${listaParaPrompt()}
+- Use sempre uma chave do bloco RECEITA_BRUTA (ex.: "receita_venda_mercadorias", "receita_prestacao_servicos") — conta a receber é sempre receita.
+
+${REGRAS_CATEGORIZACAO_DINAMICA}
+
+REGRAS SOBRE A DATA (você recebe a data de hoje junto com a mensagem):
+- "dia N" sem mês = dia N do mês corrente; se esse dia já tiver passado neste mês, assuma que é do mês que vem (é um vencimento FUTURO, diferente de um lançamento manual que é sobre o passado).
+- Se não mencionar nenhum prazo, use 30 dias a partir de hoje como padrão.
+- Datas sempre no formato YYYY-MM-DD.
+
+REGRAS GERAIS:
+- Valores monetários sempre como número (ponto decimal, sem separador de milhar, sem símbolo de moeda).
+- Se não conseguir identificar um valor numérico claro, use "valor": 0.
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
 // Cadastro de despesa/receita FIXA recorrente, por texto — ex.: "recorrente: todo dia 10 pago
 // marketing 1000", "fixa: recebo 2000 de aluguel de sala todo dia 5". Diferente de
 // PROMPT_EXTRACAO_TEXTO (um lançamento pontual, de hoje/ontem/dia X do mês corrente), aqui o
 // resultado é uma REGRA que se repete todo mês — não tem data, tem "dia do mês" — usada só uma vez
 // pro cadastro; o lançamento em si sai todo mês sozinho (ver /tarefas/despesas-fixas em server.js).
-const PROMPT_DESPESA_FIXA = `Você é um especialista em extrair regras de despesas/receitas FIXAS RECORRENTES a partir de uma mensagem de texto curta que um cliente brasileiro escreveu no WhatsApp — ex.: "todo dia 10 pago marketing 1000", "recebo 2000 de aluguel de uma sala todo dia 5", "mensalidade do contador é 300, vence dia 15".
+// Suporta 2 frequências (14/08/2026, pedido do Aroldo — caso real: "toda segunda-feira entra
+// 320 reais do cliente Casarão", uma recorrência SEMANAL, não mensal): "todo dia N" (mensal, ex.:
+// "todo dia 10") e "toda segunda/terça/.../domingo" (semanal). Só uma das duas é preenchida por
+// cadastro — nunca as duas juntas.
+const PROMPT_DESPESA_FIXA = `Você é um especialista em extrair regras de despesas/receitas FIXAS RECORRENTES a partir de uma mensagem de texto curta que um cliente brasileiro escreveu no WhatsApp — ex.: "todo dia 10 pago marketing 1000", "recebo 2000 de aluguel de uma sala todo dia 5", "toda segunda-feira entra 320 reais do cliente Casarão", "toda sexta pago o freelancer 200".
 
 Sua tarefa é interpretar essa mensagem e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
 
 {
   "descricao": "descrição curta e objetiva da despesa/receita fixa, com as próprias palavras do cliente",
   "valor": 0.00,
+  "frequencia": "mensal | semanal",
   "dia_do_mes": 1,
+  "dia_da_semana": null,
   "tipo_movimentacao": "entrada | saida",
   "estabelecimento_ou_pessoa": "nome de quem recebe ou paga, se mencionado, senão null",
   "categoria": "categoria de despesa ou receita, definida dinamicamente (ver regras abaixo)",
@@ -223,9 +297,10 @@ ${listaParaPrompt()}
 
 ${REGRAS_CATEGORIZACAO_DINAMICA}
 
-REGRAS SOBRE "dia_do_mes":
-- Sempre um número inteiro de 1 a 31, o dia do mês em que a despesa/receita se repete (ex.: "todo dia 10" -> 10).
-- Se o cliente não mencionar um dia específico, use 1 (primeiro dia do mês) como padrão e diga isso em "observacoes" — mas SEMPRE tente extrair o dia mencionado primeiro.
+REGRAS SOBRE FREQUÊNCIA (só preencha UM dos dois campos, nunca os dois):
+- Se o cliente mencionar um DIA DO MÊS (ex.: "todo dia 10", "todo mês no dia 5", "vence dia 15"): "frequencia": "mensal", "dia_do_mes" = esse número (1 a 31), "dia_da_semana" = null.
+- Se o cliente mencionar um DIA DA SEMANA (ex.: "toda segunda-feira", "toda sexta", "toda semana no sábado"): "frequencia": "semanal", "dia_da_semana" = o número correspondente (0=domingo, 1=segunda, 2=terça, 3=quarta, 4=quinta, 5=sexta, 6=sábado), "dia_do_mes" = null.
+- Se o cliente não mencionar nem um nem outro claramente: assuma "frequencia": "mensal", "dia_do_mes": 1 (primeiro dia do mês) como padrão.
 
 REGRAS GERAIS:
 - Valores monetários sempre como número (ponto decimal, sem separador de milhar, sem símbolo de moeda).
@@ -293,4 +368,6 @@ module.exports = {
   PROMPT_CONSULTA,
   PROMPT_EXTRATO,
   PROMPT_CONTA_A_PAGAR,
+  PROMPT_CONTA_A_RECEBER,
+  PROMPT_CONTA_A_RECEBER_TEXTO,
 };

@@ -377,23 +377,48 @@ function filtrarContasEmAberto(contasAPagar, lancamentos) {
   });
 }
 
-// Projeta o saldo disponível somando o saldo atual (do extrato) e subtraindo
-// as contas a pagar em aberto dentro da janela de dias informada.
-function projetarFluxoDeCaixa(saldoAtual, contasEmAberto, dias = 30, referencia = new Date()) {
+// Espelho de filtrarContasEmAberto, sentido inverso (14/08/2026) — remove da lista de "contas a
+// receber" as que já têm um lançamento de ENTRADA correspondente (mesmo valor, recebido perto do
+// vencimento), pra não contar de novo na projeção depois que o dinheiro já caiu de verdade.
+function filtrarContasEmAbertoReceber(contasAReceber, lancamentos) {
+  const entradas = lancamentos.filter((lancamento) => lancamento.tipo_movimentacao === 'entrada');
+
+  return contasAReceber.filter((conta) => {
+    const vencimento = paraData(conta.vencimento);
+    const jaRecebida = entradas.some((lancamento) => {
+      if (Math.abs(lancamento.valor - conta.valor) > TOLERANCIA_VALOR) return false;
+      const dataRecebimento = paraData(lancamento.data);
+      if (!vencimento || !dataRecebimento) return false;
+      const diferenca = (dataRecebimento.getTime() - vencimento.getTime()) / (1000 * 60 * 60 * 24);
+      return diferenca >= -10 && diferenca <= 10;
+    });
+    return !jaRecebida;
+  });
+}
+
+// Projeta o saldo disponível somando o saldo atual (do extrato) + contas a RECEBER em aberto e
+// subtraindo as contas a PAGAR em aberto, tudo dentro da janela de dias informada. Contas a
+// receber é opcional (array vazio por padrão) — quem chama sem elas continua funcionando igual
+// antes de 14/08/2026, só sem a parte de "a receber" na conta.
+function projetarFluxoDeCaixa(saldoAtual, contasAPagarEmAberto, contasAReceberEmAberto = [], dias = 30, referencia = new Date()) {
   const limite = new Date(referencia);
   limite.setDate(limite.getDate() + dias);
 
-  const contasNoPeriodo = contasEmAberto
+  const noPeriodo = (contas) => contas
     .filter((conta) => {
       const vencimento = paraData(conta.vencimento);
       return vencimento && vencimento >= referencia && vencimento <= limite;
     })
     .sort((a, b) => paraData(a.vencimento) - paraData(b.vencimento));
 
-  const totalAPagar = contasNoPeriodo.reduce((soma, conta) => soma + (conta.valor || 0), 0);
-  const saldoProjetado = saldoAtual !== null ? saldoAtual - totalAPagar : null;
+  const contasNoPeriodo = noPeriodo(contasAPagarEmAberto);
+  const contasReceberNoPeriodo = noPeriodo(contasAReceberEmAberto);
 
-  return { saldoAtual, dias, contasNoPeriodo, totalAPagar, saldoProjetado };
+  const totalAPagar = contasNoPeriodo.reduce((soma, conta) => soma + (conta.valor || 0), 0);
+  const totalAReceber = contasReceberNoPeriodo.reduce((soma, conta) => soma + (conta.valor || 0), 0);
+  const saldoProjetado = saldoAtual !== null ? saldoAtual + totalAReceber - totalAPagar : null;
+
+  return { saldoAtual, dias, contasNoPeriodo, totalAPagar, contasReceberNoPeriodo, totalAReceber, saldoProjetado };
 }
 
 function formatarProjecao(projecao) {
@@ -409,6 +434,9 @@ function formatarProjecao(projecao) {
   }
 
   linhas.push(`🔴 Total a pagar no período: ${formatarMoeda(projecao.totalAPagar)}`);
+  if (projecao.totalAReceber) {
+    linhas.push(`🟢 Total a receber no período: ${formatarMoeda(projecao.totalAReceber)}`);
+  }
 
   if (projecao.saldoProjetado !== null) {
     const alerta = projecao.saldoProjetado < 0 ? '⚠️ Atenção: saldo pode ficar negativo!' : '✅';
@@ -417,7 +445,7 @@ function formatarProjecao(projecao) {
 
   if (projecao.contasNoPeriodo.length > 0) {
     linhas.push('');
-    linhas.push('📋 Contas a vencer:');
+    linhas.push('📋 Contas a pagar:');
     projecao.contasNoPeriodo.slice(0, 10).forEach((conta) => {
       const parcela = conta.parcela_atual && conta.parcela_total ? ` (${conta.parcela_atual}/${conta.parcela_total})` : '';
       const cartao = conta.cartao ? `[${conta.cartao}] ` : '';
@@ -429,6 +457,18 @@ function formatarProjecao(projecao) {
   } else {
     linhas.push('');
     linhas.push('Nenhuma conta a pagar registrada para esse período. 🎉');
+  }
+
+  if (projecao.contasReceberNoPeriodo && projecao.contasReceberNoPeriodo.length > 0) {
+    linhas.push('');
+    linhas.push('📋 Contas a receber:');
+    projecao.contasReceberNoPeriodo.slice(0, 10).forEach((conta) => {
+      const parcela = conta.parcela_atual && conta.parcela_total ? ` (${conta.parcela_atual}/${conta.parcela_total})` : '';
+      linhas.push(`   • ${formatarDataBR(conta.vencimento)} — ${formatarMoeda(conta.valor)} — ${conta.cliente_devedor || conta.descricao || 'sem descrição'}${parcela}`);
+    });
+    if (projecao.contasReceberNoPeriodo.length > 10) {
+      linhas.push(`   ... e mais ${projecao.contasReceberNoPeriodo.length - 10} conta(s).`);
+    }
   }
 
   return linhas.join('\n');
@@ -609,6 +649,7 @@ module.exports = {
   formatarUpsellEspecialista,
   obterSaldoAtual,
   filtrarContasEmAberto,
+  filtrarContasEmAbertoReceber,
   projetarFluxoDeCaixa,
   formatarProjecao,
   gerarDRE,

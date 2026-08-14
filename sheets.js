@@ -54,9 +54,25 @@ const CABECALHO_ITENS = [
 // endpoint /tarefas/despesas-fixas (chamado pelo cron diário do GitHub Actions). `Ultimo_Lancamento_Mes`
 // guarda o "AAAA-MM" do último mês em que já foi lançada, pra não lançar duas vezes no mesmo mês.
 const ABA_DESPESAS_FIXAS = 'DespesasFixas';
+// Dia_Da_Semana adicionada no fim em 14/08/2026 (mesmo motivo de sempre — não reordena as que já
+// existem): despesa/receita fixa pode se repetir todo MÊS (Dia_Do_Mes) OU toda SEMANA (Dia_Da_Semana,
+// 0=domingo...6=sábado) — só uma das duas é preenchida por cadastro. Ultimo_Lancamento_Mes também
+// virou Ultima_Data_Lancamento na prática (guarda a data exata do último lançamento, não só o mês)
+// pra funcionar com os dois tipos de recorrência sem precisar de 2 colunas de controle.
 const CABECALHO_DESPESAS_FIXAS = [
   'Descricao', 'Valor', 'Dia_Do_Mes', 'Tipo', 'Estabelecimento_Pessoa', 'Categoria', 'Subcategoria', 'Grupo_DRE',
-  'Ativo', 'Registrado_Em', 'Ultimo_Lancamento_Mes',
+  'Ativo', 'Registrado_Em', 'Ultima_Data_Lancamento', 'Dia_Da_Semana',
+];
+
+// Contas a RECEBER (14/08/2026, pedido do Aroldo) — dinheiro que terceiros ainda devem ao
+// cliente (nota fiscal emitida, venda parcelada, serviço prestado e ainda não pago), espelhando
+// ContasAPagar mas em sentido inverso. Mesma lógica de "em aberto": não tem coluna de status —
+// uma conta some da lista assim que aparecer um lançamento de ENTRADA que bate com ela (mesmo
+// valor, perto do vencimento), igual filtrarContasEmAberto já faz pra ContasAPagar.
+const ABA_CONTAS_A_RECEBER = 'ContasAReceber';
+const CABECALHO_CONTAS_A_RECEBER = [
+  'Vencimento', 'Valor', 'Cliente_Devedor', 'Descricao', 'Categoria', 'Documento', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
+  'Grupo_DRE',
 ];
 
 // Extrai o número da linha real a partir do "updatedRange" que a API do Sheets devolve depois de
@@ -271,12 +287,13 @@ async function salvarDespesaFixa(spreadsheetId, dados) {
     dados.grupo_dre || '',
     'Sim', // Ativo — cadastro novo sempre começa ativo
     new Date().toISOString(),
-    '', // Ultimo_Lancamento_Mes — vazio até o primeiro auto-lançamento
+    '', // Ultima_Data_Lancamento — vazio até o primeiro auto-lançamento
+    dados.dia_da_semana ?? '',
   ];
 
   const resposta = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_DESPESAS_FIXAS}!A:K`,
+    range: `${ABA_DESPESAS_FIXAS}!A:L`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: [linha] },
@@ -286,7 +303,7 @@ async function salvarDespesaFixa(spreadsheetId, dados) {
 }
 
 async function buscarDespesasFixas(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_DESPESAS_FIXAS, 'A2:K');
+  const linhas = await buscarLinhas(spreadsheetId, ABA_DESPESAS_FIXAS, 'A2:L');
 
   return linhas.map((linha, indice) => ({
     linha: indice + 2,
@@ -299,20 +316,22 @@ async function buscarDespesasFixas(spreadsheetId) {
     subcategoria: linha[6] || '',
     grupo_dre: linha[7] || '',
     ativo: (linha[8] || '').toLowerCase() === 'sim',
-    ultimo_lancamento_mes: linha[10] || '',
+    ultima_data_lancamento: linha[10] || '',
+    dia_da_semana: linha[11] !== undefined && linha[11] !== '' ? Number(linha[11]) : null,
   }));
 }
 
-// Marca que a despesa fixa já foi lançada neste mês (AAAA-MM), pra /tarefas/despesas-fixas não
-// lançar de novo se rodar mais de uma vez no mesmo mês.
-async function marcarDespesaFixaLancada(spreadsheetId, linha, mesAno) {
+// Marca a data exata (YYYY-MM-DD) do último auto-lançamento — funciona tanto pra recorrência
+// mensal quanto semanal: /tarefas/despesas-fixas só lança de novo se essa data for diferente de
+// hoje, então nunca duplica no mesmo dia, seja qual for a frequência.
+async function marcarDespesaFixaLancada(spreadsheetId, linha, dataISO) {
   const sheets = getSheetsClient();
 
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${ABA_DESPESAS_FIXAS}!K${linha}`,
     valueInputOption: 'RAW',
-    requestBody: { values: [[mesAno]] },
+    requestBody: { values: [[dataISO]] },
   });
 }
 
@@ -450,6 +469,54 @@ async function buscarContasAPagar(spreadsheetId) {
   }));
 }
 
+async function salvarContasAReceber(spreadsheetId, contas) {
+  if (!contas || contas.length === 0) {
+    return;
+  }
+
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_CONTAS_A_RECEBER, CABECALHO_CONTAS_A_RECEBER);
+
+  const registradoEm = new Date().toISOString();
+  const linhas = contas.map((conta) => [
+    conta.vencimento || '',
+    conta.valor || 0,
+    conta.cliente_devedor || '',
+    conta.descricao || '',
+    conta.categoria || '',
+    conta.documento || '',
+    conta.parcela_atual ?? '',
+    conta.parcela_total ?? '',
+    registradoEm,
+    conta.grupo_dre || '',
+  ]);
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range: `${ABA_CONTAS_A_RECEBER}!A:J`,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values: linhas },
+  });
+}
+
+async function buscarContasAReceber(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_RECEBER, 'A2:J');
+
+  return linhas.map((linha) => ({
+    vencimento: linha[0] || '',
+    valor: numeroBR(linha[1]),
+    cliente_devedor: linha[2] || '',
+    descricao: linha[3] || '',
+    categoria: linha[4] || '',
+    documento: linha[5] || '',
+    parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
+    parcela_total: linha[7] ? numeroBR(linha[7]) : null,
+    grupo_dre: linha[9] || '',
+  }));
+}
+
 module.exports = {
   salvarComprovante,
   atualizarLancamento,
@@ -459,6 +526,8 @@ module.exports = {
   buscarExtrato,
   salvarContasAPagar,
   buscarContasAPagar,
+  salvarContasAReceber,
+  buscarContasAReceber,
   salvarItens,
   buscarTodosItens,
   salvarDespesaFixa,
