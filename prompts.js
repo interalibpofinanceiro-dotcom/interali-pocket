@@ -22,6 +22,42 @@ const REGRAS_CATEGORIZACAO_DINAMICA = `REGRAS DE CATEGORIZAÇÃO DINÂMICA:
 - Se não houver contexto suficiente para identificar o nicho, use categorias financeiras genéricas e neutras (ex.: "Despesas Operacionais", "Receita Operacional", "Despesas Administrativas", "Impostos e Taxas", "Transferência entre Contas").
 - Nunca deixe o campo "categoria" vazio. Se realmente não for possível inferir nada, use "Não Classificado".`;
 
+// 16/08/2026 (caso real: dízimo de cliente pra igreja lançado como ENTRADA em vez de SAÍDA) —
+// decide "tipo_movimentacao" ANTES de qualquer regra de categorização por nicho. Compartilhado
+// entre PROMPT_EXTRACAO (foto/PDF), PROMPT_EXTRACAO_TEXTO (lançar por texto) e PROMPT_EXTRATO
+// (leitura de extrato bancário), que são os três pontos onde entrada/saída é decidida.
+const REGRAS_FLUXO_ENTRADA_SAIDA = `REGRAS CRÍTICAS DE FLUXO (ENTRADA vs SAÍDA) — decida "tipo_movimentacao" seguindo esta ordem, ANTES de aplicar qualquer regra de categorização. Em caso de dúvida entre estas regras e a impressão geral do documento, estas regras sempre vencem:
+
+1. IDENTIFICAÇÃO DO SENTIDO PELO TIPO DE DOCUMENTO:
+   - "Comprovante de Transferência", "Comprovante de Pagamento Pix" ou "Pagamento de Boleto" em que o titular da conta é o PAGADOR/DEBITADO -> SEMPRE "saida" (despesa/pagamento), mesmo que o valor ou o layout pareçam, à primeira vista, um recebimento.
+   - "Notificação de Recebimento Pix" ou documento em que o titular é o FAVORECIDO/CREDITADO -> "entrada" (receita/venda).
+
+2. DÍZIMO, OFERTA E DOAÇÃO SÃO SEMPRE SAÍDA:
+   - Pagamento para igreja, paróquia, templo, ONG, ou qualquer descrição contendo "Dízimo", "Oferta" ou "Doação" -> "tipo_movimentacao": "saida", SEM EXCEÇÃO — mesmo que o comprovante seja do tipo "notificação de recebimento" do lado de quem recebeu (o titular da conta do cliente aqui é sempre quem PAGA o dízimo, nunca a igreja).
+   - Nesses casos use "categoria": "Doações / Contribuições" (ou "Retirada / Pró-labore" se pelo contexto for claramente uma despesa pessoal do titular lançada na conta da empresa) e "grupo_dre": "admin_doacoes_contribuicoes".
+   - NUNCA classifique dízimo, oferta, doação ou transferência enviada como faturamento, venda ou qualquer chave do bloco RECEITA_BRUTA.`;
+
+// 17/08/2026 (sugestão do analista financeiro do Aroldo, risco crítico real de escritório de
+// advocacia/contabilidade/consultoria) — dinheiro que passa pela conta do cliente mas não é dele:
+// valor de acordo/causa/indenização recebido pra depois repassar a um terceiro, mantendo só o
+// honorário. Se isso cair como receita comum, infla faturamento e imposto do cliente indevidamente
+// — mesma categoria de erro do dízimo (REGRAS_FLUXO_ENTRADA_SAIDA acima), só que aqui o problema não
+// é a DIREÇÃO (é entrada mesmo), é o GRUPO_DRE errado inflando receita própria. Compartilhado entre
+// PROMPT_EXTRACAO e PROMPT_EXTRACAO_TEXTO — os dois pontos onde isso normalmente aparece.
+const REGRAS_CATEGORIAS_ESPECIAIS = `REGRAS DE CATEGORIAS ESPECIAIS (grupo_dre) — aplique ANTES de cair nas regras genéricas de categorização dinâmica:
+
+1. REPASSE A TERCEIROS (valor que não é receita própria do cliente):
+   - Se o documento ou a mensagem indicar recebimento de um valor de ACORDO, CAUSA JUDICIAL, INDENIZAÇÃO ou qualquer repasse onde só uma PARTE pertence ao titular da conta (ex.: escritório de advocacia recebendo o valor total de uma causa, sendo que parte é do cliente dele) -> NÃO classifique o valor inteiro como receita/faturamento.
+   - Se o documento discriminar claramente as duas partes (ex.: "Honorários: R$ 30.000 | Repasse ao Cliente: R$ 70.000"), preencha "valor" e "descricao" com a informação do documento e detalhe a composição em "observacoes" (ex.: "Total recebido R$ 100.000 — R$ 30.000 é honorário (receita), R$ 70.000 é repasse ao cliente final, sem separação automática entre lançamentos"), usando "grupo_dre": "repasse_terceiros_entrada" para o valor total recebido — é mais seguro tratar o total como repasse (não conta como receita) e deixar claro nas observações que precisa de um lançamento manual separado pro honorário ("lançar: honorários de R$X referente a [causa/cliente]") do que arriscar inflar a receita.
+   - Quando o titular da conta REPASSA esse valor pro terceiro/cliente final (dinheiro saindo), use "tipo_movimentacao": "saida" e "grupo_dre": "repasse_terceiros_saida".
+   - Só use "receita_prestacao_servicos" pro valor que for GENUINAMENTE honorário/receita do titular, nunca pra a parte que é de terceiro.
+
+2. COMISSÃO/REPASSE A PROFISSIONAL PARCEIRO (salão-parceiro, comissionados, autônomos associados):
+   - Pagamento a um profissional parceiro (não CLT) que trabalha sob o mesmo teto/marca e recebe um percentual do serviço prestado (ex.: barbeiro/cabeleireiro "salão-parceiro", motorista/entregador comissionado) -> "tipo_movimentacao": "saida", "grupo_dre": "custo_comissao_parceiros" (não "pessoal_salarios" — não é vínculo empregatício, é custo direto do serviço).
+
+3. CUSTAS PROCESSUAIS (escritórios de advocacia/contabilidade):
+   - Pagamento de guia de custas judiciais, taxa de certidão ou emolumento cartorário vinculado a um processo/cliente específico -> "grupo_dre": "custo_custas_processuais". Mencione em "observacoes" que pode ser reembolsável pelo cliente, se o contexto sugerir isso.`;
+
 const PROMPT_EXTRACAO = `Você é um especialista em extração de dados financeiros a partir de imagens e PDFs de comprovantes, notas fiscais, recibos e cupons fiscais brasileiros.
 
 Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
@@ -51,12 +87,16 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   "observacoes": "qualquer informação relevante adicional, ou null"
 }
 
+${REGRAS_FLUXO_ENTRADA_SAIDA}
+
 CLASSIFICAÇÃO PARA A DRE (grupo_dre):
 Além da categoria/subcategoria dinâmica (livre, por nicho — regras abaixo), todo lançamento também recebe um "grupo_dre" fixo, usado pra montar a Demonstração do Resultado do Exercício. Escolha SEMPRE uma destas chaves (nunca invente uma nova):
 ${listaParaPrompt()}
 - Use "nao_classificado" só quando genuinamente não der pra decidir entre as outras opções — é o último recurso, não o padrão.
-- A direção do grupo escolhido precisa ser coerente com "tipo_movimentacao": grupos do bloco RECEITA_BRUTA ou "financeiro_rendimentos" só valem para "entrada"; todos os outros grupos (DEDUCOES, CUSTOS, DESPESAS_*, demais itens FINANCEIRO) só valem para "saida".
+- A direção do grupo escolhido precisa ser coerente com "tipo_movimentacao": grupos do bloco RECEITA_BRUTA, "financeiro_rendimentos" ou "repasse_terceiros_entrada" só valem para "entrada"; todos os outros grupos (DEDUCOES, CUSTOS, DESPESAS_*, demais itens FINANCEIRO, "repasse_terceiros_saida") só valem para "saida".
 - Pró-labore, salário e comissão são despesa (saida) da empresa que paga, mesmo que pareçam "receita" pra quem recebe.
+
+${REGRAS_CATEGORIAS_ESPECIAIS}
 
 ${REGRAS_CATEGORIZACAO_DINAMICA}
 
@@ -94,10 +134,14 @@ Sua tarefa é interpretar essa mensagem e retornar SOMENTE um JSON válido (sem 
   "observacoes": "qualquer informação relevante adicional mencionada pelo cliente, ou null"
 }
 
+${REGRAS_FLUXO_ENTRADA_SAIDA}
+
 CLASSIFICAÇÃO PARA A DRE (grupo_dre):
 ${listaParaPrompt()}
 - Use "nao_classificado" só quando genuinamente não der pra decidir entre as outras opções — é o último recurso, não o padrão.
-- A direção do grupo escolhido precisa ser coerente com "tipo_movimentacao": grupos do bloco RECEITA_BRUTA ou "financeiro_rendimentos" só valem para "entrada"; todos os outros grupos só valem para "saida".
+- A direção do grupo escolhido precisa ser coerente com "tipo_movimentacao": grupos do bloco RECEITA_BRUTA, "financeiro_rendimentos" ou "repasse_terceiros_entrada" só valem para "entrada"; todos os outros grupos só valem para "saida".
+
+${REGRAS_CATEGORIAS_ESPECIAIS}
 
 ${REGRAS_CATEGORIZACAO_DINAMICA}
 
@@ -156,6 +200,11 @@ Sua tarefa é analisar o extrato enviado e retornar SOMENTE um JSON válido (sem
     }
   ]
 }
+
+REGRAS CRÍTICAS DE FLUXO ("tipo" entrada vs saída) — decida ANTES de listar, com base na descrição de cada linha do extrato:
+- Transferência/Pix/boleto ENVIADO pelo titular da conta (débito) -> SEMPRE "saida", mesmo que a descrição do banco pareça ambígua.
+- Pix/transferência RECEBIDO pelo titular (crédito) -> "entrada".
+- Descrição contendo "Dízimo", "Oferta", "Doação" (pagamento a igreja, paróquia, templo, ONG) -> SEMPRE "saida", sem exceção — nunca classifique como "entrada" mesmo que o valor pareça um recebimento.
 
 REGRAS:
 - Liste TODAS as transações visíveis no extrato, uma por item do array, na ordem em que aparecem.
@@ -348,6 +397,7 @@ CLASSIFICAÇÃO PARA A DRE (grupo_dre):
 ${listaParaPrompt()}
 - Vendas normais: use "receita_venda_mercadorias" ou "receita_prestacao_servicos", o que fizer mais sentido pro nicho do documento.
 - Cancelamento/estorno/devolução visível no relatório: use "deducao_devolucoes" e "tipo_movimentacao": "saida".
+- Taxa da plataforma de delivery/marketplace (iFood, Rappi, etc.) mostrada SEPARADA do valor do pedido no relatório (ex.: "Pedido R$ 50,00 / Taxa iFood R$ 7,50 / Líquido R$ 42,50"): preencha o "valor" da venda com o valor BRUTO do pedido (R$ 50,00 no exemplo), e adicione uma venda adicional só para a taxa, com "tipo_movimentacao": "saida", "grupo_dre": "deducao_taxas_plataforma" e "valor" igual ao da taxa — pra não esconder a taxa dentro de uma receita já líquida. Se o relatório já mostrar só o valor líquido (sem discriminar a taxa), não invente — lance normalmente como está.
 
 ${REGRAS_CATEGORIZACAO_DINAMICA}
 
