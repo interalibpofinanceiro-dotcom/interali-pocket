@@ -13,6 +13,12 @@ const REGRAS_CATEGORIZACAO_DINAMICA = `REGRAS DE CATEGORIZAÇÃO DINÂMICA:
   - Saídas de Estoque: "Produtos para Revenda" (reposição de prateleira/vitrine).
   - Saídas Fixas: "Ocupação" (aluguel, condomínio, luz, água), "Sistemas e Agendamento" (Trinks, Booksy, etc.), "Marketing/Anúncios".
 
+- Para CLÍNICAS VETERINÁRIAS e PET SHOPS COM SERVIÇOS CLÍNICOS, use especificamente (17/08/2026 — benefício anunciado na landing page, precisa funcionar de verdade):
+  - Entradas: separe SEMPRE em categorias distintas, nunca agrupe tudo em "Serviços" genérico — "Consultas", "Vacinas", "Cirurgias", "Internações" (inclui diárias), "Banho & Tosa", "Exames" (laboratoriais/imagem), "Venda de Produtos" (ração, medicamentos vendidos avulsos, acessórios pet).
+  - Saídas Operacionais: "Medicamentos e Insumos Veterinários" (vacinas de estoque, anestésicos, materiais cirúrgicos, fios de sutura), "Ração e Produtos para Revenda", "Comissão / Repasse de Veterinários Parceiros" (se houver profissional não-CLT recebendo percentual — use também "grupo_dre": "custo_comissao_parceiros", igual à regra de salão-parceiro em REGRAS_CATEGORIAS_ESPECIAIS).
+  - Saídas Fixas: "Ocupação" (aluguel, condomínio, luz, água), "Sistemas de Agendamento/Prontuário", "Marketing/Anúncios".
+  - grupo_dre: Consultas/Vacinas/Cirurgias/Internações/Banho & Tosa/Exames -> "receita_prestacao_servicos"; venda avulsa de ração/produtos -> "receita_venda_mercadorias"; medicamentos e insumos usados nos procedimentos -> "custo_diretos_servicos" ou "custo_cmv" se for revenda de produto.
+
 - Para outros nichos, adapte dinamicamente seguindo a mesma lógica (categoria operacional específica do segmento, não genérica). Exemplos:
   - Restaurante/Pizzaria: "Insumos - Hortifruti", "Insumos - Carnes", "Insumos - Embalagens", "Delivery - Taxas de App", "Receita - Vendas Balcão".
   - Loja de Roupas: "Estoque - Compra de Mercadoria", "Receita - Vendas", "Marketing - Tráfego Pago".
