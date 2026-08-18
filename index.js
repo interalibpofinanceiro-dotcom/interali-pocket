@@ -5,6 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const {
   PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
+  PROMPT_FATURA_RESUMO,
 } = require('./prompts');
 
 const anthropic = new Anthropic({
@@ -241,6 +242,33 @@ async function extrairContasAReceberDeBuffer(fileBuffer, mediaType) {
   return resultado.contas || [];
 }
 
+// RESUMO de fatura/extrato extenso (17/08/2026) — max_tokens pequeno de propósito: a resposta é
+// sempre um objeto fixo (5-6 campos), nunca cresce com o número de páginas/lançamentos do
+// documento, então NÃO estoura mesmo numa fatura de 6+ páginas (ver RespostaCortadaError acima e
+// PROMPT_FATURA_RESUMO em prompts.js — usado quando o documento é extenso demais pra extração
+// item a item, ver documentoPareceExtenso em server.js).
+async function extrairResumoFaturaDeBuffer(fileBuffer, mediaType) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 512,
+    system: PROMPT_FATURA_RESUMO,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: 'Extraia o resumo (não item a item) desta fatura/extrato seguindo o formato JSON definido.',
+          },
+        ],
+      },
+    ],
+  });
+
+  return extrairJSON(extrairTextoResposta(response));
+}
+
 // Conta a RECEBER por texto ("receber: 500 do João dia 20") — manda a data de hoje, mesmo motivo
 // de extrairComprovanteDeTexto (vencimento relativo tipo "dia 20" precisa de referência real).
 async function extrairContaAReceberDeTexto(texto) {
@@ -330,6 +358,7 @@ module.exports = {
   extrairContasAPagarDeBuffer,
   extrairContasAReceberDeBuffer,
   extrairContaAReceberDeTexto,
+  extrairResumoFaturaDeBuffer,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

@@ -416,6 +416,30 @@ REGRAS GERAIS:
 - Se não conseguir identificar nenhuma venda no documento, retorne "vendas" como array vazio [].
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
+// Fatura de cartão de crédito (ou extrato) MULTIPÁGINA (17/08/2026, caso real: PDF de 6 páginas
+// já pago estourando o limite de tokens da extração item-a-item — RespostaCortadaError em index.js).
+// Em vez de tentar listar cada lançamento da fatura inteira, pede só o RESUMO — total, vencimento,
+// banco emissor e se já foi paga. Usado como fallback quando o PDF é extenso e não tem legenda que
+// peça leitura item a item (ver documentoPareceExtenso/processarFaturaComoResumo em server.js).
+const PROMPT_FATURA_RESUMO = `Você é um especialista em leitura de faturas de cartão de crédito e extratos bancários brasileiros extensos (PDFs de várias páginas).
+
+Sua tarefa NÃO é listar cada lançamento individual — é extrair só o RESUMO da fatura/extrato. Retorne SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "banco_emissor": "nome do banco/emissor do cartão (ex.: 'Nubank', 'Itaú', 'Bradesco'), ou null se não identificado",
+  "valor_total": 0.00,
+  "vencimento": "YYYY-MM-DD, ou null se não identificado",
+  "status_pagamento": "paga | pendente",
+  "data_pagamento": "YYYY-MM-DD se o documento mostrar que já foi paga (ex.: 'Pagamento efetuado em DD/MM', débito automático já processado, comprovante de pagamento anexado junto), senão null",
+  "descricao": "descrição curta (ex.: 'Fatura de cartão de crédito Nubank - agosto/2026')"
+}
+
+REGRAS:
+- "status_pagamento": "paga" SOMENTE se o documento mostrar explicitamente confirmação de pagamento. Se for só a fatura/boleto SEM confirmação de pagamento, use "pendente" — nunca assuma pagamento que não está explícito no documento.
+- "valor_total" é o valor total da fatura (ou, se já paga, o valor que foi efetivamente pago).
+- Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente.
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
 module.exports = {
   PROMPT_EXTRACAO,
   PROMPT_EXTRACAO_TEXTO,
@@ -426,4 +450,5 @@ module.exports = {
   PROMPT_CONTA_A_PAGAR,
   PROMPT_CONTA_A_RECEBER,
   PROMPT_CONTA_A_RECEBER_TEXTO,
+  PROMPT_FATURA_RESUMO,
 };

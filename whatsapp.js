@@ -162,7 +162,12 @@ function interpretarMensagem(msg) {
     return { tipoMidia: 'image', mimeType: msg.image.mime_type, legenda: (msg.image.caption || '').toLowerCase(), mediaId: msg.image.id };
   }
   if (msg.type === 'document') {
-    return { tipoMidia: 'document', mimeType: msg.document.mime_type, legenda: (msg.document.caption || '').toLowerCase(), mediaId: msg.document.id };
+    // `filename` (17/08/2026) — nome original do arquivo como o cliente mandou (ex.:
+    // "credit-card-mp-statement.pdf", "extrato_santander_agosto.pdf"). A Cloud API manda esse campo
+    // pra mensagens do tipo "document"; usado só como PISTA extra quando não veio legenda nenhuma
+    // (ver inferirPistaPorNomeArquivo em server.js) — a legenda escrita pelo cliente sempre tem
+    // prioridade sobre uma dedução pelo nome do arquivo.
+    return { tipoMidia: 'document', mimeType: msg.document.mime_type, legenda: (msg.document.caption || '').toLowerCase(), mediaId: msg.document.id, nomeArquivo: msg.document.filename || '' };
   }
 
   const texto = (msg.type === 'text' && msg.text && msg.text.body) || '';

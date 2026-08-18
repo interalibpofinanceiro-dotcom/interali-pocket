@@ -48,6 +48,11 @@ const GRUPOS_DRE = [
   // entrada). Chave própria pra não forçar em "Rendimentos" nem em nenhum grupo de receita — ver
   // REGRAS_FLUXO_ENTRADA_SAIDA em prompts.js.
   { chave: 'admin_doacoes_contribuicoes', bloco: 'DESPESAS_ADMIN', rotulo: 'Doações, Ofertas e Contribuições (Dízimo, ONG, Igreja)' },
+  // 17/08/2026 — fatura de cartão extensa (várias páginas) lançada pelo RESUMO, sem detalhamento
+  // item a item (ver PROMPT_FATURA_RESUMO/processarFaturaComoResumo). Chave própria pra não
+  // misturar com "admin_sistemas_softwares" nem forçar numa categoria de nicho que não se aplica
+  // a um lançamento consolidado.
+  { chave: 'admin_fatura_cartao_consolidada', bloco: 'DESPESAS_ADMIN', rotulo: 'Fatura de Cartão de Crédito (Lançamento Consolidado, sem Detalhamento por Item)' },
 
   { chave: 'vendas_marketing', bloco: 'DESPESAS_VENDAS', rotulo: 'Anúncios e Tráfego Pago (Meta/Google Ads)' },
   { chave: 'vendas_comissoes', bloco: 'DESPESAS_VENDAS', rotulo: 'Comissões de Vendas' },

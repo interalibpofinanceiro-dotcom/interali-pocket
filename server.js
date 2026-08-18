@@ -10,6 +10,7 @@ const {
   extrairContasAPagarDeBuffer,
   extrairContasAReceberDeBuffer,
   extrairContaAReceberDeTexto,
+  extrairResumoFaturaDeBuffer,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -180,23 +181,46 @@ function normalizarWhatsapp(numeroDigitado) {
 const ULTIMA_NOTIFICACAO_LEAD = new Map();
 const COOLDOWN_NOTIFICACAO_LEAD_MS = 15 * 60 * 1000;
 
+// Mesma ideia acima, aplicada a avisos de ERRO de processamento (17/08/2026 — antes não tinha
+// cooldown nenhum: um cliente errando repetido no mesmo documento gerava um aviso de admin por
+// tentativa). Chave por remetente + nome do erro, pra um erro diferente do mesmo cliente logo em
+// seguida ainda avisar (não é o MESMO problema se repetindo).
+const ULTIMA_NOTIFICACAO_ERRO = new Map();
+const COOLDOWN_NOTIFICACAO_ERRO_MS = 15 * 60 * 1000;
+
+// Envia um aviso administrativo pro Aroldo — SEMPRE o mesmo par de garantias (template cobre a
+// entrega fora da janela de 24h, texto puro é o que ele realmente lê/copia), mas com 2 ajustes de
+// 17/08/2026 (pedido do Aroldo, depois de um caso real de flood testando com o próprio número):
+// 1) NUNCA notifica o admin sobre uma mensagem que o PRÓPRIO admin mandou — ele já vê a mensagem de
+//    erro/confirmação do cliente na mesma conversa; notificar "admin sobre o admin" é 100% redundante.
+// 2) TEXTO PRIMEIRO, template só como FALLBACK se o texto falhar (o caso normal é falhar por a
+//    janela de 24h ter expirado) — no caso comum, cliente ativo/testando com o bot, evita pagar um
+//    template à toa pra cada aviso.
+async function avisarAdmin(remetente, template, parametrosTemplate, textoLivre) {
+  if (!ADMIN_WHATSAPP_NUMBER || remetente === ADMIN_WHATSAPP_NUMBER) return;
+
+  try {
+    await enviarMensagemWhatsApp(ADMIN_WHATSAPP_NUMBER, textoLivre);
+  } catch (erroTexto) {
+    await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, template.nome, template.idioma, parametrosTemplate)
+      .catch((erroTemplate) => console.error('Falha ao notificar admin (texto e template falharam):', erroTexto.message, '|', erroTemplate.message));
+  }
+}
+
 async function notificarAdminSobreLead(remetente) {
-  if (!ADMIN_WHATSAPP_NUMBER) return;
+  if (!ADMIN_WHATSAPP_NUMBER || remetente === ADMIN_WHATSAPP_NUMBER) return;
 
   const agora = Date.now();
   const ultimaNotificacao = ULTIMA_NOTIFICACAO_LEAD.get(remetente) || 0;
   if (agora - ultimaNotificacao < COOLDOWN_NOTIFICACAO_LEAD_MS) return;
   ULTIMA_NOTIFICACAO_LEAD.set(remetente, agora);
 
-  // Template primeiro — garante a entrega mesmo se o admin não tiver mensagem recente com o bot.
-  await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_ADMIN_NOVO_LEAD.nome, TEMPLATE_ADMIN_NOVO_LEAD.idioma, [remetente])
-    .catch((erro) => console.error('Falha ao notificar admin sobre lead (template):', erro.message));
-
-  // Texto livre com o comando pronto pra copiar — best-effort, só chega se já houver sessão aberta.
-  await enviarMensagemWhatsApp(
-    ADMIN_WHATSAPP_NUMBER,
+  await avisarAdmin(
+    remetente,
+    TEMPLATE_ADMIN_NOVO_LEAD,
+    [remetente],
     `🔔 Novo lead no Interali Pocket: ${remetente} tentou mandar mensagem e ainda não está cadastrado.\n\nPra liberar: npm run cadastrar-cliente -- "${remetente}" "Nome" "ID_DA_PLANILHA"`
-  ).catch(() => {});
+  );
 }
 
 function formatarNumero(valor) {
@@ -339,6 +363,23 @@ async function perguntarProximaDuplicidadeAmbigua(remetente, item) {
 // uma pergunta urgente, é só "quando você quiser ver, responde que eu mando".
 const PENDENCIAS_RELATORIO = new Map();
 const TIMEOUT_PENDENCIA_RELATORIO_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Fatura/cartão que falhou na leitura item-a-item mesmo depois de tudo (RespostaCortadaError, ver
+// tratarErroProcessamento) — guarda o buffer da mídia já baixado pra poder tentar de novo sem
+// pedir pro cliente reenviar o arquivo, e oferece a escolha "total" (rápido, seguro, ver
+// processarFaturaComoResumo) ou "itens" (tenta o detalhe de novo, pode falhar de novo se a fatura
+// for grande). Mesma mecânica de fila em memória das outras pendências acima — reseta a cada
+// deploy, aceitável no volume atual.
+const PENDENCIAS_ESCOLHA_FATURA = new Map();
+const TIMEOUT_PENDENCIA_ESCOLHA_FATURA_MS = 15 * 60 * 1000;
+
+// Documento (foto ou PDF) chegou sem NENHUMA pista de tipo — nem legenda, nem nome de arquivo
+// reconhecível (ver inferirPistaPorNomeArquivo) — espera um pouco pra ver se o cliente manda um
+// texto explicando logo em seguida (ex.: manda o PDF e só depois escreve "cartão de crédito pago")
+// em vez de já arriscar a leitura genérica. Não é uma pergunta pro cliente, é só uma folga de
+// alguns segundos antes de processar — se nada chegar, processa do jeito que já tinha vindo.
+const DOCUMENTOS_AGUARDANDO_LEGENDA = new Map();
+const JANELA_BUFFER_LEGENDA_MS = 7000;
 
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
@@ -700,6 +741,64 @@ function extrairNomeConta(legendaLower) {
   return match[1].trim().replace(/\b\w/g, (letra) => letra.toUpperCase());
 }
 
+// Autoidentificação pelo NOME DO ARQUIVO (17/08/2026) — fallback quando a legenda não diz nada:
+// o app do banco às vezes já nomeia o PDF de forma descritiva (ex.: "credit-card-mp-statement.pdf",
+// "extrato_santander_agosto.pdf", "boleto_energia.pdf"). Só entra em jogo quando a legenda não deu
+// pista nenhuma (ver montarSinalRoteamento) — o que o cliente escreve na legenda sempre tem
+// prioridade sobre uma dedução pelo nome do arquivo.
+function inferirPistaPorNomeArquivo(nomeArquivo) {
+  const nome = (nomeArquivo || '')
+    .toLowerCase()
+    .replace(/\.(pdf|jpe?g|png|webp|heic)$/i, '')
+    .replace(/[._-]+/g, ' ');
+
+  if (!nome.trim()) return '';
+  // "credit card"/"cartao"/"fatura" checado ANTES de "statement/bank" de propósito: "credit card
+  // statement" é o termo em inglês pra FATURA de cartão, não extrato bancário — se checasse
+  // "statement" primeiro, "credit-card-mp-statement.pdf" (caso real reportado, 17/08/2026) cairia
+  // errado em "extrato" só por causa da palavra "statement" solta no nome.
+  if (/\b(credit\s?card|cartao|card|fatura)\b/.test(nome)) return 'fatura cartao';
+  if (/\b(statement|extrato|bank)\b/.test(nome)) return 'extrato';
+  if (/\b(boleto|dae|darf|guia)\b/.test(nome)) return 'boleto';
+  if (/\b(vendas?|relatorio|fechamento|pdv|ifood|rappi)\b/.test(nome)) return 'vendas sistema';
+  return '';
+}
+
+// Junta legenda (prioridade) + pista do nome do arquivo (fallback) num único texto pra alimentar
+// as mesmas checagens de palavra-chave que já existiam só com a legenda — não muda a lógica de
+// roteamento, só amplia de onde a pista pode vir.
+function montarSinalRoteamento(legenda, nomeArquivo) {
+  const pista = inferirPistaPorNomeArquivo(nomeArquivo);
+  return `${(legenda || '').toLowerCase()} ${pista}`.trim();
+}
+
+// Estimativa best-effort do nº de páginas de um PDF (17/08/2026) — sem depender de biblioteca
+// externa, conta ocorrências do objeto "/Type /Page" no binário bruto (exclui "/Type /Pages", que
+// é o nó da árvore, não uma página em si). Funciona bem pra PDF "normal" (a maioria dos boletos e
+// faturas gerados por banco); PDFs com stream de objeto comprimido podem subcontar — nesse caso
+// retorna 0 (nem sempre confiável) e documentoPareceExtenso cai pro sinal auxiliar (tamanho do
+// arquivo).
+function contarPaginasPdfAproximado(buffer, mimeType) {
+  if (mimeType !== 'application/pdf') return null;
+  const texto = buffer.toString('latin1');
+  const paginas = texto.match(/\/Type\s*\/Page(?!s)/g);
+  return paginas ? paginas.length : 0;
+}
+
+// "Extenso" = provavelmente tem informação demais pra caber numa extração item-a-item de uma vez só
+// (ver RespostaCortadaError em index.js) — 3+ páginas detectadas, OU (quando a contagem de páginas
+// falhou, o que pode acontecer em PDF com stream comprimido) um arquivo grande de verdade — sinal
+// auxiliar, tamanho típico de uma fatura de cartão de várias páginas gerada pelo banco.
+const LIMITE_BYTES_PDF_PROVAVEL_EXTENSO = 350 * 1024;
+
+function documentoPareceExtenso(buffer, mimeType) {
+  if (mimeType !== 'application/pdf') return false;
+  const paginas = contarPaginasPdfAproximado(buffer, mimeType);
+  if (paginas >= 3) return true;
+  if (paginas === 0 && buffer.length > LIMITE_BYTES_PDF_PROVAVEL_EXTENSO) return true;
+  return false;
+}
+
 // Reconhece o comando do admin pra criar voucher direto pelo WhatsApp, sem precisar de
 // terminal: "criar cupom BARBER-8912" ou "criar cupom BARBER-8912 indicação Instagram".
 // Tudo depois do código vira a descrição (opcional, só pra controle interno do Aroldo).
@@ -774,6 +873,291 @@ function formatarResumoDespesaFixa(dados) {
     `🏷️ Categoria: ${dados.categoria || 'Não Classificado'}\n` +
     `📝 ${dados.descricao || ''}\n\n` +
     `${proximaVez[0].toUpperCase()}${proximaVez.slice(1)}, eu lanço isso sozinho automaticamente, sem precisar mandar de novo.`
+  );
+}
+
+// Registra uma fatura de cartão só pelo RESUMO (total, vencimento, banco, se já foi paga) — usado
+// quando o documento é extenso demais pra ler item a item (ver documentoPareceExtenso) ou quando o
+// cliente escolhe essa opção depois de uma leitura item a item falhar (ver PENDENCIAS_ESCOLHA_FATURA).
+// `opts.semLegenda` acrescenta a dica de legenda na mesma mensagem, em vez de mandar uma mensagem
+// extra só pra isso (o problema original era "mensagens demais" — não faz sentido resolver isso
+// enviando mais uma mensagem).
+async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
+  const resumo = await extrairResumoFaturaDeBuffer(buffer, mimeType);
+  const cartao = extrairNomeCartao(legendaLower) || resumo.banco_emissor || '';
+  const dicaLegenda = opts.semLegenda
+    ? '\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉'
+    : '';
+
+  if (resumo.status_pagamento === 'paga') {
+    const dadosExtraidos = {
+      tipo_documento: 'fatura_cartao_credito',
+      data: resumo.data_pagamento || new Date().toISOString().slice(0, 10),
+      hora: null,
+      valor: resumo.valor_total,
+      tipo_movimentacao: 'saida',
+      descricao: resumo.descricao || `Fatura de cartão de crédito${cartao ? ` ${cartao}` : ''}`,
+      estabelecimento_ou_pessoa: cartao || resumo.banco_emissor || 'Cartão de crédito',
+      documento_identificacao: null,
+      forma_pagamento: 'cartao_credito',
+      categoria: 'Fatura de Cartão de Crédito',
+      subcategoria: cartao || resumo.banco_emissor || null,
+      grupo_dre: 'admin_fatura_cartao_consolidada',
+      banco_conta: resumo.banco_emissor || null,
+      itens: [],
+      observacoes: 'Lançamento consolidado (fatura extensa) — sem detalhamento item a item. Se precisar do detalhe, peça pra tentar ler os itens de novo.',
+    };
+    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+    if (dicaLegenda) await enviarMensagemWhatsApp(remetente, dicaLegenda.trim()).catch(() => {});
+    return;
+  }
+
+  const conta = {
+    vencimento: resumo.vencimento || new Date().toISOString().slice(0, 10),
+    valor: resumo.valor_total,
+    beneficiario: cartao || resumo.banco_emissor || 'Cartão de crédito',
+    descricao: resumo.descricao || `Fatura de cartão de crédito${cartao ? ` ${cartao}` : ''}`,
+    categoria: 'Fatura de Cartão de Crédito',
+    grupo_dre: 'admin_fatura_cartao_consolidada',
+    parcela_atual: null,
+    parcela_total: null,
+  };
+
+  const contasExistentes = await buscarContasAPagar(sheetId);
+  const contasNovas = filtrarContasAPagarNovas([conta], contasExistentes);
+  await salvarContasAPagar(sheetId, contasNovas);
+
+  const aviso = contasNovas.length === 0 ? ' (já estava registrada, ignorei pra não duplicar)' : '';
+  await enviarMensagemWhatsApp(
+    remetente,
+    `✅ Registrei a fatura${cartao ? ` do cartão ${cartao}` : ''} como conta a pagar${aviso}: ${formatarNumero(conta.valor)}, vencimento ${conta.vencimento}.\n\n` +
+    'Ela veio consolidada (sem detalhar item a item) porque é um documento extenso — se quiser o detalhe por lançamento, me avisa que eu tento ler de novo.' +
+    dicaLegenda
+  );
+}
+
+// Registra uma fatura/boleto item a item (fluxo que já existia antes de 17/08/2026) — usado pra
+// documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
+// escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
+async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
+  const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
+  const cartao = extrairNomeCartao(legendaLower);
+  if (cartao) contas.forEach((conta) => { conta.cartao = cartao; });
+
+  console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
+
+  const contasAPagarExistentes = await buscarContasAPagar(sheetId);
+  const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
+  const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
+
+  await salvarContasAPagar(sheetId, contasAPagarNovas);
+  const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
+  const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+
+  const prefixo = opts.semLegenda
+    ? `✅ Esse documento é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉`
+    : `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao}${avisoContasAPagarDuplicadas}.`;
+
+  await enviarMensagemWhatsApp(remetente, `${prefixo}\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+}
+
+// Roteia e processa uma mídia (foto ou documento) já baixada — extraído do handler do webhook em
+// 17/08/2026 pra poder ser chamado tanto no fluxo normal (legenda já veio junto) quanto depois de
+// um buffer de espera (legenda chegou separada, ver DOCUMENTOS_AGUARDANDO_LEGENDA) ou de uma
+// escolha do cliente após uma leitura item a item falhar (ver PENDENCIAS_ESCOLHA_FATURA). Lança
+// (throw) em caso de erro — quem chama decide como avisar o cliente (ver tratarErroProcessamento).
+async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo, legenda }) {
+  const legendaLower = (legenda || '').toLowerCase();
+  const sinal = montarSinalRoteamento(legenda, nomeArquivo);
+  const extenso = documentoPareceExtenso(buffer, mimeType);
+  const semLegendaExplicita = !legendaLower.trim();
+
+  if (sinal.includes('extrato')) {
+    const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
+    const extratoExistente = await buscarExtrato(sheetId);
+    const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
+    const duplicadas = transacoes.length - transacoesNovas.length;
+
+    console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
+
+    const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+    const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
+    const extratoTotal = [...extratoExistente, ...transacoesNovas];
+
+    await salvarExtrato(sheetId, transacoesNovas);
+
+    // Registra automaticamente na planilha toda transação do extrato sem lançamento
+    // correspondente (entrada OU saída — mais amplo que o aviso "recebimento sem nota" logo
+    // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
+    // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
+    // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
+    const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
+      console.error('Falha ao registrar órfãos do extrato:', erro.message);
+      return 0;
+    });
+
+    // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
+    // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
+    await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+
+    const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
+    const avisoRegistrados = registrados > 0 ? ` ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
+    const avisoOrfas = orfas.length > 0
+      ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
+      : '';
+    await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.${avisoRegistrados}\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
+    return;
+  }
+
+  if (/\bvend|\bsistema\b|\bpdv\b|ifood|rappi|delivery|aiqfome/.test(sinal)) {
+    // Relatório de vendas do sistema/PDV/app de delivery — não trava num app específico (ver
+    // PROMPT_VENDAS), o gatilho é só a legenda (ou o nome do arquivo) mencionar "venda(s)",
+    // "sistema", "pdv" ou o nome de algum app conhecido. Cada venda vira um lançamento normal,
+    // passando pela mesma checagem de duplicidade de um comprovante — cobre o caso de a mesma
+    // venda aparecer depois no extrato bancário ou na fatura do cartão.
+    const vendas = await extrairVendasDeBuffer(buffer, mimeType);
+    console.log(`Relatório de vendas processado: ${vendas.length} venda(s) identificada(s)`);
+    await processarLoteVendas(remetente, cliente, sheetId, vendas);
+    return;
+  }
+
+  if (sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart')) {
+    if (extenso) {
+      // PDF extenso (várias páginas) pedindo leitura de boleto/fatura — vai direto pro resumo em
+      // vez de arriscar a extração item a item, que é justamente o que estourava antes (17/08/2026).
+      await processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
+    } else {
+      await processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
+    }
+    return;
+  }
+
+  if (/receber|cobran[çc]a/.test(sinal)) {
+    // Conta a RECEBER (14/08/2026) — nota fiscal emitida, contrato, venda parcelada — dinheiro
+    // que um terceiro ainda vai pagar PRO cliente. Espelha o fluxo de boleto/fatura acima, sentido
+    // inverso: legenda "receber" ou "cobrança" aciona PROMPT_CONTA_A_RECEBER em vez do de contas
+    // a pagar.
+    const contas = await extrairContasAReceberDeBuffer(buffer, mimeType);
+    console.log(`Contas a receber processadas: ${contas.length} conta(s)`);
+
+    const contasAReceberExistentes = await buscarContasAReceber(sheetId);
+    const contasAReceberNovas = filtrarContasAReceberNovas(contas, contasAReceberExistentes);
+    const contasAReceberDuplicadas = contas.length - contasAReceberNovas.length;
+
+    await salvarContasAReceber(sheetId, contasAReceberNovas);
+    const avisoContasAReceberDuplicadas = contasAReceberDuplicadas > 0 ? ` (${contasAReceberDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+    await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAReceberNovas.length} conta(s) a receber${avisoContasAReceberDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
+    return;
+  }
+
+  // Nenhuma pista bateu (nem legenda, nem nome do arquivo) — se for um PDF extenso, é bem mais
+  // provável que seja uma fatura/extrato de várias páginas do que um comprovante único; tenta pelo
+  // resumo (seguro, não estoura o limite de tokens) em vez de arriscar o formato de comprovante
+  // único, que foi justamente o que causou a leitura cortada no meio (17/08/2026, caso real do
+  // Aroldo com a fatura de cartão paga mandada sem legenda).
+  if (extenso) {
+    await processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, { semLegenda: semLegendaExplicita });
+    return;
+  }
+
+  const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
+
+  if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
+    // Chegou sem legenda "fatura"/"boleto"/"cartão" (ex.: cliente só mandou o arquivo), mas o
+    // Claude percebeu que é uma fatura com múltiplos lançamentos — reprocessa como contas a
+    // pagar (item a item, com vencimento) em vez de salvar como um único comprovante, senão
+    // os lançamentos individuais e as parcelas ficariam perdidos dentro de "itens".
+    await processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, { semLegenda: true });
+  } else {
+    // Legenda ("conta Itaú PJ") tem prioridade sobre o que o Claude leu na própria imagem —
+    // só o cliente sabe com certeza qual das contas dele é, quando ele se dá o trabalho de dizer.
+    dadosExtraidos.conta_bancaria = extrairNomeConta(legendaLower) || dadosExtraidos.banco_conta || '';
+
+    console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
+
+    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+  }
+}
+
+// Extrai a lógica do catch geral do webhook (14/08/2026, ampliada em 17/08/2026) pra poder ser
+// chamada tanto de dentro do try/catch normal quanto de um processamento adiado (buffer de
+// legenda) ou de uma escolha do cliente ("total"/"itens") — nenhum desses passa mais pelo catch
+// original, então precisavam da mesma lógica de aviso disponível como função separada.
+// `contexto` = { tipoMidia, legenda, buffer, mimeType } — buffer/mimeType só quando disponíveis
+// (permite oferecer "total"/"itens" de novo sem pedir reenvio do arquivo).
+async function tratarErroProcessamento(remetente, cliente, contexto, error) {
+  console.error('Erro ao processar mensagem:', error.message);
+
+  // Marca o horário do erro pra esse remetente — se ele reenviar o mesmo documento logo em
+  // seguida e a checagem de duplicidade bater, processarLancamentoExtraido trata como confirmação
+  // normal em vez de aviso de duplicidade (ver ERROS_RECENTES_PROCESSAMENTO acima).
+  if (remetente) ERROS_RECENTES_PROCESSAMENTO.set(remetente, Date.now());
+
+  const legendaLower = ((contexto && contexto.legenda) || '').toLowerCase();
+  const jaEraExtrato = contexto && contexto.tipoMidia && legendaLower.includes('extrato');
+  const pareceFatura = contexto && contexto.tipoMidia && /fatura|cart[ãa]o|boleto|pagar/.test(legendaLower);
+
+  // RespostaCortadaError num documento que parece fatura/cartão, com o buffer ainda disponível —
+  // em vez de só orientar reenvio, oferece pra registrar já (só o total, seguro) ou tentar de novo
+  // o detalhe item a item (ver PENDENCIAS_ESCOLHA_FATURA e requisito 4 do pedido do Aroldo, 17/08/2026).
+  const erroAutorresolvido = error.name === 'RespostaCortadaError' && pareceFatura && !jaEraExtrato && contexto.buffer;
+
+  if (erroAutorresolvido) {
+    PENDENCIAS_ESCOLHA_FATURA.set(remetente, {
+      buffer: contexto.buffer,
+      mimeType: contexto.mimeType,
+      legendaLower,
+      criadoEm: Date.now(),
+    });
+    await enviarMensagemWhatsApp(
+      remetente,
+      'Identifiquei que você mandou uma fatura de cartão, mas ela tem mais lançamentos do que eu consigo ler de uma vez.\n\n' +
+      'Quer que eu registre só o *valor total* como uma despesa/conta única (rápido, sem detalhar item por item), ou prefere que eu *tente ler os itens* de novo (pode falhar de novo se a fatura for grande)?\n\n' +
+      'Responde "total" ou "itens".'
+    ).catch(() => {});
+  } else {
+    const mensagemErroCliente = error.name === 'RespostaCortadaError' && jaEraExtrato
+      ? 'Não consegui ler esse extrato direito — ele deve ter mais páginas ou transações do que eu processo de uma vez só.\n\n' +
+        'Tenta assim:\n' +
+        '1️⃣ Manda em partes menores (ex.: um período mais curto, ou página por página).\n' +
+        '2️⃣ Se for foto da tela, tira com boa luz e sem cortar nenhum número.\n' +
+        '3️⃣ Se tiver o PDF original do banco, manda ele em vez de print/foto — costuma ler muito melhor.\n\n' +
+        'Pode reenviar já com "extrato" na legenda de novo.'
+      : error.name === 'RespostaCortadaError'
+        ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
+          'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
+        : SUPORTE_TEXTO
+          ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+          : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+
+    await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
+  }
+
+  // 17/08/2026 — 2 filtros antes de incomodar o admin:
+  // 1) Erro "autorresolvido" (fatura extensa, cliente já recebeu a escolha "total"/"itens" acima,
+  //    tem um caminho claro e autoexplicativo) não precisa de intervenção do admin — só loga.
+  // 2) Cooldown por remetente+tipo de erro, mesmo padrão de ULTIMA_NOTIFICACAO_LEAD — um cliente
+  //    errando repetido no mesmo documento não deve gerar um aviso por tentativa.
+  if (erroAutorresolvido) {
+    console.log(`Erro autorresolvido (fatura extensa, cliente já recebeu escolha total/itens) — sem avisar admin: ${remetente} — ${error.message}`);
+    return;
+  }
+
+  const chaveCooldownErro = `${remetente}|${error.name}`;
+  const agoraErro = Date.now();
+  const ultimoAvisoErro = ULTIMA_NOTIFICACAO_ERRO.get(chaveCooldownErro) || 0;
+  if (agoraErro - ultimoAvisoErro < COOLDOWN_NOTIFICACAO_ERRO_MS) {
+    console.log(`Aviso de erro em cooldown pra ${remetente} (${error.name}) — não repete.`);
+    return;
+  }
+  ULTIMA_NOTIFICACAO_ERRO.set(chaveCooldownErro, agoraErro);
+
+  const nomeCliente = cliente ? cliente.nome : '(não identificado)';
+  await avisarAdmin(
+    remetente,
+    TEMPLATE_AVISO_ADMIN,
+    ['Erro processando mensagem', `${nomeCliente} (${remetente}) — tipo ${(contexto && contexto.tipoMidia) || 'texto'} — ${error.message}`],
+    `⚠️ Erro processando mensagem no Interali Pocket\n\n👤 ${nomeCliente}\n📱 ${remetente}\n📎 Tipo: ${(contexto && contexto.tipoMidia) || 'texto'}\n❌ ${error.message}`
   );
 }
 
@@ -907,126 +1291,76 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       // expirou (mais de 7 dias sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
     }
 
-    if (interpretado.tipoMidia && interpretado.legenda.includes('extrato')) {
-      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
-      const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
-      const extratoExistente = await buscarExtrato(sheetId);
-      const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
-      const duplicadas = transacoes.length - transacoesNovas.length;
+    // Cliente tinha um documento aguardando legenda (chegou sem pista nenhuma — nem legenda, nem
+    // nome de arquivo reconhecível — ver DOCUMENTOS_AGUARDANDO_LEGENDA) e mandou um texto agora:
+    // trata como a legenda que faltava e processa junto, cancelando o timer do buffer (senão
+    // processaria a mídia duas vezes).
+    if (!interpretado.tipoMidia && DOCUMENTOS_AGUARDANDO_LEGENDA.has(remetente)) {
+      const pendente = DOCUMENTOS_AGUARDANDO_LEGENDA.get(remetente);
+      clearTimeout(pendente.timer);
+      DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
+      await processarMidiaRecebida(remetente, cliente, sheetId, {
+        buffer: pendente.buffer,
+        mimeType: pendente.mimeType,
+        nomeArquivo: pendente.nomeArquivo,
+        legenda: interpretado.texto || '',
+      }).catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: interpretado.texto || '', buffer: pendente.buffer, mimeType: pendente.mimeType }, erro));
+      return res.sendStatus(200);
+    }
 
-      console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
+    // Cliente tinha uma fatura que falhou na leitura item a item (RespostaCortadaError), esperando
+    // escolher "total" (registra só o valor total, rápido e seguro) ou "itens" (tenta detalhar de
+    // novo) — ver PENDENCIAS_ESCOLHA_FATURA/tratarErroProcessamento.
+    if (!interpretado.tipoMidia && PENDENCIAS_ESCOLHA_FATURA.has(remetente)) {
+      const pendenciaEscolha = PENDENCIAS_ESCOLHA_FATURA.get(remetente);
+      const expirouEscolha = Date.now() - pendenciaEscolha.criadoEm > TIMEOUT_PENDENCIA_ESCOLHA_FATURA_MS;
+      PENDENCIAS_ESCOLHA_FATURA.delete(remetente);
 
-      const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
-      const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
-      const extratoTotal = [...extratoExistente, ...transacoesNovas];
+      if (!expirouEscolha) {
+        const escolha = (interpretado.texto || '').toLowerCase();
 
-      await salvarExtrato(sheetId, transacoesNovas);
-
-      // Registra automaticamente na planilha toda transação do extrato sem lançamento
-      // correspondente (entrada OU saída — mais amplo que o aviso "recebimento sem nota" logo
-      // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
-      // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
-      // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
-      const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
-        console.error('Falha ao registrar órfãos do extrato:', erro.message);
-        return 0;
-      });
-
-      // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
-      // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
-      await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
-
-      const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
-      const avisoRegistrados = registrados > 0 ? ` ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
-      const avisoOrfas = orfas.length > 0
-        ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
-        : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.${avisoRegistrados}\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
-    } else if (interpretado.tipoMidia && /\bvend|\bsistema\b|\bpdv\b|ifood|rappi|delivery|aiqfome/.test(interpretado.legenda)) {
-      // Relatório de vendas do sistema/PDV/app de delivery — não trava num app específico (ver
-      // PROMPT_VENDAS), o gatilho é só a legenda mencionar "venda(s)", "sistema", "pdv" ou o nome
-      // de algum app conhecido. Cada venda vira um lançamento normal, passando pela mesma checagem
-      // de duplicidade de um comprovante — cobre o caso de a mesma venda aparecer depois no
-      // extrato bancário ou na fatura do cartão.
-      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
-      const vendas = await extrairVendasDeBuffer(buffer, mimeType);
-      console.log(`Relatório de vendas processado: ${vendas.length} venda(s) identificada(s)`);
-      await processarLoteVendas(remetente, cliente, sheetId, vendas);
-    } else if (interpretado.tipoMidia && (interpretado.legenda.includes('boleto') || interpretado.legenda.includes('fatura') || interpretado.legenda.includes('pagar') || interpretado.legenda.includes('cart'))) {
-      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
-      const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
-      const cartao = extrairNomeCartao(interpretado.legenda);
-
-      if (cartao) {
-        contas.forEach((conta) => { conta.cartao = cartao; });
-      }
-
-      console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
-
-      const contasAPagarExistentes = await buscarContasAPagar(sheetId);
-      const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
-      const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
-
-      await salvarContasAPagar(sheetId, contasAPagarNovas);
-      const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
-      const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao}${avisoContasAPagarDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
-    } else if (interpretado.tipoMidia && /receber|cobran[çc]a/.test(interpretado.legenda)) {
-      // Conta a RECEBER (14/08/2026) — nota fiscal emitida, contrato, venda parcelada — dinheiro
-      // que um terceiro ainda vai pagar PRO cliente. Espelha o fluxo de boleto/fatura acima, sentido
-      // inverso: legenda "receber" ou "cobrança" aciona PROMPT_CONTA_A_RECEBER em vez do de contas
-      // a pagar.
-      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
-      const contas = await extrairContasAReceberDeBuffer(buffer, mimeType);
-
-      console.log(`Contas a receber processadas: ${contas.length} conta(s)`);
-
-      const contasAReceberExistentes = await buscarContasAReceber(sheetId);
-      const contasAReceberNovas = filtrarContasAReceberNovas(contas, contasAReceberExistentes);
-      const contasAReceberDuplicadas = contas.length - contasAReceberNovas.length;
-
-      await salvarContasAReceber(sheetId, contasAReceberNovas);
-      const avisoContasAReceberDuplicadas = contasAReceberDuplicadas > 0 ? ` (${contasAReceberDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-      await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAReceberNovas.length} conta(s) a receber${avisoContasAReceberDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
-    } else if (interpretado.tipoMidia) {
-      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
-      const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
-
-      if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
-        // Chegou sem legenda "fatura"/"boleto"/"cartão" (ex.: cliente só colou a imagem), mas o
-        // Claude percebeu que é uma fatura com múltiplos lançamentos — reprocessa como contas a
-        // pagar (item a item, com vencimento) em vez de salvar como um único comprovante, senão
-        // os lançamentos individuais e as parcelas ficariam perdidos dentro de "itens".
-        const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
-        const cartao = extrairNomeCartao(interpretado.legenda);
-
-        if (cartao) {
-          contas.forEach((conta) => { conta.cartao = cartao; });
+        if (/total/.test(escolha)) {
+          await processarFaturaComoResumo(remetente, cliente, sheetId, pendenciaEscolha.buffer, pendenciaEscolha.mimeType, pendenciaEscolha.legendaLower)
+            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: pendenciaEscolha.legendaLower }, erro));
+          return res.sendStatus(200);
+        }
+        if (/item/.test(escolha)) {
+          await processarFaturaItemizada(remetente, cliente, sheetId, pendenciaEscolha.buffer, pendenciaEscolha.mimeType, pendenciaEscolha.legendaLower)
+            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: pendenciaEscolha.legendaLower }, erro));
+          return res.sendStatus(200);
         }
 
-        console.log(`Fatura de cartão detectada sem legenda apropriada — reprocessada como ${contas.length} conta(s) a pagar${cartao ? ` | cartão: ${cartao}` : ''}`);
-
-        const contasAPagarExistentes = await buscarContasAPagar(sheetId);
-        const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
-        const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
-
-        await salvarContasAPagar(sheetId, contasAPagarNovas);
-        const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
-        const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-        await enviarMensagemWhatsApp(
-          remetente,
-          `✅ Essa imagem é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n\n` +
-          'Da próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉\n\nPergunte "previsão" para ver o fluxo de caixa projetado.'
-        );
-      } else {
-        // Legenda ("conta Itaú PJ") tem prioridade sobre o que o Claude leu na própria imagem —
-        // só o cliente sabe com certeza qual das contas dele é, quando ele se dá o trabalho de dizer.
-        dadosExtraidos.conta_bancaria = extrairNomeConta(interpretado.legenda) || dadosExtraidos.banco_conta || '';
-
-        console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
-
-        await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+        // Não entendeu a escolha — devolve a pendência (com o buffer) pra não obrigar reenvio.
+        PENDENCIAS_ESCOLHA_FATURA.set(remetente, pendenciaEscolha);
+        await enviarMensagemWhatsApp(remetente, 'Não entendi — responde "total" ou "itens" pra eu saber como registrar essa fatura. 🙂');
+        return res.sendStatus(200);
       }
+      // expirou (mais de 15min sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
+    }
+
+    if (interpretado.tipoMidia) {
+      const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
+      const legenda = interpretado.legenda || '';
+      const pistaArquivo = inferirPistaPorNomeArquivo(interpretado.nomeArquivo);
+
+      if (!legenda.trim() && !pistaArquivo) {
+        // BUFFER DE ESPERA (17/08/2026): nem legenda nem nome do arquivo deram pista nenhuma —
+        // espera alguns segundos pra ver se o cliente manda um texto explicando logo em seguida
+        // (ex.: manda o PDF e só depois escreve "cartão de crédito pago") em vez de já arriscar a
+        // leitura genérica. Responde 200 pro webhook já (não segura a resposta esperando o timer);
+        // o processamento de verdade roda quando o timer disparar OU quando o texto chegar antes
+        // (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
+        const timer = setTimeout(() => {
+          DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
+          processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda: '' })
+            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {}));
+        }, JANELA_BUFFER_LEGENDA_MS);
+
+        DOCUMENTOS_AGUARDANDO_LEGENDA.set(remetente, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, timer, criadoEm: Date.now() });
+        return res.sendStatus(200);
+      }
+
+      await processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda });
     } else {
       const corpoLower = (interpretado.texto || '').toLowerCase();
       const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
@@ -1097,17 +1431,12 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
             '🧑‍💼 Alguém da equipe vai entrar em contato por aqui pra agendar a primeira Reunião Online de 50min.'
           );
 
-          if (ADMIN_WHATSAPP_NUMBER) {
-            await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
-              'Upgrade Especialista ativado',
-              `${cliente.nome} (${remetente}) — ${novoNome}, R$ ${novoValor.toFixed(2)} — agendar reunião de diagnóstico`,
-            ]).catch((erro) => console.error('Falha ao notificar admin sobre upgrade especialista (template):', erro.message));
-
-            await enviarMensagemWhatsApp(
-              ADMIN_WHATSAPP_NUMBER,
-              `🧑‍💼 Upgrade Especialista ativado sozinho via WhatsApp!\n\n👤 ${cliente.nome}\n📱 ${remetente}\n📋 ${novoNome} (R$ ${novoValor.toFixed(2)})\n\nAgendar a reunião de diagnóstico com esse cliente!`
-            ).catch(() => {});
-          }
+          await avisarAdmin(
+            remetente,
+            TEMPLATE_AVISO_ADMIN,
+            ['Upgrade Especialista ativado', `${cliente.nome} (${remetente}) — ${novoNome}, R$ ${novoValor.toFixed(2)} — agendar reunião de diagnóstico`],
+            `🧑‍💼 Upgrade Especialista ativado sozinho via WhatsApp!\n\n👤 ${cliente.nome}\n📱 ${remetente}\n📋 ${novoNome} (R$ ${novoValor.toFixed(2)})\n\nAgendar a reunião de diagnóstico com esse cliente!`
+          );
         } else {
           // Sem assinatura Asaas rastreada (ex.: cliente cadastrado manualmente, fora do
           // checkout online) — não dá pra ajustar cobrança sozinho, precisa do Aroldo.
@@ -1115,17 +1444,12 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
             remetente,
             `Show, ${cliente.nome || ''}! Registrei seu interesse na Análise Mensal com Especialista — a equipe vai entrar em contato por aqui pra confirmar o pagamento e agendar.`
           );
-          if (ADMIN_WHATSAPP_NUMBER) {
-            await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
-              'Pedido de Especialista sem assinatura rastreada',
-              `${cliente.nome} (${remetente}) — combinar cobrança manual`,
-            ]).catch((erro) => console.error('Falha ao notificar admin sobre pedido de especialista sem assinatura (template):', erro.message));
-
-            await enviarMensagemWhatsApp(
-              ADMIN_WHATSAPP_NUMBER,
-              `🧑‍💼 Cliente pediu upgrade do Especialista pelo WhatsApp, mas não achei assinatura Asaas rastreada pra esse número (provável cadastro manual) — precisa combinar a cobrança manual.\n\n👤 ${cliente.nome}\n📱 ${remetente}`
-            ).catch(() => {});
-          }
+          await avisarAdmin(
+            remetente,
+            TEMPLATE_AVISO_ADMIN,
+            ['Pedido de Especialista sem assinatura rastreada', `${cliente.nome} (${remetente}) — combinar cobrança manual`],
+            `🧑‍💼 Cliente pediu upgrade do Especialista pelo WhatsApp, mas não achei assinatura Asaas rastreada pra esse número (provável cadastro manual) — precisa combinar a cobrança manual.\n\n👤 ${cliente.nome}\n📱 ${remetente}`
+          );
         }
       } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
         const dias = corpoLower.includes('semana') ? 7 : 30;
@@ -1172,54 +1496,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       }
     }
   } catch (error) {
-    console.error('Erro ao processar mensagem:', error.message);
-
-    // Marca o horário do erro pra esse remetente — se ele reenviar o mesmo documento logo em
-    // seguida e a checagem de duplicidade bater, processarLancamentoExtraido trata como confirmação
-    // normal em vez de aviso de duplicidade (ver ERROS_RECENTES_PROCESSAMENTO acima).
-    if (remetente) ERROS_RECENTES_PROCESSAMENTO.set(remetente, Date.now());
-
-    // RespostaCortadaError (index.js, 14/08/2026) — a IA cortou a resposta no meio, geralmente
-    // porque o documento tem mais informação do que o tipo de leitura escolhido processa de uma
-    // vez (ex.: extrato de várias páginas mandado sem a legenda "extrato"). Dá pra orientar o
-    // cliente direito nesse caso específico, em vez do genérico "chama o suporte".
-    //
-    // Caso à parte (pedido do Aroldo, 14/08/2026): se a legenda JÁ era "extrato" e mesmo assim
-    // cortou, dizer "escreve extrato na legenda" de novo é inútil — o cliente já fez isso certo, o
-    // problema é o extrato ser grande/ilegível demais pra ler de uma vez. Manda um lembrete
-    // específico com dicas de como reenviar (em partes, PDF original em vez de foto, etc.) em vez
-    // do texto genérico.
-    const jaEraExtrato = interpretado.tipoMidia && (interpretado.legenda || '').toLowerCase().includes('extrato');
-
-    const mensagemErroCliente = error.name === 'RespostaCortadaError' && jaEraExtrato
-      ? 'Não consegui ler esse extrato direito — ele deve ter mais páginas ou transações do que eu processo de uma vez só.\n\n' +
-        'Tenta assim:\n' +
-        '1️⃣ Manda em partes menores (ex.: um período mais curto, ou página por página).\n' +
-        '2️⃣ Se for foto da tela, tira com boa luz e sem cortar nenhum número.\n' +
-        '3️⃣ Se tiver o PDF original do banco, manda ele em vez de print/foto — costuma ler muito melhor.\n\n' +
-        'Pode reenviar já com "extrato" na legenda de novo.'
-      : error.name === 'RespostaCortadaError'
-        ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
-          'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
-        : SUPORTE_TEXTO
-          ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-          : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
-
-    await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
-
-    if (ADMIN_WHATSAPP_NUMBER) {
-      const nomeCliente = cliente ? cliente.nome : '(não identificado)';
-
-      await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
-        'Erro processando mensagem',
-        `${nomeCliente} (${remetente}) — tipo ${interpretado.tipoMidia || 'texto'} — ${error.message}`,
-      ]).catch((erroNotificacao) => console.error('Falha ao notificar admin sobre erro de processamento (template):', erroNotificacao.message));
-
-      await enviarMensagemWhatsApp(
-        ADMIN_WHATSAPP_NUMBER,
-        `⚠️ Erro processando mensagem no Interali Pocket\n\n👤 ${nomeCliente}\n📱 ${remetente}\n📎 Tipo: ${interpretado.tipoMidia || 'texto'}\n❌ ${error.message}`
-      ).catch(() => {});
-    }
+    // Lógica de aviso extraída pra tratarErroProcessamento (17/08/2026) — reaproveitada também
+    // pelos caminhos que já respondem 200 antes de terminar de processar (buffer de legenda,
+    // escolha "total"/"itens"), que não passam mais por este catch.
+    await tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: interpretado.legenda }, error);
   }
 
   res.sendStatus(200);
@@ -1464,7 +1744,7 @@ app.post('/api/assinar', async (req, res) => {
     console.error('Erro ao registrar assinatura na planilha (cobrança no Asaas já foi criada):', error.message);
   }
 
-  if (ADMIN_WHATSAPP_NUMBER) {
+  {
     const linhaVoucher = voucherAplicado ? `\n🎟️ Voucher: ${voucherAplicado}` : '';
     const linhaEspecialista = comEspecialista ? '\n🧑‍💼 Com Análise Mensal com Especialista' : '';
     const linhaAtivacao = numeroAtivacao !== numeroFormatado ? `\n📲 Ativação: ${numeroAtivacao}` : '';
@@ -1474,15 +1754,15 @@ app.post('/api/assinar', async (req, res) => {
       + (voucherAplicado ? ` | voucher ${voucherAplicado}` : '')
       + (comEspecialista ? ' | com Especialista' : '')
       + (numeroAtivacao !== numeroFormatado ? ` | ativação ${numeroAtivacao}` : '');
-    await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_AVISO_ADMIN.nome, TEMPLATE_AVISO_ADMIN.idioma, [
-      'Novo checkout iniciado (aguardando pagamento)',
-      detalheUmaLinha,
-    ]).catch((erro) => console.error('Falha ao notificar admin sobre assinatura (template):', erro.message));
 
-    await enviarMensagemWhatsApp(
-      ADMIN_WHATSAPP_NUMBER,
+    // numeroFormatado como "remetente" pro avisarAdmin — se for o próprio Aroldo testando o
+    // checkout com o número de admin, não se autonotifica (mesma regra dos demais avisos).
+    await avisarAdmin(
+      numeroFormatado,
+      TEMPLATE_AVISO_ADMIN,
+      ['Novo checkout iniciado (aguardando pagamento)', detalheUmaLinha],
       `🛒 Novo checkout iniciado no site do Interali Pocket (aguardando pagamento)\n\n👤 ${nome}\n📱 ${numeroFormatado}\n📋 Plano: ${nomePlanoCompleto} (R$ ${valorFinal.toFixed(2)})${linhaVoucher}${linhaEspecialista}${linhaAtivacao}${linhaAtivacao2}\n\nVocê será avisado de novo automaticamente assim que o pagamento cair.`
-    ).catch(() => {});
+    );
   }
 
   res.json({ ok: true, plano: { ...planoFinal, nome: nomePlanoCompleto, valor: valorFinal }, redirectUrl: linkPagamento });
@@ -1558,21 +1838,21 @@ app.post('/webhook-asaas', async (req, res) => {
       ).catch(() => {});
     }
 
-    if (ADMIN_WHATSAPP_NUMBER) {
-      // Template primeiro — garante a entrega desse aviso (pagamento confirmado é o evento mais
-      // importante do sistema) mesmo se o admin não tiver mensagem recente com o bot.
-      await enviarTemplateWhatsApp(ADMIN_WHATSAPP_NUMBER, TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO.nome, TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO.idioma, [
-        assinatura.nome || 'cliente',
-        numeroAtivacao,
-        assinatura.plano,
-      ]).catch((erro) => console.error('Falha ao notificar admin sobre ativação automática (template):', erro.message));
-
+    {
+      // Pagamento confirmado é o evento mais importante do sistema — avisarAdmin ainda garante a
+      // entrega (cai pro template se o texto falhar, ver função), só inverteu a ORDEM padrão
+      // (texto primeiro) pra não pagar template à toa quando o admin já está com sessão aberta.
+      // numeroAtivacao como "remetente": se for o próprio Aroldo testando com o número de admin,
+      // ele já viu a confirmação de pagamento acima — não duplica.
       const avisoEspecialista = assinatura.planoEspecialista ? '\n🧑‍💼 Com Especialista — agendar a reunião de diagnóstico com esse cliente!' : '';
       const linhaSegundoNumero = assinatura.whatsappAtivacao2 ? `\n📲 2º número ativado: ${assinatura.whatsappAtivacao2}` : '';
-      await enviarMensagemWhatsApp(
-        ADMIN_WHATSAPP_NUMBER,
+
+      await avisarAdmin(
+        numeroAtivacao,
+        TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO,
+        [assinatura.nome || 'cliente', numeroAtivacao, assinatura.plano],
         `✅ Pagamento confirmado e cliente ativado automaticamente!\n\n👤 ${assinatura.nome}\n📱 ${numeroAtivacao}${linhaSegundoNumero}\n📋 ${assinatura.plano}${avisoEspecialista}\n📄 Planilha: https://docs.google.com/spreadsheets/d/${sheetIdNovo}/edit`
-      ).catch(() => {});
+      );
     }
 
     res.sendStatus(200);
