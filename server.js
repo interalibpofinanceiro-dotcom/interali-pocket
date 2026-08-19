@@ -1182,22 +1182,40 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   // normal em vez de aviso de duplicidade (ver ERROS_RECENTES_PROCESSAMENTO acima).
   if (remetente) ERROS_RECENTES_PROCESSAMENTO.set(remetente, Date.now());
 
+  // Cooldown ÚNICO por remetente+tipo de erro, checado ANTES de mandar qualquer mensagem — pro
+  // CLIENTE e pro admin (19/08/2026, pedido do Aroldo: "o cliente não pode receber um monte de
+  // mensagens" repetidas pro mesmo problema). Até aqui só o aviso de ADMIN tinha cooldown (e o
+  // caminho de extrato nem isso tinha, de propósito) — o CLIENTE podia receber a mesma mensagem de
+  // erro várias vezes se o mesmo problema se repetisse rápido. Caso real: antes da correção de ack
+  // imediato do webhook (mesmo commit), a Meta redisparava a mesma mensagem várias vezes por
+  // demora de resposta, e cada redisparo gerava uma mensagem de erro NOVA pro cliente. Agora nem
+  // admin nem cliente recebem 2 avisos do mesmo problema dentro da janela de 15min — inclusive os
+  // fluxos "autorresolvidos" de fatura/extrato, que antes eram exceção a qualquer cooldown.
+  const chaveCooldownErro = `${remetente}|${error.name}`;
+  const agoraErro = Date.now();
+  const ultimoAvisoErro = ULTIMA_NOTIFICACAO_ERRO.get(chaveCooldownErro) || 0;
+  if (agoraErro - ultimoAvisoErro < COOLDOWN_NOTIFICACAO_ERRO_MS) {
+    console.log(`Erro repetido em cooldown pra ${remetente} (${error.name}) — não avisa de novo (nem cliente, nem admin): ${error.message}`);
+    return;
+  }
+  ULTIMA_NOTIFICACAO_ERRO.set(chaveCooldownErro, agoraErro);
+
   const legendaLower = ((contexto && contexto.legenda) || '').toLowerCase();
   const jaEraExtrato = contexto && contexto.tipoMidia && legendaLower.includes('extrato');
   const pareceFatura = contexto && contexto.tipoMidia && /fatura|cart[ãa]o|boleto|pagar/.test(legendaLower);
+  const nomeCliente = cliente ? cliente.nome : '(não identificado)';
 
   // RespostaCortadaError num documento que parece fatura/cartão, com o buffer ainda disponível —
   // em vez de só orientar reenvio, oferece pra registrar já (só o total, seguro) ou tentar de novo
   // o detalhe item a item (ver PENDENCIAS_ESCOLHA_FATURA e requisito 4 do pedido do Aroldo, 17/08/2026).
   const erroFaturaAutorresolvido = error.name === 'RespostaCortadaError' && pareceFatura && !jaEraExtrato && contexto.buffer;
 
-  // RespostaCortadaError num EXTRATO, mesmo já com max_tokens elevado pra 16000 (ver
+  // RespostaCortadaError num EXTRATO, mesmo já com max_tokens elevado pra 32000 (ver
   // extrairExtratoDeBuffer em index.js) — caso real: cliente Sirlene, extrato cortando
   // repetidamente mesmo com a legenda certa (19/08/2026). O produto promete "manda uma vez,
   // funciona" — então, diferente da fatura, isso NUNCA pede nada pro cliente (nem "total"/"itens",
   // nem "manda em partes"). É tratado 100% automático: grava o resumo/saldo em segundo plano (ver
-  // processarExtratoComoResumo) e escala pro admin resolver manualmente, ignorando o cooldown normal
-  // (esse erro específico não se resolve sozinho — precisa de gente olhando).
+  // processarExtratoComoResumo) e escala pro admin resolver manualmente.
   const erroExtratoAutorresolvido = error.name === 'RespostaCortadaError' && jaEraExtrato && contexto.buffer;
 
   if (erroFaturaAutorresolvido) {
@@ -1213,7 +1231,11 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
       'Quer que eu registre só o *valor total* como uma despesa/conta única (rápido, sem detalhar item por item), ou prefere que eu *tente ler os itens* de novo (pode falhar de novo se a fatura for grande)?\n\n' +
       'Responde "total" ou "itens".'
     ).catch(() => {});
-  } else if (erroExtratoAutorresolvido) {
+    console.log(`Erro autorresolvido (fatura extensa, cliente recebeu escolha total/itens) — sem avisar admin: ${remetente} — ${error.message}`);
+    return;
+  }
+
+  if (erroExtratoAutorresolvido) {
     // Não pede nada pro cliente — registra o resumo/saldo sozinho e avisa que está resolvido do
     // lado dele. Se até o resumo falhar (raríssimo, é uma resposta pequena e fixa), ainda assim não
     // culpa o cliente por isso — só reforça pro admin que precisa de atenção manual.
@@ -1226,52 +1248,24 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
       remetente,
       '📄 Recebi seu extrato! Ele é maior do que o normal, então nosso time vai revisar e completar o lançamento — você não precisa fazer nada nem reenviar. Te aviso por aqui assim que estiver tudo certo. 🙏'
     ).catch(() => {});
-  } else {
-    const mensagemErroCliente = error.name === 'RespostaCortadaError'
-      ? SUPORTE_TEXTO
-        ? `Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso — se precisar, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-        : 'Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso, te aviso assim que resolver.'
-      : SUPORTE_TEXTO
-        ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-        : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
-
-    await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
-  }
-
-  // 17/08/2026 — 2 filtros antes de incomodar o admin (19/08/2026: extrato autorresolvido passou a
-  // SEMPRE avisar, ignorando os dois — é o único caso que precisa mesmo de intervenção manual, os
-  // outros dois filtros existem pra NÃO incomodar à toa quando o cliente já tem um caminho claro):
-  // 1) Erro "autorresolvido" de FATURA (cliente já recebeu a escolha "total"/"itens", tem um
-  //    caminho claro e autoexplicativo) não precisa de intervenção do admin — só loga.
-  // 2) Cooldown por remetente+tipo de erro, mesmo padrão de ULTIMA_NOTIFICACAO_LEAD — um cliente
-  //    errando repetido no mesmo documento não deve gerar um aviso por tentativa.
-  if (erroFaturaAutorresolvido) {
-    console.log(`Erro autorresolvido (fatura extensa, cliente já recebeu escolha total/itens) — sem avisar admin: ${remetente} — ${error.message}`);
-    return;
-  }
-
-  const nomeCliente = cliente ? cliente.nome : '(não identificado)';
-
-  if (erroExtratoAutorresolvido) {
-    // Sem cooldown de propósito — cada extrato grande que cai aqui é um lançamento manual
-    // pendente de verdade, não um erro repetido do mesmo evento.
     await avisarAdmin(
       remetente,
       TEMPLATE_AVISO_ADMIN,
       ['AÇÃO NECESSÁRIA: extrato grande demais', `${nomeCliente} (${remetente}) — completar lançamento manualmente, resumo/saldo já registrado`],
-      `🔴 AÇÃO NECESSÁRIA — extrato grande demais mesmo com limite ampliado\n\n👤 ${nomeCliente}\n📱 ${remetente}\n\nO extrato cortou de novo (RespostaCortadaError) mesmo com max_tokens em 16000. Já registrei o resumo/saldo final na planilha (Extrato) e já avisei o cliente que não precisa fazer nada — mas as transações individuais NÃO foram lançadas. Precisa completar manualmente (ou pedir o extrato em partes só pra uso interno, sem envolver o cliente de novo).`
+      `🔴 AÇÃO NECESSÁRIA — extrato grande demais mesmo com limite ampliado\n\n👤 ${nomeCliente}\n📱 ${remetente}\n\nO extrato cortou de novo (RespostaCortadaError) mesmo com max_tokens em 32000. Já registrei o resumo/saldo final na planilha (Extrato) e já avisei o cliente que não precisa fazer nada — mas as transações individuais NÃO foram lançadas. Precisa completar manualmente (ou pedir o extrato em partes só pra uso interno, sem envolver o cliente de novo).`
     );
     return;
   }
 
-  const chaveCooldownErro = `${remetente}|${error.name}`;
-  const agoraErro = Date.now();
-  const ultimoAvisoErro = ULTIMA_NOTIFICACAO_ERRO.get(chaveCooldownErro) || 0;
-  if (agoraErro - ultimoAvisoErro < COOLDOWN_NOTIFICACAO_ERRO_MS) {
-    console.log(`Aviso de erro em cooldown pra ${remetente} (${error.name}) — não repete.`);
-    return;
-  }
-  ULTIMA_NOTIFICACAO_ERRO.set(chaveCooldownErro, agoraErro);
+  const mensagemErroCliente = error.name === 'RespostaCortadaError'
+    ? SUPORTE_TEXTO
+      ? `Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso — se precisar, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+      : 'Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso, te aviso assim que resolver.'
+    : SUPORTE_TEXTO
+      ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+      : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+
+  await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
 
   await avisarAdmin(
     remetente,
