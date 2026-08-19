@@ -440,6 +440,31 @@ REGRAS:
 - Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente.
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
+// RESUMO de extrato (19/08/2026) — rede de segurança de ÚLTIMO recurso: só é usado quando mesmo com
+// max_tokens elevado pra 16000 (ver extrairExtratoDeBuffer em index.js) a leitura transação a
+// transação ainda cortar (RespostaCortadaError num extrato realmente fora do comum). Caso real que
+// motivou: cliente Sirlene, extrato bancário cortando repetidamente mesmo com legenda certa. O
+// produto promete "manda uma vez, funciona" — isso NUNCA deve virar uma instrução pro cliente
+// dividir o arquivo; é só uma rede de segurança silenciosa (ver processarExtratoComoResumo em
+// server.js) que mantém o saldo atual correto e aciona o time pra completar manualmente.
+const PROMPT_EXTRATO_RESUMO = `Você é um especialista em leitura de extratos bancários brasileiros extensos (PDFs de várias páginas, muitas transações).
+
+Sua tarefa NÃO é listar cada transação individual — é extrair só o RESUMO do extrato. Retorne SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "banco_conta": "nome do banco/conta (ex.: 'Itaú', 'Bradesco PJ'), ou null se não identificado",
+  "periodo_inicio": "YYYY-MM-DD da primeira transação do extrato, ou null se não identificado",
+  "periodo_fim": "YYYY-MM-DD da última transação do extrato (ou data do extrato), ou null se não identificado",
+  "saldo_final": 0.00,
+  "quantidade_transacoes_aproximada": 0
+}
+
+REGRAS:
+- "saldo_final" é o dado mais importante — o saldo ao final do período mostrado no extrato (o mais recente). Tente sempre preenchê-lo mesmo se outros campos ficarem null.
+- "quantidade_transacoes_aproximada" é uma estimativa (não precisa contar cada linha com exatidão) de quantas transações aparecem no total.
+- Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente.
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
 module.exports = {
   PROMPT_EXTRACAO,
   PROMPT_EXTRACAO_TEXTO,
@@ -451,4 +476,5 @@ module.exports = {
   PROMPT_CONTA_A_RECEBER,
   PROMPT_CONTA_A_RECEBER_TEXTO,
   PROMPT_FATURA_RESUMO,
+  PROMPT_EXTRATO_RESUMO,
 };

@@ -5,7 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const {
   PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
-  PROMPT_FATURA_RESUMO,
+  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO,
 } = require('./prompts');
 
 const anthropic = new Anthropic({
@@ -143,10 +143,25 @@ async function extrairComprovante(imagePath) {
   return extrairComprovanteDeBuffer(imageBuffer, mediaType);
 }
 
+// max_tokens elevado de 4096 pra 32000 + thinking desabilitado, em 19/08/2026 — caso real: extrato
+// bancário extenso da cliente Sirlene cortando repetidamente (RespostaCortadaError). Investigação
+// completa (testes reais com a API):
+// 1) O modelo engata "thinking" automático mesmo sem pedir, e ele pode consumir quase todo o
+//    max_tokens SÓ raciocinando antes de escrever a resposta (medido: 14855 de 16000 tokens em
+//    thinking, sobrando ~1100 pra JSON de verdade) — E deixa a resposta MUITO lenta (uma chamada
+//    ficou mais de 15min sem terminar). `thinking: { type: 'disabled' }` resolve os dois problemas
+//    de uma vez: sem gastar orçamento em raciocínio, e rápido.
+// 2) Só desabilitar thinking não bastava — um extrato real de 350 transações ainda cortava com
+//    16000 tokens (parou em ~244 transações). Testado com 32000: as 350 couberam com folga (25699
+//    tokens usados, ~160s de resposta). Sem custo extra pra documento pequeno: a API cobra pelo
+//    tanto de token que a resposta REALMENTE usa, não pelo teto.
+// O produto promete "manda uma vez, funciona" — nunca pedir pro cliente dividir o arquivo em
+// partes; ver processarExtratoComoResumo em server.js pra quando mesmo assim não couber.
 async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 4096,
+    max_tokens: 32000,
+    thinking: { type: 'disabled' },
     system: PROMPT_EXTRATO,
     messages: [
       {
@@ -169,12 +184,17 @@ async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
 // Relatório de vendas do sistema/PDV/app de delivery (iFood, Rappi, InstaDelivery, etc. — o prompt
 // não trava num app específico, ver PROMPT_VENDAS). Manda a data de hoje junto, mesmo motivo de
 // extrairComprovanteDeTexto: relatórios "de hoje" costumam não repetir a data em cada linha.
+// max_tokens elevado de 4096 pra 32000 + thinking desabilitado em 19/08/2026 — mesma classe de
+// risco do extrato, mesma causa raiz (ver extrairExtratoDeBuffer acima): relatório de vendas com
+// muitos pedidos pode ter mais itens do que 4096 tokens cobrem, e o thinking automático desperdiça
+// orçamento + deixa a resposta lenta demais pra um bot de WhatsApp.
 async function extrairVendasDeBuffer(fileBuffer, mediaType) {
   const hoje = new Date().toISOString().slice(0, 10);
 
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 4096,
+    max_tokens: 32000,
+    thinking: { type: 'disabled' },
     system: PROMPT_VENDAS,
     messages: [
       {
@@ -194,10 +214,14 @@ async function extrairVendasDeBuffer(fileBuffer, mediaType) {
   return resultado.vendas || [];
 }
 
+// max_tokens elevado de 4096 pra 32000 + thinking desabilitado em 19/08/2026 — mesma classe de
+// risco do extrato, mesma causa raiz (ver extrairExtratoDeBuffer acima): fatura/boleto detalhado
+// item a item pode ter muitas parcelas.
 async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 4096,
+    max_tokens: 32000,
+    thinking: { type: 'disabled' },
     system: PROMPT_CONTA_A_PAGAR,
     messages: [
       {
@@ -219,10 +243,13 @@ async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
 
 // Conta a RECEBER a partir de foto/PDF (nota fiscal emitida, contrato, venda parcelada) — ver
 // PROMPT_CONTA_A_RECEBER. Espelha extrairContasAPagarDeBuffer, sentido inverso.
+// max_tokens elevado de 4096 pra 32000 + thinking desabilitado em 19/08/2026 — mesma classe de
+// risco do extrato, mesma causa raiz (ver extrairExtratoDeBuffer acima).
 async function extrairContasAReceberDeBuffer(fileBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 4096,
+    max_tokens: 32000,
+    thinking: { type: 'disabled' },
     system: PROMPT_CONTA_A_RECEBER,
     messages: [
       {
@@ -260,6 +287,32 @@ async function extrairResumoFaturaDeBuffer(fileBuffer, mediaType) {
           {
             type: 'text',
             text: 'Extraia o resumo (não item a item) desta fatura/extrato seguindo o formato JSON definido.',
+          },
+        ],
+      },
+    ],
+  });
+
+  return extrairJSON(extrairTextoResposta(response));
+}
+
+// RESUMO de extrato (19/08/2026) — rede de segurança de ÚLTIMO recurso, só acionada quando mesmo
+// com max_tokens elevado pra 16000 (ver extrairExtratoDeBuffer acima) a leitura transação a
+// transação ainda cortar (caso real: extrato da cliente Sirlene, RespostaCortadaError repetido).
+// Resposta sempre um objeto fixo pequeno, nunca cresce com o nº de transações, então não estoura.
+async function extrairResumoExtratoDeBuffer(fileBuffer, mediaType) {
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 512,
+    system: PROMPT_EXTRATO_RESUMO,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: 'Extraia o resumo (não transação a transação) deste extrato bancário seguindo o formato JSON definido.',
           },
         ],
       },
@@ -359,6 +412,7 @@ module.exports = {
   extrairContasAReceberDeBuffer,
   extrairContaAReceberDeTexto,
   extrairResumoFaturaDeBuffer,
+  extrairResumoExtratoDeBuffer,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

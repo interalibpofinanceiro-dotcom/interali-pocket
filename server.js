@@ -11,6 +11,7 @@ const {
   extrairContasAReceberDeBuffer,
   extrairContaAReceberDeTexto,
   extrairResumoFaturaDeBuffer,
+  extrairResumoExtratoDeBuffer,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -936,6 +937,35 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
   );
 }
 
+// Rede de segurança de ÚLTIMO recurso pro extrato (19/08/2026) — só é chamada de dentro de
+// tratarErroProcessamento, depois que a leitura transação a transação (extrairExtratoDeBuffer, já
+// com max_tokens elevado pra 16000) MESMO ASSIM cortou de novo (RespostaCortadaError num extrato
+// realmente fora do comum). Caso real: cliente Sirlene, extrato cortando repetidamente. Diferente
+// da fatura (que vira 1 lançamento consolidado), o extrato não dá pra reconciliar sem as transações
+// individuais — então isso NUNCA pede nada pro cliente (o produto promete "manda uma vez,
+// funciona"): grava só uma linha consolidada em Extrato com o saldo final (mantém a previsão de
+// caixa correta) e devolve o resumo pra quem chamou notificar o admin com prioridade, pra alguém do
+// time completar o lançamento manualmente depois.
+async function processarExtratoComoResumo(sheetId, buffer, mimeType) {
+  const resumo = await extrairResumoExtratoDeBuffer(buffer, mimeType);
+
+  if (resumo.saldo_final !== null && resumo.saldo_final !== undefined) {
+    const banco = resumo.banco_conta ? ` (${resumo.banco_conta})` : '';
+    const periodo = resumo.periodo_inicio && resumo.periodo_fim
+      ? ` — período ${formatarDataBR(resumo.periodo_inicio)} a ${formatarDataBR(resumo.periodo_fim)}`
+      : '';
+    await salvarExtrato(sheetId, [{
+      data: resumo.periodo_fim || new Date().toISOString().slice(0, 10),
+      descricao: `Resumo consolidado do extrato${banco}${periodo} — extrato extenso demais pra detalhar transação a transação automaticamente, aguardando lançamento manual`,
+      valor: 0,
+      tipo: '',
+      saldo_apos: resumo.saldo_final,
+    }]);
+  }
+
+  return resumo;
+}
+
 // Registra uma fatura/boleto item a item (fluxo que já existia antes de 17/08/2026) — usado pra
 // documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
 // escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
@@ -1100,9 +1130,18 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   // RespostaCortadaError num documento que parece fatura/cartão, com o buffer ainda disponível —
   // em vez de só orientar reenvio, oferece pra registrar já (só o total, seguro) ou tentar de novo
   // o detalhe item a item (ver PENDENCIAS_ESCOLHA_FATURA e requisito 4 do pedido do Aroldo, 17/08/2026).
-  const erroAutorresolvido = error.name === 'RespostaCortadaError' && pareceFatura && !jaEraExtrato && contexto.buffer;
+  const erroFaturaAutorresolvido = error.name === 'RespostaCortadaError' && pareceFatura && !jaEraExtrato && contexto.buffer;
 
-  if (erroAutorresolvido) {
+  // RespostaCortadaError num EXTRATO, mesmo já com max_tokens elevado pra 16000 (ver
+  // extrairExtratoDeBuffer em index.js) — caso real: cliente Sirlene, extrato cortando
+  // repetidamente mesmo com a legenda certa (19/08/2026). O produto promete "manda uma vez,
+  // funciona" — então, diferente da fatura, isso NUNCA pede nada pro cliente (nem "total"/"itens",
+  // nem "manda em partes"). É tratado 100% automático: grava o resumo/saldo em segundo plano (ver
+  // processarExtratoComoResumo) e escala pro admin resolver manualmente, ignorando o cooldown normal
+  // (esse erro específico não se resolve sozinho — precisa de gente olhando).
+  const erroExtratoAutorresolvido = error.name === 'RespostaCortadaError' && jaEraExtrato && contexto.buffer;
+
+  if (erroFaturaAutorresolvido) {
     PENDENCIAS_ESCOLHA_FATURA.set(remetente, {
       buffer: contexto.buffer,
       mimeType: contexto.mimeType,
@@ -1115,31 +1154,54 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
       'Quer que eu registre só o *valor total* como uma despesa/conta única (rápido, sem detalhar item por item), ou prefere que eu *tente ler os itens* de novo (pode falhar de novo se a fatura for grande)?\n\n' +
       'Responde "total" ou "itens".'
     ).catch(() => {});
+  } else if (erroExtratoAutorresolvido) {
+    // Não pede nada pro cliente — registra o resumo/saldo sozinho e avisa que está resolvido do
+    // lado dele. Se até o resumo falhar (raríssimo, é uma resposta pequena e fixa), ainda assim não
+    // culpa o cliente por isso — só reforça pro admin que precisa de atenção manual.
+    if (cliente && cliente.sheetId) {
+      await processarExtratoComoResumo(cliente.sheetId, contexto.buffer, contexto.mimeType).catch((erroResumo) => {
+        console.error('Falha até no resumo do extrato (rede de segurança):', erroResumo.message);
+      });
+    }
+    await enviarMensagemWhatsApp(
+      remetente,
+      '📄 Recebi seu extrato! Ele é maior do que o normal, então nosso time vai revisar e completar o lançamento — você não precisa fazer nada nem reenviar. Te aviso por aqui assim que estiver tudo certo. 🙏'
+    ).catch(() => {});
   } else {
-    const mensagemErroCliente = error.name === 'RespostaCortadaError' && jaEraExtrato
-      ? 'Não consegui ler esse extrato direito — ele deve ter mais páginas ou transações do que eu processo de uma vez só.\n\n' +
-        'Tenta assim:\n' +
-        '1️⃣ Manda em partes menores (ex.: um período mais curto, ou página por página).\n' +
-        '2️⃣ Se for foto da tela, tira com boa luz e sem cortar nenhum número.\n' +
-        '3️⃣ Se tiver o PDF original do banco, manda ele em vez de print/foto — costuma ler muito melhor.\n\n' +
-        'Pode reenviar já com "extrato" na legenda de novo.'
-      : error.name === 'RespostaCortadaError'
-        ? 'Não consegui processar esse documento direito — ele deve ter mais informação do que eu esperava pra esse tipo de leitura.\n\n' +
-          'Se for um *extrato bancário*, escreve "extrato" na legenda. Se for *boleto ou fatura*, escreve "boleto" ou "fatura". Se for um *relatório de vendas*, escreve "vendas" ou "sistema". Isso ajuda bastante a acertar de primeira — tenta de novo assim.'
-        : SUPORTE_TEXTO
-          ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
-          : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
+    const mensagemErroCliente = error.name === 'RespostaCortadaError'
+      ? SUPORTE_TEXTO
+        ? `Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso — se precisar, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+        : 'Recebi seu documento, mas tive um problema pra processar ele agora. Já estou olhando isso, te aviso assim que resolver.'
+      : SUPORTE_TEXTO
+        ? `Ops, não consegui processar isso agora. Pode tentar de novo?\n\nSe continuar dando errado, ${SUPORTE_TEXTO.charAt(0).toLowerCase()}${SUPORTE_TEXTO.slice(1)}`
+        : 'Ops, não consegui processar isso agora. Pode tentar de novo?';
 
     await enviarMensagemWhatsApp(remetente, mensagemErroCliente).catch(() => {});
   }
 
-  // 17/08/2026 — 2 filtros antes de incomodar o admin:
-  // 1) Erro "autorresolvido" (fatura extensa, cliente já recebeu a escolha "total"/"itens" acima,
-  //    tem um caminho claro e autoexplicativo) não precisa de intervenção do admin — só loga.
+  // 17/08/2026 — 2 filtros antes de incomodar o admin (19/08/2026: extrato autorresolvido passou a
+  // SEMPRE avisar, ignorando os dois — é o único caso que precisa mesmo de intervenção manual, os
+  // outros dois filtros existem pra NÃO incomodar à toa quando o cliente já tem um caminho claro):
+  // 1) Erro "autorresolvido" de FATURA (cliente já recebeu a escolha "total"/"itens", tem um
+  //    caminho claro e autoexplicativo) não precisa de intervenção do admin — só loga.
   // 2) Cooldown por remetente+tipo de erro, mesmo padrão de ULTIMA_NOTIFICACAO_LEAD — um cliente
   //    errando repetido no mesmo documento não deve gerar um aviso por tentativa.
-  if (erroAutorresolvido) {
+  if (erroFaturaAutorresolvido) {
     console.log(`Erro autorresolvido (fatura extensa, cliente já recebeu escolha total/itens) — sem avisar admin: ${remetente} — ${error.message}`);
+    return;
+  }
+
+  const nomeCliente = cliente ? cliente.nome : '(não identificado)';
+
+  if (erroExtratoAutorresolvido) {
+    // Sem cooldown de propósito — cada extrato grande que cai aqui é um lançamento manual
+    // pendente de verdade, não um erro repetido do mesmo evento.
+    await avisarAdmin(
+      remetente,
+      TEMPLATE_AVISO_ADMIN,
+      ['AÇÃO NECESSÁRIA: extrato grande demais', `${nomeCliente} (${remetente}) — completar lançamento manualmente, resumo/saldo já registrado`],
+      `🔴 AÇÃO NECESSÁRIA — extrato grande demais mesmo com limite ampliado\n\n👤 ${nomeCliente}\n📱 ${remetente}\n\nO extrato cortou de novo (RespostaCortadaError) mesmo com max_tokens em 16000. Já registrei o resumo/saldo final na planilha (Extrato) e já avisei o cliente que não precisa fazer nada — mas as transações individuais NÃO foram lançadas. Precisa completar manualmente (ou pedir o extrato em partes só pra uso interno, sem envolver o cliente de novo).`
+    );
     return;
   }
 
@@ -1152,7 +1214,6 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   }
   ULTIMA_NOTIFICACAO_ERRO.set(chaveCooldownErro, agoraErro);
 
-  const nomeCliente = cliente ? cliente.nome : '(não identificado)';
   await avisarAdmin(
     remetente,
     TEMPLATE_AVISO_ADMIN,
@@ -1176,6 +1237,15 @@ app.get(/^\/webhook(\/.*)?$/, (req, res) => {
 });
 
 app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
+  // Confirma recebimento pra Meta IMEDIATAMENTE, antes de processar qualquer coisa (19/08/2026).
+  // Achado real: um documento grande (ex.: extrato de 350 transações) pode legitimamente levar
+  // minutos pra processar (ver extrairExtratoDeBuffer em index.js) — e a Cloud API da Meta reenvia
+  // o webhook se não receber 200 rápido, o que reprocessa a MESMA mensagem do zero e gera erros
+  // duplicados (caso real: cliente Sirlene recebeu o mesmo erro várias vezes em poucos minutos pro
+  // que ela mandou uma única vez). Daqui pra baixo, TODO o resto do handler roda depois da resposta
+  // já ter ido pra Meta — nenhum outro `res.sendStatus` deve ser chamado neste handler.
+  res.sendStatus(200);
+
   const body = req.body || {};
 
   // Log cru de tudo que chega — sem isso, um payload em formato inesperado não deixa rastro nos logs.
@@ -1184,9 +1254,9 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
   const msg = extrairMensagemDoWebhook(body);
 
   // Sem "messages" no payload (ex.: evento "statuses" — confirmação de entrega/leitura de uma
-  // mensagem que o próprio bot mandou) — nada a processar, só confirma recebimento pra Meta.
+  // mensagem que o próprio bot mandou) — nada a processar.
   if (!msg) {
-    return res.sendStatus(200);
+    return;
   }
 
   const remetente = jidParaFormatoPlanilha(msg.from);
@@ -1212,11 +1282,20 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         console.error('Erro ao criar voucher via comando WhatsApp:', error.message);
         await enviarMensagemWhatsApp(remetente, `❌ Não consegui criar o cupom "${comandoVoucher.codigo}". Tenta de novo em instantes.`).catch(() => {});
       }
-      return res.sendStatus(200);
+      return;
     }
   }
 
   let cliente;
+  // Guarda o buffer/mimeType da mídia em processamento no escopo da função (não só dentro do bloco
+  // `if (interpretado.tipoMidia)`) pra que o catch geral lá embaixo também tenha acesso a eles em
+  // caso de erro — sem isso, tratarErroProcessamento não conseguia oferecer nenhuma recuperação
+  // automática (fatura "total"/"itens", resumo de extrato) pro caminho comum (documento chega já
+  // com legenda certa, sem passar pelo buffer de espera) — só funcionava nos caminhos que já
+  // passavam o buffer manualmente. Achado em 19/08/2026, caso real: extrato da cliente Sirlene,
+  // legendado "extrato" corretamente, nunca acionava a rede de segurança por causa disso.
+  let bufferMidiaAtual = null;
+  let mimeTypeMidiaAtual = null;
 
   try {
     cliente = await buscarClientePorNumero(remetente);
@@ -1224,7 +1303,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     if (!cliente) {
       await enviarMensagemWhatsApp(remetente, 'Esse número ainda não está cadastrado no Interali Pocket. Fale com a Interali para ativar seu acesso: (41) 98788-5732.');
       await notificarAdminSobreLead(remetente);
-      return res.sendStatus(200);
+      return;
     }
 
     // Cliente tinha lançamento(s) em dúvida (duplicidade ambígua) esperando resposta — checa
@@ -1250,7 +1329,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           await sincronizarConciliacaoNaPlanilha(itemAtual.sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
         } else {
           await enviarMensagemWhatsApp(remetente, 'Não entendi — responde só "duplicado" ou "diferente" pra eu saber o que fazer com aquele lançamento. 🙂');
-          return res.sendStatus(200);
+          return;
         }
 
         if (pendencia.fila.length > 0) {
@@ -1259,7 +1338,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           PENDENCIAS_DUPLICIDADE.delete(remetente);
         }
 
-        return res.sendStatus(200);
+        return;
       }
 
       PENDENCIAS_DUPLICIDADE.delete(remetente); // expirou (ou fila já vazia) — segue o fluxo normal abaixo, trata como mensagem nova
@@ -1286,7 +1365,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           const upsell = pendenciaRelatorio.periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
           await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
         }
-        return res.sendStatus(200);
+        return;
       }
       // expirou (mais de 7 dias sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
     }
@@ -1305,7 +1384,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         nomeArquivo: pendente.nomeArquivo,
         legenda: interpretado.texto || '',
       }).catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: interpretado.texto || '', buffer: pendente.buffer, mimeType: pendente.mimeType }, erro));
-      return res.sendStatus(200);
+      return;
     }
 
     // Cliente tinha uma fatura que falhou na leitura item a item (RespostaCortadaError), esperando
@@ -1322,24 +1401,26 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         if (/total/.test(escolha)) {
           await processarFaturaComoResumo(remetente, cliente, sheetId, pendenciaEscolha.buffer, pendenciaEscolha.mimeType, pendenciaEscolha.legendaLower)
             .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: pendenciaEscolha.legendaLower }, erro));
-          return res.sendStatus(200);
+          return;
         }
         if (/item/.test(escolha)) {
           await processarFaturaItemizada(remetente, cliente, sheetId, pendenciaEscolha.buffer, pendenciaEscolha.mimeType, pendenciaEscolha.legendaLower)
             .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: pendenciaEscolha.legendaLower }, erro));
-          return res.sendStatus(200);
+          return;
         }
 
         // Não entendeu a escolha — devolve a pendência (com o buffer) pra não obrigar reenvio.
         PENDENCIAS_ESCOLHA_FATURA.set(remetente, pendenciaEscolha);
         await enviarMensagemWhatsApp(remetente, 'Não entendi — responde "total" ou "itens" pra eu saber como registrar essa fatura. 🙂');
-        return res.sendStatus(200);
+        return;
       }
       // expirou (mais de 15min sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
     }
 
     if (interpretado.tipoMidia) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
+      bufferMidiaAtual = buffer;
+      mimeTypeMidiaAtual = mimeType;
       const legenda = interpretado.legenda || '';
       const pistaArquivo = inferirPistaPorNomeArquivo(interpretado.nomeArquivo);
 
@@ -1347,9 +1428,9 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // BUFFER DE ESPERA (17/08/2026): nem legenda nem nome do arquivo deram pista nenhuma —
         // espera alguns segundos pra ver se o cliente manda um texto explicando logo em seguida
         // (ex.: manda o PDF e só depois escreve "cartão de crédito pago") em vez de já arriscar a
-        // leitura genérica. Responde 200 pro webhook já (não segura a resposta esperando o timer);
-        // o processamento de verdade roda quando o timer disparar OU quando o texto chegar antes
-        // (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
+        // leitura genérica. Não precisa segurar resposta nenhuma pro webhook (já foi mandada no
+        // topo do handler); o processamento de verdade roda quando o timer disparar OU quando o
+        // texto chegar antes (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
         const timer = setTimeout(() => {
           DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
           processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda: '' })
@@ -1357,7 +1438,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         }, JANELA_BUFFER_LEGENDA_MS);
 
         DOCUMENTOS_AGUARDANDO_LEGENDA.set(remetente, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, timer, criadoEm: Date.now() });
-        return res.sendStatus(200);
+        return;
       }
 
       await processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda });
@@ -1499,10 +1580,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     // Lógica de aviso extraída pra tratarErroProcessamento (17/08/2026) — reaproveitada também
     // pelos caminhos que já respondem 200 antes de terminar de processar (buffer de legenda,
     // escolha "total"/"itens"), que não passam mais por este catch.
-    await tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: interpretado.legenda }, error);
+    await tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: interpretado.legenda, buffer: bufferMidiaAtual, mimeType: mimeTypeMidiaAtual }, error);
   }
-
-  res.sendStatus(200);
+  // Sem res.sendStatus aqui — a resposta pra Meta já foi enviada no topo do handler (ver comentário
+  // no início da função). Todo o resto acima é fire-and-forget do ponto de vista do webhook.
 });
 
 // Endpoints para disparo de relatório proativo (chamados por um agendador externo,
