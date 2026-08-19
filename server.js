@@ -590,7 +590,10 @@ async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
     }
   }
 
-  const partes = [`✅ Relatório de vendas processado! ${novas} venda(s) nova(s) registrada(s) (${formatarNumero(valorNovas)}).`];
+  const partes = [
+    `✅ Relatório de vendas processado! ${novas} venda(s) nova(s) registrada(s) (${formatarNumero(valorNovas)}).`,
+    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`,
+  ];
   if (completadas > 0) {
     partes.push(`${completadas} já tinha(m) vindo do extrato e foi(ram) completada(s) com os detalhes certos agora.`);
   }
@@ -652,6 +655,56 @@ function formatarResumoComprovante(dados) {
   if (dados.descricao) {
     linhas.push(`📝 ${dados.descricao}`);
   }
+
+  return linhas.join('\n');
+}
+
+// Confirmação enxuta do extrato pro cliente — SEM listar transação por transação, mesmo que sejam
+// centenas (pedido do Aroldo, 19/08/2026: "não precisa ler tudo e escrever tudo aquilo pro
+// cliente" — o mesmo princípio que já existia pra boleto/fatura, agora explícito pro extrato
+// também). A planilha guarda o detalhe completo de cada transação (é lá que mora a verdade); a
+// mensagem só confirma o essencial pra conferência rápida: quantas transações, quanto
+// entrou/saiu, o período coberto pelos ITENS do extrato (data das transações) e quando o Pocket
+// recebeu/lançou (data de envio no WhatsApp — timestamp de agora, mesmo padrão de
+// formatarResumoComprovante). Isso também deixa a resposta mais rápida de gerar — não depende de
+// formatar uma linha por transação.
+function formatarResumoExtrato(transacoes, avisoDuplicadas) {
+  if (transacoes.length === 0) {
+    return `✅ Extrato recebido! Nenhuma transação nova pra lançar${avisoDuplicadas || ' — todas já estavam registradas'}.`;
+  }
+
+  const entradas = transacoes.filter((t) => t.tipo === 'entrada');
+  const saidas = transacoes.filter((t) => t.tipo === 'saida');
+  const totalEntradas = entradas.reduce((soma, t) => soma + (Number(t.valor) || 0), 0);
+  const totalSaidas = saidas.reduce((soma, t) => soma + (Number(t.valor) || 0), 0);
+
+  const datas = transacoes.map((t) => t.data).filter(Boolean).sort();
+  const periodo = datas.length === 0
+    ? 'não identificado'
+    : datas[0] === datas[datas.length - 1]
+      ? formatarDataBR(datas[0])
+      : `${formatarDataBR(datas[0])} a ${formatarDataBR(datas[datas.length - 1])}`;
+
+  // Saldo final = saldo_apos da transação mais recente (por data) que tiver esse campo — mesmo
+  // critério de obterSaldoAtual (reconciliacao.js), só que restrito a este lote específico.
+  const comSaldo = transacoes.filter((t) => t.data && t.saldo_apos !== null && t.saldo_apos !== undefined);
+  const saldoFinal = comSaldo.length === 0
+    ? null
+    : comSaldo.reduce((maisRecente, t) => (t.data >= maisRecente.data ? t : maisRecente)).saldo_apos;
+
+  const linhas = [
+    `✅ Extrato recebido e lançado!${avisoDuplicadas || ''}`,
+    '',
+    `📅 Período dos itens: ${periodo}`,
+    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`,
+    `📊 ${transacoes.length} transação(ões) — ${entradas.length} entrada(s) (${formatarNumero(totalEntradas)}) / ${saidas.length} saída(s) (${formatarNumero(totalSaidas)})`,
+  ];
+
+  if (saldoFinal !== null) {
+    linhas.push(`💰 Saldo final: ${formatarNumero(saldoFinal)}`);
+  }
+
+  linhas.push('', 'Pergunte "resumo do mês" para ver o fechamento com conciliação.');
 
   return linhas.join('\n');
 }
@@ -931,7 +984,8 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
   const aviso = contasNovas.length === 0 ? ' (já estava registrada, ignorei pra não duplicar)' : '';
   await enviarMensagemWhatsApp(
     remetente,
-    `✅ Registrei a fatura${cartao ? ` do cartão ${cartao}` : ''} como conta a pagar${aviso}: ${formatarNumero(conta.valor)}, vencimento ${conta.vencimento}.\n\n` +
+    `✅ Registrei a fatura${cartao ? ` do cartão ${cartao}` : ''} como conta a pagar${aviso}: ${formatarNumero(conta.valor)}, vencimento ${conta.vencimento}.\n` +
+    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}\n\n` +
     'Ela veio consolidada (sem detalhar item a item) porque é um documento extenso — se quiser o detalhe por lançamento, me avisa que eu tento ler de novo.' +
     dicaLegenda
   );
@@ -983,10 +1037,14 @@ async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mim
   await salvarContasAPagar(sheetId, contasAPagarNovas);
   const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
   const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+  // Total somado (não lista cada conta individualmente) — mesmo princípio do extrato: confirmação
+  // geral pro cliente, detalhe completo por lançamento fica na planilha.
+  const totalContasNovas = contasAPagarNovas.reduce((soma, c) => soma + (Number(c.valor) || 0), 0);
+  const lancadoEm = `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`;
 
   const prefixo = opts.semLegenda
-    ? `✅ Esse documento é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉`
-    : `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao}${avisoContasAPagarDuplicadas}.`;
+    ? `✅ Esse documento é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) (${formatarNumero(totalContasNovas)}) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n${lancadoEm}\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉`
+    : `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao} (${formatarNumero(totalContasNovas)})${avisoContasAPagarDuplicadas}.\n${lancadoEm}`;
 
   await enviarMensagemWhatsApp(remetente, `${prefixo}\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
 }
@@ -1030,12 +1088,12 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
     await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
 
-    const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estavam registradas, ignorei pra não duplicar)` : '';
-    const avisoRegistrados = registrados > 0 ? ` ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
+    const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+    const avisoRegistrados = registrados > 0 ? `\n📌 ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
     const avisoOrfas = orfas.length > 0
       ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
       : '';
-    await enviarMensagemWhatsApp(remetente, `✅ Extrato recebido! Registrei ${transacoesNovas.length} transação(ões)${avisoDuplicadas}.${avisoRegistrados}\n\nPergunte "resumo do mês" para ver o fechamento com conciliação.${avisoOrfas}`);
+    await enviarMensagemWhatsApp(remetente, formatarResumoExtrato(transacoesNovas, avisoDuplicadas) + avisoRegistrados + avisoOrfas);
     return;
   }
 
@@ -1076,7 +1134,8 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
 
     await salvarContasAReceber(sheetId, contasAReceberNovas);
     const avisoContasAReceberDuplicadas = contasAReceberDuplicadas > 0 ? ` (${contasAReceberDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-    await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAReceberNovas.length} conta(s) a receber${avisoContasAReceberDuplicadas}.\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
+    const totalContasAReceberNovas = contasAReceberNovas.reduce((soma, c) => soma + (Number(c.valor) || 0), 0);
+    await enviarMensagemWhatsApp(remetente, `✅ Registrei ${contasAReceberNovas.length} conta(s) a receber (${formatarNumero(totalContasAReceberNovas)})${avisoContasAReceberDuplicadas}.\n🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado (já considera o que ainda vai entrar).`);
     return;
   }
 
