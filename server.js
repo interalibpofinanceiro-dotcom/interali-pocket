@@ -143,7 +143,7 @@ function montarMensagemBoasVindas(nome) {
 // mas o texto cru corrompido não permite saber quais); esta linha do código dizia 🤖💰 mas não há
 // garantia de que essa era a versão exata submetida — se a Meta aprovar com 🎉✅ e o Aroldo quiser
 // trocar por 🤖💰, dá pra editar de novo depois de aprovado (não dá enquanto está PENDING). Ver
-// HISTORICO-COMPLETO.md seção 26.
+// HISTORICO-COMPLETO.md seção 25.
 //   "Olá, {{1}}! Seu Interali Pocket já está ativo 🎉✅\n\n📸 Mande a foto de um comprovante...
 //    🏦 Mande o extrato... 💳 Mande boleto ou fatura... 📊 Pergunte "resumo do mês", "resumo da
 //    semana" ou "previsão"... Dúvidas? Suporte: (41) 98788-5732"
@@ -159,7 +159,7 @@ const TEMPLATE_BOAS_VINDAS = { nome: 'boas_vindas_pocket', idioma: 'pt_BR' };
 // sujeito a opt-out de marketing — errado pra um aviso interno de admin). Categoria de template
 // aprovado não pode ser editada via API, e o token não tem permissão de apagar template — criado
 // um novo com nome diferente em vez disso. O antigo ficou órfão na Meta (não apagado, só não usado
-// mais). Ver HISTORICO-COMPLETO.md seção 26.
+// mais). Ver HISTORICO-COMPLETO.md seção 25.
 const TEMPLATE_ADMIN_NOVO_LEAD = { nome: 'admin_novo_lead_pocket_v2', idioma: 'pt_BR' }; // 1 var: número do lead
 const TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO = { nome: 'admin_pagamento_confirmado_pocket', idioma: 'pt_BR' }; // 3 vars: nome, whatsapp, plano
 const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; // 2 vars: tipo do aviso, detalhe (1 linha só — sem \n)
@@ -172,7 +172,7 @@ const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; //
 // cliente pede "resumo do mês" direto). 1 var: rótulo do que ficou pronto (ex.: "resumo da semana").
 // 21/08/2026: trocado de 'relatorio_pronto_pocket' pra '..._v2' — mesmo motivo do
 // TEMPLATE_ADMIN_NOVO_LEAD acima (acentos/emoji corrompidos no original + categoria MARKETING
-// indevida). Ver HISTORICO-COMPLETO.md seção 26.
+// indevida). Ver HISTORICO-COMPLETO.md seção 25.
 const TEMPLATE_RELATORIO_PRONTO = { nome: 'relatorio_pronto_pocket_v2', idioma: 'pt_BR' };
 
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
