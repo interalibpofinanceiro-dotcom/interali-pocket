@@ -136,15 +136,31 @@ function montarMensagemBoasVindas(nome) {
 
 // Template de boas-vindas submetido pra aprovação da Meta em 13/08/2026 (WhatsApp Manager →
 // Modelos de mensagem, ID 1949215835763557, categoria UTILITY). 1 variável: nome do cliente.
-// Corpo aprovado (não pode divergir do que foi submetido, senão a Meta rejeita o envio):
-//   "Olá, {{1}}! Seu Interali Pocket já está ativo 🤖💰 [...instruções de uso...]"
+// 21/08/2026: auditoria encontrou o texto aprovado com acentos/emoji corrompidos (submetido com
+// encoding errado em 13/08 — provavelmente um problema de codepage do Windows na ferramenta usada
+// pra submeter). Corrigido via API (edita template aprovado, entra em revisão de novo) com o texto
+// reconstruído abaixo — os emoji da linha 1 são um chute (🎉✅, o original tinha 2 emoji também,
+// mas o texto cru corrompido não permite saber quais); esta linha do código dizia 🤖💰 mas não há
+// garantia de que essa era a versão exata submetida — se a Meta aprovar com 🎉✅ e o Aroldo quiser
+// trocar por 🤖💰, dá pra editar de novo depois de aprovado (não dá enquanto está PENDING). Ver
+// HISTORICO-COMPLETO.md seção 26.
+//   "Olá, {{1}}! Seu Interali Pocket já está ativo 🎉✅\n\n📸 Mande a foto de um comprovante...
+//    🏦 Mande o extrato... 💳 Mande boleto ou fatura... 📊 Pergunte "resumo do mês", "resumo da
+//    semana" ou "previsão"... Dúvidas? Suporte: (41) 98788-5732"
 const TEMPLATE_BOAS_VINDAS = { nome: 'boas_vindas_pocket', idioma: 'pt_BR' };
 
 // Templates de aviso pro ADMIN, submetidos em 13/08/2026 junto com o de boas-vindas — cobrem
 // todo aviso que o bot manda pro admin (Aroldo) sem ele ter mandado mensagem recente (fora da
 // janela de 24h, precisa de template pra garantir entrega). Dois dedicados (lead e pagamento
 // confirmado, os eventos de maior valor) + um genérico (demais avisos administrativos).
-const TEMPLATE_ADMIN_NOVO_LEAD = { nome: 'admin_novo_lead_pocket', idioma: 'pt_BR' }; // 1 var: número do lead
+// 21/08/2026: trocado de 'admin_novo_lead_pocket' pra '..._v2' — o original tinha 2 problemas
+// achados numa auditoria: (1) texto aprovado com acentos/emoji corrompidos ("Interali Pocket ?
+// novo lead" em vez de "— novo lead"), e (2) categoria MARKETING em vez de UTILITY (custa mais,
+// sujeito a opt-out de marketing — errado pra um aviso interno de admin). Categoria de template
+// aprovado não pode ser editada via API, e o token não tem permissão de apagar template — criado
+// um novo com nome diferente em vez disso. O antigo ficou órfão na Meta (não apagado, só não usado
+// mais). Ver HISTORICO-COMPLETO.md seção 26.
+const TEMPLATE_ADMIN_NOVO_LEAD = { nome: 'admin_novo_lead_pocket_v2', idioma: 'pt_BR' }; // 1 var: número do lead
 const TEMPLATE_ADMIN_PAGAMENTO_CONFIRMADO = { nome: 'admin_pagamento_confirmado_pocket', idioma: 'pt_BR' }; // 3 vars: nome, whatsapp, plano
 const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; // 2 vars: tipo do aviso, detalhe (1 linha só — sem \n)
 
@@ -154,7 +170,10 @@ const TEMPLATE_AVISO_ADMIN = { nome: 'aviso_admin_pocket', idioma: 'pt_BR' }; //
 // bot manda só esse "avisador" fixo primeiro; quando o cliente responde qualquer coisa, abre a
 // janela de 24h e AÍ SIM o relatório completo sai em texto livre (igual já funciona quando o
 // cliente pede "resumo do mês" direto). 1 var: rótulo do que ficou pronto (ex.: "resumo da semana").
-const TEMPLATE_RELATORIO_PRONTO = { nome: 'relatorio_pronto_pocket', idioma: 'pt_BR' };
+// 21/08/2026: trocado de 'relatorio_pronto_pocket' pra '..._v2' — mesmo motivo do
+// TEMPLATE_ADMIN_NOVO_LEAD acima (acentos/emoji corrompidos no original + categoria MARKETING
+// indevida). Ver HISTORICO-COMPLETO.md seção 26.
+const TEMPLATE_RELATORIO_PRONTO = { nome: 'relatorio_pronto_pocket_v2', idioma: 'pt_BR' };
 
 // Espelha os planos exibidos em index.html — fonte da verdade fica no backend pra não confiar
 // em valor/nome mandado pelo próprio formulário (alguém poderia adulterar o payload do fetch).
