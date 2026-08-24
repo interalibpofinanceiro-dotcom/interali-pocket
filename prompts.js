@@ -69,7 +69,7 @@ const PROMPT_EXTRACAO = `Você é um especialista em extração de dados finance
 Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
 
 {
-  "tipo_documento": "comprovante_pix | comprovante_ted | comprovante_boleto | nota_fiscal | cupom_fiscal | recibo | fatura_cartao_credito | outro",
+  "tipo_documento": "comprovante_pix | comprovante_ted | comprovante_boleto | nota_fiscal | cupom_fiscal | recibo | fatura_cartao_credito | extrato_bancario | outro",
   "data": "YYYY-MM-DD",
   "hora": "HH:MM ou null se não identificado",
   "valor": 0.00,
@@ -112,6 +112,7 @@ REGRAS GERAIS:
 - Se o documento não tiver itens detalhados (ex.: comprovante de PIX simples), retorne "itens" como array vazio [].
 - Se algum campo não puder ser identificado com confiança, use null (nunca invente informação).
 - IMPORTANTE — fatura de cartão de crédito com múltiplos lançamentos: se o documento for uma FATURA DE CARTÃO (não um comprovante único), use "tipo_documento": "fatura_cartao_credito". Isso é só um sinal para quem for processar o resultado depois saber que precisa tratar item a item (cada lançamento da fatura é uma conta a pagar separada, não um único gasto) — mesmo assim, preencha "valor" com o total da fatura e "itens" com a lista de lançamentos, normalmente.
+- IMPORTANTE — extrato bancário sem legenda avisando (23/08/2026, caso real: extrato de conta PJ/MEI de banco digital como Cora/Inter/Nubank, várias páginas, sem a palavra "extrato" em lugar nenhum): se o documento tiver cabeçalho ou estrutura de EXTRATO DE CONTA — títulos como "Extrato de Conta", "Movimentação", "Saldo Anterior"/"Saldo do Dia"/"Saldo Final", e uma LISTA de vários débitos e créditos ao longo do período (não um único pagamento) — use "tipo_documento": "extrato_bancario", mesmo que pareça à primeira vista uma fatura de cartão ou um único lançamento grande. NÃO tente resumir isso num "valor" único nem escolher só a maior transação — isso é só um sinal de tipo pra quem processa o resultado depois reprocessar como extrato de verdade (transação por transação); não precisa preencher os outros campos com precisão nesse caso.
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
 // Lançamento manual por texto — cliente descreve um gasto/recebimento sem foto de comprovante

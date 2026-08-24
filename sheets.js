@@ -445,13 +445,19 @@ async function salvarContasAPagar(spreadsheetId, contas) {
     conta.grupo_dre || '',
   ]);
 
-  await sheets.spreadsheets.values.append({
+  const resposta = await sheets.spreadsheets.values.append({
     spreadsheetId,
     range: `${ABA_CONTAS_A_PAGAR}!A:J`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: linhas },
   });
+
+  // Devolve a linha da PRIMEIRA conta gravada (23/08/2026) — só é preciso/usado quando `contas`
+  // tem exatamente 1 item (caso da fatura-resumo pendente, ver processarFaturaComoResumo em
+  // server.js), pra alimentar a memória de correção de curto prazo. Com mais de 1 conta o valor
+  // ainda é o da primeira linha do lote, mas quem chama com lote não usa esse retorno.
+  return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
 }
 
 async function buscarContasAPagar(spreadsheetId) {
@@ -518,6 +524,45 @@ async function buscarContasAReceber(spreadsheetId) {
   }));
 }
 
+// Descobre o sheetId NUMÉRICO (gid) de uma aba pelo nome — batchUpdate.deleteDimension (usado por
+// removerLinha, abaixo) opera por índice de aba, diferente de values.update/append que usam o nome.
+async function obterSheetIdNumerico(sheets, spreadsheetId, nomeAba) {
+  const planilha = await sheets.spreadsheets.get({ spreadsheetId });
+  const aba = planilha.data.sheets.find((a) => a.properties.title === nomeAba);
+  return aba ? aba.properties.sheetId : null;
+}
+
+// Remove uma linha específica de uma aba (23/08/2026, pedido do Aroldo: memória de correção de
+// curto prazo — "apaga o último"/"esse foi extrato" precisa desfazer o lançamento anterior de
+// verdade, não só marcar). ⚠️ Só é seguro chamar isso pra linha MAIS RECENTE da aba (a última
+// gravada) — deletar uma linha do meio desalinha qualquer número de linha já guardado em outro
+// lugar (ex.: Lancamento_Linha em ItensComprovante, ou candidatos de duplicidade em memória
+// apontando pra linhas abaixo dela). O chamador (ver aplicarCorrecaoUltimoDocumento em server.js)
+// só usa isso dentro da janela de 10min da memória de correção, exatamente pra essa garantia valer.
+async function removerLinha(spreadsheetId, nomeAba, numeroLinha) {
+  if (!numeroLinha) return false;
+  const sheets = getSheetsClient();
+  const sheetId = await obterSheetIdNumerico(sheets, spreadsheetId, nomeAba);
+  if (sheetId === null) return false;
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [{
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: 'ROWS',
+            startIndex: numeroLinha - 1, // deleteDimension é 0-indexed; numeroLinha vem 1-indexed (igual todo o resto do arquivo)
+            endIndex: numeroLinha,
+          },
+        },
+      }],
+    },
+  });
+  return true;
+}
+
 module.exports = {
   salvarComprovante,
   atualizarLancamento,
@@ -534,4 +579,7 @@ module.exports = {
   salvarDespesaFixa,
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
+  removerLinha,
+  ABA_LANCAMENTOS,
+  ABA_CONTAS_A_PAGAR,
 };

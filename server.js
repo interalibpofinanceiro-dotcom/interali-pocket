@@ -31,6 +31,9 @@ const {
   salvarDespesaFixa,
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
+  removerLinha,
+  ABA_LANCAMENTOS,
+  ABA_CONTAS_A_PAGAR,
 } = require('./sheets');
 const {
   gerarResumo,
@@ -401,6 +404,179 @@ const TIMEOUT_PENDENCIA_ESCOLHA_FATURA_MS = 15 * 60 * 1000;
 const DOCUMENTOS_AGUARDANDO_LEGENDA = new Map();
 const JANELA_BUFFER_LEGENDA_MS = 7000;
 
+// Memória de correção de curto prazo (23/08/2026, pedido do Aroldo) — guarda o ÚLTIMO documento
+// processado que virou EXATAMENTE UMA linha nova (comprovante único, lançamento por texto, ou
+// fatura registrada como resumo — paga ou pendente), por remetente, por até 10 minutos. Permite o
+// cliente corrigir com uma mensagem de texto ("esse foi extrato", "não é cartão, é extrato", "apaga
+// o último") sem precisar reenviar o arquivo. Guarda o BUFFER original (não só a referência) porque
+// reclassificar precisa reprocessar o documento do zero com o roteamento certo.
+//
+// Escopo deliberado: só cobre resultado de UMA linha só. Extrato, fatura itemizada (várias contas)
+// e lote de vendas geram várias linhas + efeitos colaterais de conciliação (ver
+// registrarOrfaosDoExtrato/sincronizarConciliacaoNaPlanilha) — desfazer isso às cegas por comando de
+// texto arrisca mais do que ajuda. Nesses casos aplicarCorrecaoUltimoDocumento avisa o time em vez
+// de tentar reverter sozinho (mesmo princípio de "não corrigir sozinho um monte de mensagens
+// estranhas sem investigar" já usado no resto do arquivo).
+const MEMORIA_ULTIMO_DOCUMENTO = new Map(); // remetente -> { sheetId, aba, linha, buffer, mimeType, nomeArquivo, resumoTipo, aguardandoTipo, criadoEm }
+const TTL_MEMORIA_CORRECAO_MS = 10 * 60 * 1000;
+
+function registrarMemoriaCorrecao(remetente, entrada) {
+  if (!remetente) return;
+  MEMORIA_ULTIMO_DOCUMENTO.set(remetente, { ...entrada, criadoEm: Date.now() });
+}
+
+function obterMemoriaCorrecao(remetente) {
+  const entrada = MEMORIA_ULTIMO_DOCUMENTO.get(remetente);
+  if (!entrada) return null;
+  if (Date.now() - entrada.criadoEm > TTL_MEMORIA_CORRECAO_MS) {
+    MEMORIA_ULTIMO_DOCUMENTO.delete(remetente);
+    return null;
+  }
+  return entrada;
+}
+
+// Nomes amigáveis pra mensagem de confirmação — mesma chave usada em resumoTipo ao registrar a
+// memória (ver processarLancamentoExtraido/processarFaturaComoResumo).
+const NOME_AMIGAVEL_RESUMO_TIPO = {
+  comprovante: 'comprovante',
+  fatura_paga: 'fatura de cartão (já paga)',
+  fatura_pendente: 'fatura de cartão (conta a pagar)',
+  lancamento_texto: 'lançamento',
+};
+
+// Reconhece uma mensagem de CORREÇÃO ao último documento processado — "esse foi extrato", "não é
+// cartão de crédito, é extrato", "arruma isso", "apaga o último". Só é chamada quando existe memória
+// recente (ver obterMemoriaCorrecao) — sem isso, essas frases caem na pergunta livre normal, como
+// sempre caíram. Prioridade de palavra-chave (extrato > fatura/cartão > boleto) igual a
+// inferirPistaPorNomeArquivo, pelo mesmo motivo: "não é cartão, é extrato" precisa decidir por
+// EXTRATO, não parar na primeira palavra que aparece na frase.
+function interpretarCorrecao(texto) {
+  const t = (texto || '').trim().toLowerCase();
+  if (!t) return null;
+
+  let tipoAlvo = null;
+  if (/extrato/.test(t)) tipoAlvo = 'extrato';
+  else if (/fatura|cart[ãa]o/.test(t)) tipoAlvo = 'fatura';
+  else if (/boleto/.test(t)) tipoAlvo = 'boleto';
+
+  // Sem \b DEPOIS de um radical (só ANTES) de propósito: no JS, \b considera letra acentuada
+  // (é/ã/ç...) como caractere "não-palavra" (\w é só [A-Za-z0-9_]) — um \b logo depois de "é" ou
+  // no meio de "corrigir"/"desfaz" nunca bate (transição não-palavra→não-palavra/espaço não conta
+  // como fronteira), o que fazia esses radicais falharem silenciosamente contra qualquer
+  // conjugação. `\b` na FRENTE ainda evita casar no meio de uma palavra maior sem relação.
+  const pedeApagar = /\b(apag|desf|cancel|remov|estorn)/.test(t);
+  const pedeArrumar = /\b(arruma|corrig|ajusta|errad)/.test(t);
+  // Afirmação direta de que o documento era outro tipo — "esse foi extrato", "não é cartão, é
+  // extrato", "isso é um boleto", "na verdade é extrato" — sem usar nenhum verbo de "corrigir".
+  // Só conta como correção quando vem JUNTO de um tipoAlvo reconhecido (senão "isso é ótimo"
+  // viraria correção à toa). Mesmo cuidado de não terminar com \b logo após "[ée]" (ver acima).
+  const pedeReclassificarAfirmativo = Boolean(tipoAlvo) && (
+    /\b(esse|isso|essa|aquele|aquilo|n[ãa]o)\s+(foi|era|[ée])/.test(t) ||
+    /^(na verdade\s+)?(era|foi|[ée])\s+/.test(t)
+  );
+
+  if (!pedeApagar && !pedeArrumar && !pedeReclassificarAfirmativo) return null;
+
+  return { apagarSemReclassificar: pedeApagar && !tipoAlvo, tipoAlvo };
+}
+
+// Aplica (ou pergunta antes de aplicar) uma correção ao último documento processado. Devolve `true`
+// quando tratou a mensagem (chamador não deve seguir o roteamento normal de texto), `false` quando
+// não era uma correção (segue o fluxo normal). Chamado ANTES de qualquer outro roteamento de texto
+// (comando "lançar:", pergunta livre etc.) — mesma prioridade das outras pendências deste arquivo.
+async function aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, texto) {
+  const memoria = obterMemoriaCorrecao(remetente);
+
+  // Cliente já tinha sido perguntado "era extrato, fatura ou boleto?" (ver ramo final abaixo) —
+  // trata a resposta atual diretamente como o tipo-alvo, sem precisar repetir "arruma"/"corrige".
+  if (memoria && memoria.aguardandoTipo) {
+    const t = texto.toLowerCase();
+    const tipoAlvo = /extrato/.test(t) ? 'extrato' : /fatura|cart[ãa]o/.test(t) ? 'fatura' : /boleto/.test(t) ? 'boleto' : null;
+    if (!tipoAlvo) {
+      await enviarMensagemWhatsApp(remetente, 'Não entendi — responde só *extrato*, *fatura* ou *boleto* pra eu corrigir certinho.');
+      return true;
+    }
+    return executarCorrecao(remetente, cliente, sheetId, memoria, tipoAlvo);
+  }
+
+  const correcao = interpretarCorrecao(texto);
+  if (!correcao) return false;
+
+  if (!memoria) {
+    await enviarMensagemWhatsApp(remetente, 'Não achei nenhum documento recente pra corrigir (a memória de correção dura só 10 minutos, ou o último documento gerou mais de um lançamento — extrato/fatura detalhada/lote de vendas não dá pra desfazer sozinho por aqui). Pode reenviar o arquivo certo, ou me chamar que eu reviso na planilha.');
+    return true;
+  }
+
+  if (correcao.apagarSemReclassificar) {
+    return executarCorrecao(remetente, cliente, sheetId, memoria, null);
+  }
+
+  if (correcao.tipoAlvo) {
+    return executarCorrecao(remetente, cliente, sheetId, memoria, correcao.tipoAlvo);
+  }
+
+  // "Arruma isso"/"tá errado", sem dizer pra qual tipo — pergunta antes de agir, mesmo padrão de
+  // PENDENCIAS_ESCOLHA_FATURA ("total"/"itens") já usado no resto do arquivo.
+  await enviarMensagemWhatsApp(remetente, 'Entendi que algo saiu errado no último documento — mas pra corrigir certinho, me diz: era um *extrato bancário*, uma *fatura de cartão* ou um *boleto*?');
+  registrarMemoriaCorrecao(remetente, { ...memoria, aguardandoTipo: true });
+  return true;
+}
+
+// Desfaz o lançamento anterior (remove a linha da planilha) e, se um tipoAlvo foi indicado e o
+// buffer original ainda está em memória, reprocessa o mesmo documento já com o roteamento certo
+// (legenda forçada = tipoAlvo, pulando qualquer heurística — o cliente acabou de confirmar de viva
+// voz, não precisa adivinhar de novo).
+async function executarCorrecao(remetente, cliente, sheetId, memoria, tipoAlvo) {
+  const nomeAmigavel = NOME_AMIGAVEL_RESUMO_TIPO[memoria.resumoTipo] || 'lançamento';
+  MEMORIA_ULTIMO_DOCUMENTO.delete(remetente);
+
+  const removeu = await removerLinha(sheetId, memoria.aba, memoria.linha).catch((erro) => {
+    console.error('Falha ao remover linha na correção de curto prazo:', erro.message);
+    return false;
+  });
+
+  if (!removeu) {
+    await enviarMensagemWhatsApp(remetente, 'Entendi a correção, mas não consegui desfazer o lançamento anterior automaticamente. Vou avisar o time pra ajustar na planilha.');
+    await avisarAdmin(
+      remetente,
+      TEMPLATE_AVISO_ADMIN,
+      ['Correção manual necessária', `${cliente ? cliente.nome : remetente} pediu correção — remoção automática falhou (aba ${memoria.aba}, linha ${memoria.linha})`],
+      `🔴 AÇÃO NECESSÁRIA — correção manual\n\n👤 ${cliente ? cliente.nome : '(não identificado)'}\n📱 ${remetente}\n\nCliente pediu pra corrigir o último ${nomeAmigavel}, mas remover a linha ${memoria.linha} (aba ${memoria.aba}) falhou automaticamente. Corrigir na planilha manualmente${tipoAlvo ? ` — cliente disse que o correto era: ${tipoAlvo}` : ''}.`
+    );
+    return true;
+  }
+
+  if (!tipoAlvo) {
+    await enviarMensagemWhatsApp(remetente, `✅ Desfiz o último lançamento (${nomeAmigavel}). Se quiser, me manda o documento certo agora.`);
+    return true;
+  }
+
+  if (!memoria.buffer) {
+    await enviarMensagemWhatsApp(remetente, `✅ Desfiz o último lançamento (${nomeAmigavel}). Não guardei mais o arquivo original pra reprocessar sozinho — me manda de novo dizendo que é ${tipoAlvo === 'extrato' ? 'extrato bancário' : tipoAlvo}?`);
+    return true;
+  }
+
+  const nomeTipoAlvo = tipoAlvo === 'extrato' ? 'Extrato Bancário' : tipoAlvo === 'fatura' ? 'Fatura de Cartão' : 'Boleto';
+  await enviarMensagemWhatsApp(remetente, `Entendido! Desfiz o lançamento anterior de ${nomeAmigavel} e vou processar o documento como ${nomeTipoAlvo}. Já te aviso quando terminar!`);
+
+  try {
+    await processarMidiaRecebida(remetente, cliente, sheetId, {
+      buffer: memoria.buffer,
+      mimeType: memoria.mimeType,
+      nomeArquivo: memoria.nomeArquivo,
+      legenda: tipoAlvo, // força o roteamento certo — o cliente acabou de confirmar o tipo
+    });
+  } catch (erro) {
+    await tratarErroProcessamento(
+      remetente,
+      cliente,
+      { tipoMidia: 'document', legenda: tipoAlvo, buffer: memoria.buffer, mimeType: memoria.mimeType },
+      erro
+    );
+  }
+  return true;
+}
+
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
 // rejeitar o lote inteiro.
@@ -510,7 +686,11 @@ async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, 
 // Processa um lançamento já extraído (de foto de comprovante OU do comando "lançar:" por texto) —
 // checa duplicidade e decide se salva direto, avisa que já existe, ou pergunta pro cliente. Mesmo
 // fluxo nos dois casos, só muda de onde veio o `dadosExtraidos` (imagem vs. texto).
-async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos) {
+// `documentoOriginal` (23/08/2026, opcional) = { buffer, mimeType, nomeArquivo, resumoTipo } —
+// passado só quando veio de uma mídia (não do comando "lançar:" por texto, que não tem arquivo).
+// Quando presente e o lançamento é NOVO (não duplicado/completar/ambíguo), grava na memória de
+// correção de curto prazo (ver MEMORIA_ULTIMO_DOCUMENTO) pra permitir corrigir por texto depois.
+async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, documentoOriginal = null) {
   const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
   const resultado = await classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosExistentes);
 
@@ -549,6 +729,21 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
   if (resultado.status === 'ambiguo') {
     await perguntarProximaDuplicidadeAmbigua(remetente, { dados: dadosExtraidos, candidato: resultado.candidato });
     return;
+  }
+
+  // Lançamento NOVO de verdade (não duplicado/completar/ambíguo) — se veio de um documento (não do
+  // comando "lançar:" por texto), guarda na memória de correção de curto prazo (ver
+  // aplicarCorrecaoUltimoDocumento) pra permitir "esse foi extrato"/"apaga o último" sem reenvio.
+  if (documentoOriginal && resultado.linhaLancamento) {
+    registrarMemoriaCorrecao(remetente, {
+      sheetId,
+      aba: ABA_LANCAMENTOS,
+      linha: resultado.linhaLancamento,
+      buffer: documentoOriginal.buffer,
+      mimeType: documentoOriginal.mimeType,
+      nomeArquivo: documentoOriginal.nomeArquivo,
+      resumoTipo: documentoOriginal.resumoTipo || 'comprovante',
+    });
   }
 
   await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
@@ -841,8 +1036,15 @@ function inferirPistaPorNomeArquivo(nomeArquivo) {
 // as mesmas checagens de palavra-chave que já existiam só com a legenda — não muda a lógica de
 // roteamento, só amplia de onde a pista pode vir.
 function montarSinalRoteamento(legenda, nomeArquivo) {
+  const legendaLower = (legenda || '').toLowerCase();
   const pista = inferirPistaPorNomeArquivo(nomeArquivo);
-  return `${(legenda || '').toLowerCase()} ${pista}`.trim();
+  // Nome de banco (23/08/2026) — checado tanto na legenda quanto no nome do arquivo, cada um só
+  // "conta" se o próprio texto onde apareceu não já tiver uma pista mais específica (ver
+  // pistaPorNomeBanco) — assim "extrato Cora" e "cora_extrato_agosto.pdf" batem, mas "fatura cartão
+  // Itaú" continua indo pra fatura mesmo citando o banco.
+  const pistaBancoLegenda = pistaPorNomeBanco(legendaLower);
+  const pistaBancoArquivo = pistaPorNomeBanco((nomeArquivo || '').toLowerCase());
+  return `${legendaLower} ${pista} ${pistaBancoLegenda} ${pistaBancoArquivo}`.trim();
 }
 
 // Estimativa best-effort do nº de páginas de um PDF (17/08/2026) — sem depender de biblioteca
@@ -870,6 +1072,50 @@ function documentoPareceExtenso(buffer, mimeType) {
   if (paginas >= 3) return true;
   if (paginas === 0 && buffer.length > LIMITE_BYTES_PDF_PROVAVEL_EXTENSO) return true;
   return false;
+}
+
+// Detecta estrutura de EXTRATO BANCÁRIO pelo CONTEÚDO do PDF (23/08/2026, caso real: extrato do
+// Cora com nome de arquivo tipo "silvana-rosa-vicente-..._01082026_a_31082026.pdf" — sem a palavra
+// "extrato" nem na legenda nem no nome do arquivo, então nem inferirPistaPorNomeArquivo nem a
+// legenda davam pista nenhuma, e o documento caía na extração genérica de comprovante único (por
+// isso o extrato inteiro virou um único "débito de fatura"). Última rede de segurança, só entra em
+// jogo quando NENHUM outro sinal (legenda, nome de arquivo) já decidiu o roteamento — ver o uso em
+// processarMidiaRecebida. Mesma técnica best-effort de contarPaginasPdfAproximado (lê o texto bruto
+// do PDF em latin1, sem biblioteca externa); PDF com stream comprimido pode não achar nada — nesse
+// caso retorna false e o documento cai no fallback de sempre (extenso? resumo : comprovante único).
+// Exige pelo menos 2 marcadores batendo (não 1 só) pra não confundir um boleto/fatura que cite
+// "saldo" de passagem com um extrato de verdade.
+function conteudoPareceExtratoBancario(buffer, mimeType) {
+  if (mimeType !== 'application/pdf') return false;
+  const texto = buffer.toString('latin1');
+  const marcadores = [
+    /extrato\s+de\s+conta/i,
+    /extrato\s+banc[áa]rio/i,
+    /movimenta[çc][ãa]o\s+(financeira|banc[áa]ria|do\s+per[íi]odo|de\s+conta)/i,
+    /saldo\s+anterior/i,
+    /saldo\s+do\s+dia/i,
+    /saldo\s+final/i,
+  ];
+  const acertos = marcadores.filter((regex) => regex.test(texto)).length;
+  return acertos >= 2;
+}
+
+// Nome de banco/fintech digital SOZINHO na legenda ou no nome do arquivo (23/08/2026) — sinal
+// FRACO de extrato, só usado quando não há nenhuma pista mais específica já presente no mesmo
+// texto (se a legenda já falar em "fatura"/"cartão"/"boleto"/"pagar", esse sinal mais específico
+// continua valendo — "fatura cartão Itaú" precisa continuar indo pra fatura, não virar extrato só
+// por causa do nome do banco). Cobre o pedido do Aroldo de reconhecer "cora", "itaú", "santander"
+// etc. direto na legenda, sem precisar da palavra "extrato" junto.
+// (?![a-zà-ÿ]) no lugar de um \b final de propósito: a variante "Itaú" termina em "ú", e o \b do
+// JS trata letra acentuada como caractere NÃO-palavra (\w é só [A-Za-z0-9_]) — um \b logo depois de
+// "ú" nunca bate (fim de string ou "ú"+espaço não contam como fronteira nesse caso), então "itaú"
+// sozinho na legenda nunca batia, só "itau" sem acento. O lookahead cobre os dois.
+const REGEX_BANCOS_DIGITAIS = /\b(cora|ita[uú]|santander|nubank|bradesco|sicoob|sicredi|banco\s*inter|caixa\s*econ[ôo]mica|banco\s+do\s+brasil)(?![a-zà-ÿ])/i;
+
+function pistaPorNomeBanco(texto) {
+  if (!texto) return '';
+  if (/\b(fatura|cart[ãa]o|boleto|pagar)\b/i.test(texto)) return '';
+  return REGEX_BANCOS_DIGITAIS.test(texto) ? 'extrato' : '';
 }
 
 // Reconhece o comando do admin pra criar voucher direto pelo WhatsApp, sem precisar de
@@ -980,7 +1226,9 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
       itens: [],
       observacoes: 'Lançamento consolidado (fatura extensa) — sem detalhamento item a item. Se precisar do detalhe, peça pra tentar ler os itens de novo.',
     };
-    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, {
+      buffer, mimeType, nomeArquivo: opts.nomeArquivo || null, resumoTipo: 'fatura_paga',
+    });
     if (dicaLegenda) await enviarMensagemWhatsApp(remetente, dicaLegenda.trim()).catch(() => {});
     return;
   }
@@ -998,7 +1246,19 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
 
   const contasExistentes = await buscarContasAPagar(sheetId);
   const contasNovas = filtrarContasAPagarNovas([conta], contasExistentes);
-  await salvarContasAPagar(sheetId, contasNovas);
+  const linhaContaNova = await salvarContasAPagar(sheetId, contasNovas);
+
+  // Registrada de verdade (não era duplicata) — grava na memória de correção de curto prazo, mesmo
+  // princípio do lançamento único acima (ver processarLancamentoExtraido).
+  if (contasNovas.length > 0 && linhaContaNova) {
+    registrarMemoriaCorrecao(remetente, {
+      sheetId,
+      aba: ABA_CONTAS_A_PAGAR,
+      linha: linhaContaNova,
+      buffer, mimeType, nomeArquivo: opts.nomeArquivo || null,
+      resumoTipo: 'fatura_pendente',
+    });
+  }
 
   const aviso = contasNovas.length === 0 ? ' (já estava registrada, ignorei pra não duplicar)' : '';
   await enviarMensagemWhatsApp(
@@ -1075,9 +1335,18 @@ async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mim
 // (throw) em caso de erro — quem chama decide como avisar o cliente (ver tratarErroProcessamento).
 async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo, legenda }) {
   const legendaLower = (legenda || '').toLowerCase();
-  const sinal = montarSinalRoteamento(legenda, nomeArquivo);
+  let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
+
+  // Nenhuma pista textual (legenda, nome de arquivo, nome de banco) decidiu nada ainda — última
+  // rede de segurança: olha o CONTEÚDO do PDF (23/08/2026, ver conteudoPareceExtratoBancario).
+  // Só entra em jogo na ausência total de sinal mais específico, mesmo princípio de precedência já
+  // usado em pistaPorNomeBanco — uma legenda "fatura"/"boleto"/"cartão" explícita nunca é sobreposta.
+  if (!/\b(extrato|fatura|cart[ãa]o|boleto|pagar|vend|sistema|pdv|receber|cobran[çc]a)\b/.test(sinal) && conteudoPareceExtratoBancario(buffer, mimeType)) {
+    console.log('Conteúdo do PDF reconhecido como extrato bancário (sem pista textual) — roteando pra extrato.');
+    sinal = `${sinal} extrato`.trim();
+  }
 
   if (sinal.includes('extrato')) {
     const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
@@ -1164,11 +1433,23 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   // único, que foi justamente o que causou a leitura cortada no meio (17/08/2026, caso real do
   // Aroldo com a fatura de cartão paga mandada sem legenda).
   if (extenso) {
-    await processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, { semLegenda: semLegendaExplicita });
+    await processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, { semLegenda: semLegendaExplicita, nomeArquivo });
     return;
   }
 
   const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
+
+  if (dadosExtraidos.tipo_documento === 'extrato_bancario') {
+    // Nenhuma pista textual nem de conteúdo (conteudoPareceExtratoBancario, PDF pode ter stream
+    // comprimido e não dar pra ler em texto bruto) bateu ANTES da extração — mas o próprio Claude,
+    // já lendo o documento renderizado de verdade, reconheceu a estrutura de extrato (ver regra em
+    // PROMPT_EXTRACAO, 23/08/2026). Reprocessa do zero como extrato (mesmo caminho de
+    // aplicarCorrecaoUltimoDocumento) em vez de tentar aproveitar essa leitura de comprovante único
+    // — ela não tem as transações individuais, só serviu de sinal de tipo.
+    console.log('Claude identificou o documento como extrato bancário (sem pista textual/conteúdo) — reprocessando como extrato.');
+    await processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo, legenda: 'extrato' });
+    return;
+  }
 
   if (dadosExtraidos.tipo_documento === 'fatura_cartao_credito') {
     // Chegou sem legenda "fatura"/"boleto"/"cartão" (ex.: cliente só mandou o arquivo), mas o
@@ -1183,7 +1464,9 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
 
     console.log('Dados extraídos:', JSON.stringify(dadosExtraidos, null, 2));
 
-    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+    await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, {
+      buffer, mimeType, nomeArquivo, resumoTipo: 'comprovante',
+    });
   }
 }
 
@@ -1489,12 +1772,24 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       // expirou (mais de 15min sem resposta) — segue o fluxo normal abaixo, trata como mensagem nova
     }
 
+    // Cliente pode estar corrigindo o ÚLTIMO documento processado ("esse foi extrato", "não é
+    // cartão, é extrato", "apaga o último") — checa ANTES do roteamento normal de texto (mesma
+    // prioridade das outras pendências acima), senão a correção cairia na pergunta livre pro Claude.
+    // Só entra em jogo se existir memória recente (ver MEMORIA_ULTIMO_DOCUMENTO) — sem isso,
+    // aplicarCorrecaoUltimoDocumento devolve false e segue o fluxo normal abaixo.
+    if (!interpretado.tipoMidia && await aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, interpretado.texto || '')) {
+      return;
+    }
+
     if (interpretado.tipoMidia) {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       bufferMidiaAtual = buffer;
       mimeTypeMidiaAtual = mimeType;
       const legenda = interpretado.legenda || '';
-      const pistaArquivo = inferirPistaPorNomeArquivo(interpretado.nomeArquivo);
+      // Pista pelo nome do arquivo OU pelo nome de um banco digital no nome do arquivo (23/08/2026,
+      // ver pistaPorNomeBanco) — qualquer uma das duas já é sinal suficiente pra pular o buffer de
+      // espera de legenda abaixo.
+      const pistaArquivo = inferirPistaPorNomeArquivo(interpretado.nomeArquivo) || pistaPorNomeBanco((interpretado.nomeArquivo || '').toLowerCase());
 
       if (!legenda.trim() && !pistaArquivo) {
         // BUFFER DE ESPERA (17/08/2026): nem legenda nem nome do arquivo deram pista nenhuma —
@@ -1526,7 +1821,11 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // depois entra no MESMO fluxo de checagem de duplicidade/salvamento que a foto usa.
         const dadosExtraidos = await extrairComprovanteDeTexto(comandoLancamento);
         console.log('Lançamento manual extraído do texto:', JSON.stringify(dadosExtraidos, null, 2));
-        await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos);
+        // Sem buffer (não veio de arquivo) — a memória de correção ainda permite "apaga o último",
+        // só não permite reclassificar pra extrato/fatura/boleto (não tem documento pra reprocessar).
+        await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, {
+          buffer: null, mimeType: null, nomeArquivo: null, resumoTipo: 'lancamento_texto',
+        });
       } else if (comandoDespesaFixa) {
         const dadosDespesaFixa = await extrairDespesaFixaDeTexto(comandoDespesaFixa);
         console.log('Despesa fixa cadastrada:', JSON.stringify(dadosDespesaFixa, null, 2));
