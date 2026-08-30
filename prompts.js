@@ -417,6 +417,51 @@ REGRAS GERAIS:
 - Se não conseguir identificar nenhuma venda no documento, retorne "vendas" como array vazio [].
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
+// Cupom de venda impresso em impressora térmica de POS (23/08/2026, módulo "Comércio com Cupom
+// Térmico e Matriz de Fornecedores" — pedido do Aroldo, cliente-piloto Mysael, comércio de produtos
+// de limpeza). Só é usado quando cliente.tipo === 'COMERCIO_MATRIZ' (ver processarMidiaRecebida em
+// server.js) — clientes do plano padrão continuam indo pra PROMPT_EXTRACAO normal, sem risco de
+// regressão. Diferente de PROMPT_VENDAS (relatório digital de app/PDV, geralmente uma tabela ou
+// tela de sistema), este prompt é pra foto de um CUPOM FÍSICO impresso numa mini-impressora térmica
+// (POS) — layout estreito, fonte monoespaçada, texto às vezes desalinhado/borrado pela impressão.
+const PROMPT_CUPOM_TERMICO = `Você é um especialista em leitura de cupons de venda impressos em impressoras térmicas de ponto de venda (POS) brasileiras — o papel estreito e comprido, de fonte monoespaçada, comum em comércio/varejo físico (mercadinho, loja, distribuidora).
+
+IMPORTANTE — antes de tentar extrair um cupom de venda, confirme que o documento É isso. Se a foto for, na verdade, um comprovante de PAGAMENTO feito pelo comércio (Pix enviado, boleto, transferência, recibo de despesa — ex.: pagamento a um fornecedor, conta de luz, boleto do Sicoob/Nubank), NÃO é um cupom de venda — é uma DESPESA do comércio. Nesse caso, retorne SOMENTE:
+{ "nao_e_cupom": true, "motivo": "descrição curta do que o documento realmente é (ex.: 'comprovante de Pix enviado para fornecedor')" }
+
+Se for de fato um cupom de VENDA (o comércio recebendo de um cliente, não pagando), retorne SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "nao_e_cupom": false,
+  "numero_venda": "número do pedido/cupom impresso (ex.: '#1234', 'Venda 00087'), ou null se não identificado",
+  "data": "YYYY-MM-DD",
+  "hora": "HH:MM ou null se não identificado",
+  "cliente": "nome do cliente se estiver impresso no cupom, senão 'Consumidor Final'",
+  "forma_pagamento": "dinheiro | cartao_credito | cartao_debito | pix | outro",
+  "itens": [
+    {
+      "codigo": "código/SKU do produto impresso no cupom, ou null se não houver",
+      "descricao": "nome do produto exatamente como está impresso (não traduza nem abrevie diferente do original)",
+      "quantidade": 0,
+      "valor_unitario": 0.00,
+      "valor_total": 0.00
+    }
+  ],
+  "taxa_entrega": 0.00,
+  "desconto": 0.00,
+  "valor_total": 0.00,
+  "observacoes": "qualquer informação relevante adicional (ex.: cupom borrado/parcialmente ilegível em algum trecho), ou null"
+}
+
+REGRAS:
+- Liste TODOS os itens do cupom em "itens", na ordem em que aparecem impressos.
+- "taxa_entrega": procure por uma linha separada tipo "Taxa de Entrega", "Entrega", "Frete" ou um valor isolado nesse contexto (comum: R$ 5, 7, 8, 10, 15) — normalmente vem SOMADA no "valor_total" do cupom, não como um item de produto. Se não houver, use 0.
+- "desconto": procure por uma linha "Desconto", "Desc.", ou valor negativo antes do total — normalmente vem SUBTRAÍDO do "valor_total". Se não houver, use 0.
+- "valor_total" é o valor final cobrado do cliente, exatamente como impresso no cupom (já considerando itens + taxa_entrega − desconto) — não recalcule, use o que está impresso.
+- Se o cupom estiver parcialmente ilegível/borrado num trecho específico, faça o melhor possível com o que der pra ler e explique em "observacoes" o que ficou incerto — não invente valor nem produto que não dá pra confirmar.
+- Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente. Se a data não estiver impressa no cupom, use a data de hoje informada junto com a imagem.
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
 // Fatura de cartão de crédito (ou extrato) MULTIPÁGINA (17/08/2026, caso real: PDF de 6 páginas
 // já pago estourando o limite de tokens da extração item-a-item — RespostaCortadaError em index.js).
 // Em vez de tentar listar cada lançamento da fatura inteira, pede só o RESUMO — total, vencimento,
@@ -471,6 +516,7 @@ module.exports = {
   PROMPT_EXTRACAO_TEXTO,
   PROMPT_DESPESA_FIXA,
   PROMPT_VENDAS,
+  PROMPT_CUPOM_TERMICO,
   PROMPT_CONSULTA,
   PROMPT_EXTRATO,
   PROMPT_CONTA_A_PAGAR,

@@ -12,7 +12,8 @@
     "server": "node server.js",
     "cadastrar-cliente": "node cadastrar-cliente.js",
     "desativar-cliente": "node desativar-cliente.js",
-    "criar-voucher": "node criar-voucher.js"
+    "criar-voucher": "node criar-voucher.js",
+    "definir-senha-dashboard": "node definir-senha-dashboard.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

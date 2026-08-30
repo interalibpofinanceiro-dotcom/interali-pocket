@@ -6,6 +6,7 @@ const {
   extrairComprovanteDeTexto,
   extrairDespesaFixaDeTexto,
   extrairVendasDeBuffer,
+  extrairCupomTermicoDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
   extrairContasAReceberDeBuffer,
@@ -35,6 +36,16 @@ const {
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
 } = require('./sheets');
+const { processarCupomTermico, formatarResumoCupom } = require('./comercio-matriz');
+const {
+  criarSessao,
+  obterSessao,
+  encerrarSessao,
+  extrairTokenDoCookie,
+  verificarSenhaDashboard,
+  montarDadosDashboard,
+  NOME_COOKIE,
+} = require('./dashboard');
 const {
   gerarResumo,
   formatarResumo,
@@ -1339,6 +1350,25 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
 
+  // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
+  // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
+  // impacto nos clientes do plano padrão. Checado ANTES do fallback genérico de comprovante único,
+  // mas DEPOIS de qualquer sinal explícito de extrato/fatura/boleto/vendas/receber acima — uma
+  // legenda "extrato"/"fatura" continua tendo prioridade mesmo pra esse cliente. Documento sem
+  // nenhum sinal, pra esse tipo de cliente, é tratado por padrão como cupom de venda (é o
+  // documento mais comum no dia a dia dele) — mas o próprio prompt (PROMPT_CUPOM_TERMICO) se
+  // autocorrige (`nao_e_cupom: true`) se na verdade for um comprovante de despesa (Pix/boleto
+  // pago pelo comércio), e nesse caso cai no fluxo normal de comprovante logo abaixo.
+  if (cliente && cliente.tipo === 'COMERCIO_MATRIZ') {
+    const cupom = await extrairCupomTermicoDeBuffer(buffer, mimeType);
+    if (!cupom.nao_e_cupom) {
+      const resultado = await processarCupomTermico(sheetId, cupom);
+      await enviarMensagemWhatsApp(remetente, formatarResumoCupom(resultado));
+      return;
+    }
+    console.log(`Documento de cliente COMERCIO_MATRIZ não é cupom de venda (${cupom.motivo || 'motivo não informado'}) — seguindo fluxo normal de comprovante.`);
+  }
+
   // Nenhuma pista textual (legenda, nome de arquivo, nome de banco) decidiu nada ainda — última
   // rede de segurança: olha o CONTEÚDO do PDF (23/08/2026, ver conteudoPareceExtratoBancario).
   // Só entra em jogo na ausência total de sinal mais específico, mesmo princípio de precedência já
@@ -2103,6 +2133,75 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
 
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+// ============================================================================================
+// DASHBOARD WEB PRIVADO POR CLIENTE (23/08/2026, pedido do Aroldo — "apresentar já pro cliente").
+// Login com WhatsApp + senha (ver dashboard.js/clientes.js) — a planilha do cliente NUNCA é
+// exposta em si (nem link do Sheets, nem compartilhamento); o servidor lê nos bastidores com a
+// mesma conta de serviço de sempre e devolve só os números já processados.
+// ============================================================================================
+
+app.get('/dashboard/login', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dashboard-login.html'));
+});
+
+app.post('/dashboard/login', async (req, res) => {
+  const { whatsapp, senha } = req.body || {};
+  if (!whatsapp || !senha) {
+    return res.status(400).json({ ok: false, erro: 'Informe o WhatsApp e a senha.' });
+  }
+
+  const numeroNormalizado = normalizarWhatsapp(whatsapp);
+  const cliente = await buscarClientePorNumero(numeroNormalizado);
+
+  // Mesma mensagem genérica pros dois casos (número não cadastrado / senha errada) — não dar pista
+  // de qual dos dois errou é prática básica de login, evita confirmar pra quem tenta adivinhar se
+  // um número está cadastrado no sistema.
+  if (!cliente || !cliente.senhaHash || !verificarSenhaDashboard(senha, cliente.senhaHash)) {
+    return res.status(401).json({ ok: false, erro: 'WhatsApp ou senha incorretos.' });
+  }
+
+  const token = criarSessao(cliente);
+  res.cookie(NOME_COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+    maxAge: 24 * 60 * 60 * 1000,
+  });
+  res.json({ ok: true });
+});
+
+app.get('/dashboard/logout', (req, res) => {
+  encerrarSessao(extrairTokenDoCookie(req));
+  res.clearCookie(NOME_COOKIE);
+  res.redirect('/dashboard/login');
+});
+
+// Protege /dashboard e /api/dashboard/dados — sessão inválida/expirada manda pro login (página) ou
+// devolve 401 (API), nunca deixa passar sem sessão válida.
+function exigirSessaoDashboard(req, res, next) {
+  const sessao = obterSessao(extrairTokenDoCookie(req));
+  if (!sessao) {
+    if (req.path.startsWith('/api/')) return res.status(401).json({ ok: false, erro: 'Sessão expirada, faça login de novo.' });
+    return res.redirect('/dashboard/login');
+  }
+  req.sessaoDashboard = sessao;
+  next();
+}
+
+app.get('/dashboard', exigirSessaoDashboard, (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dashboard.html'));
+});
+
+app.get('/api/dashboard/dados', exigirSessaoDashboard, async (req, res) => {
+  try {
+    const dados = await montarDadosDashboard(req.sessaoDashboard);
+    res.json({ ok: true, dados });
+  } catch (error) {
+    console.error('Erro ao montar dados do dashboard:', error.message);
+    res.status(500).json({ ok: false, erro: 'Não consegui carregar seus dados agora. Tenta de novo em instantes.' });
+  }
 });
 
 // Recebe o formulário de checkout da landing page (index.html), cria a cobrança recorrente

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Meu Painel — Interali Pocket</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: {
+            teal: '#0d2b28',
+            tealDark: '#081a18',
+            tealLight: '#123a35',
+            gold: '#c9a227',
+            goldLight: '#e3c877',
+            goldDark: '#9c7d1e'
+          }
+        }
+      }
+    }
+  };
+</script>
+<style>
+  .card { background: rgba(30,41,59,.5); border: 1px solid #334155; border-radius: 1rem; padding: 1.25rem; }
+  .skeleton { background: linear-gradient(90deg, rgba(51,65,85,.4) 25%, rgba(71,85,105,.5) 37%, rgba(51,65,85,.4) 63%); background-size: 400% 100%; animation: skeleton 1.4s ease infinite; border-radius: .5rem; }
+  @keyframes skeleton { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+</style>
+</head>
+<body class="bg-brand-teal text-slate-100 antialiased min-h-screen">
+
+<header class="border-b border-brand-gold/20">
+  <div class="max-w-5xl mx-auto px-5 py-4 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <img src="/logo.jpg" alt="Interali" class="h-9 w-9 rounded-full object-cover" />
+      <span class="font-bold tracking-tight">Interali <span class="text-brand-gold">Pocket</span></span>
+    </div>
+    <div class="flex items-center gap-4">
+      <span id="nome-cliente" class="text-sm text-slate-300"></span>
+      <a href="/dashboard/logout" class="text-xs text-slate-400 hover:text-white border border-slate-700 rounded-full px-3 py-1.5 transition">Sair</a>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-5xl mx-auto px-5 py-8">
+
+  <div id="carregando" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
+    <div class="skeleton h-24"></div>
+    <div class="skeleton h-24"></div>
+    <div class="skeleton h-24"></div>
+    <div class="skeleton h-24"></div>
+  </div>
+
+  <div id="erro" class="hidden card border-red-500/30 bg-red-500/5 text-red-200 text-sm"></div>
+
+  <div id="conteudo" class="hidden space-y-8"></div>
+
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  function formatarMoeda(v) {
+    return (Number(v) || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+  }
+  function formatarDataCurta(iso) {
+    if (!iso) return '';
+    var partes = iso.split('-');
+    return partes.length === 3 ? (partes[2] + '/' + partes[1]) : iso;
+  }
+
+  var CORES = { gold: '#c9a227', goldLight: '#e3c877', green: '#4ade80', red: '#f87171', grid: 'rgba(148,163,184,.15)', texto: '#cbd5e1' };
+
+  function card(rotulo, valor, corValor, subtexto) {
+    return (
+      '<div class="card">' +
+        '<p class="text-xs text-slate-400">' + rotulo + '</p>' +
+        '<p class="text-2xl font-bold mt-1" style="color:' + (corValor || '#f1f5f9') + '">' + valor + '</p>' +
+        (subtexto ? '<p class="text-xs text-slate-500 mt-1">' + subtexto + '</p>' : '') +
+      '</div>'
+    );
+  }
+
+  function secao(titulo, conteudoHtml) {
+    return (
+      '<section>' +
+        '<h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wide mb-3">' + titulo + '</h2>' +
+        conteudoHtml +
+      '</section>'
+    );
+  }
+
+  function montarGrafico(canvasId, labels, datasets) {
+    var ctx = document.getElementById(canvasId).getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: { labels: labels, datasets: datasets },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { labels: { color: CORES.texto } } },
+        scales: {
+          x: { ticks: { color: CORES.texto, maxTicksLimit: 8 }, grid: { color: CORES.grid } },
+          y: { ticks: { color: CORES.texto }, grid: { color: CORES.grid } }
+        }
+      }
+    });
+  }
+
+  function renderizarPadrao(d) {
+    var comp = d.comparacaoMesAnterior;
+    var compTexto = '';
+    if (comp && comp.percentual !== null && comp.percentual !== undefined) {
+      var sinal = comp.diferenca >= 0 ? '▲' : '▼';
+      compTexto = sinal + ' ' + Math.abs(comp.percentual).toFixed(0) + '% vs. mês anterior';
+    }
+
+    var cards =
+      card('Saldo Atual', formatarMoeda(d.saldoAtual), null) +
+      card('Entradas (mês)', formatarMoeda(d.resumoMes.entradas), CORES.green) +
+      card('Saídas (mês)', formatarMoeda(d.resumoMes.saidas), CORES.red) +
+      card('Resultado (mês)', formatarMoeda(d.resumoMes.resultado), d.resumoMes.resultado >= 0 ? CORES.green : CORES.red, compTexto);
+
+    var categorias = (d.topCategorias || []).map(function (c) {
+      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + c.categoria + '</span><span class="text-slate-300">' + formatarMoeda(c.total) + '</span></div>';
+    }).join('') || '<p class="text-sm text-slate-500">Sem despesas categorizadas este mês ainda.</p>';
+
+    var contas = (d.contasEmAberto || []).map(function (c) {
+      return '<tr class="border-b border-slate-700/50"><td class="py-2 pr-3">' + formatarDataCurta(c.vencimento) + '</td><td class="py-2 pr-3">' + (c.beneficiario || '-') + '</td><td class="py-2 text-right">' + formatarMoeda(c.valor) + '</td></tr>';
+    }).join('') || '<tr><td colspan="3" class="py-3 text-sm text-slate-500">Nenhuma conta em aberto. 🎉</td></tr>';
+
+    document.getElementById('conteudo').innerHTML =
+      '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
+      secao('Fluxo de caixa — últimos 30 dias', '<div class="card"><canvas id="grafico-fluxo" height="90"></canvas></div>') +
+      '<div class="grid md:grid-cols-2 gap-6">' +
+        secao('Top categorias de despesa (mês)', '<div class="card">' + categorias + '</div>') +
+        secao('Contas a pagar em aberto', '<div class="card overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Vencimento</th><th class="text-left pb-2">Beneficiário</th><th class="text-right pb-2">Valor</th></tr></thead><tbody>' + contas + '</tbody></table></div>') +
+      '</div>';
+
+    var labels = d.serieDiaria.map(function (p) { return formatarDataCurta(p.data); });
+    montarGrafico('grafico-fluxo', labels, [
+      { label: 'Entradas', data: d.serieDiaria.map(function (p) { return p.entradas; }), borderColor: CORES.green, backgroundColor: 'transparent', tension: .3 },
+      { label: 'Saídas', data: d.serieDiaria.map(function (p) { return p.saidas; }), borderColor: CORES.red, backgroundColor: 'transparent', tension: .3 }
+    ]);
+  }
+
+  function renderizarComercio(d) {
+    var cards =
+      card('Total Vendido (30d)', formatarMoeda(d.totalVendido), CORES.gold) +
+      card('Nº de Vendas (30d)', String(d.numeroVendas), null) +
+      card('Ticket Médio', formatarMoeda(d.ticketMedio), null) +
+      card('Clientes Cadastrados', String((d.clientesFinais || []).length), null);
+
+    var produtos = (d.topProdutos || []).map(function (p, i) {
+      var saldoTexto = p.saldo !== null && p.saldo !== undefined
+        ? '<span class="text-xs ' + (p.saldo <= 0 ? 'text-red-400' : 'text-slate-500') + '">estoque: ' + p.saldo + '</span>'
+        : '<span class="text-xs text-slate-600">estoque não preenchido</span>';
+      return '<div class="flex justify-between items-center text-sm py-2 border-b border-slate-700/50"><span>' + (i + 1) + '. ' + p.produto + (p.fornecedor ? ' <span class="text-slate-500 text-xs">(' + p.fornecedor + ')</span>' : '') + '<br>' + saldoTexto + '</span><span class="text-brand-gold font-semibold">' + p.qtdVendida + ' un. vendidas</span></div>';
+    }).join('') || '<p class="text-sm text-slate-500">Nenhum produto vendido ainda.</p>';
+
+    var vendas = (d.vendasRecentes || []).map(function (v) {
+      return '<tr class="border-b border-slate-700/50"><td class="py-2 pr-3">' + formatarDataCurta(v.data) + '</td><td class="py-2 pr-3">' + (v.numeroVenda ? '#' + v.numeroVenda : '-') + '</td><td class="py-2 pr-3">' + v.cliente + '</td><td class="py-2 text-right">' + formatarMoeda(v.valorTotal) + '</td></tr>';
+    }).join('') || '<tr><td colspan="4" class="py-3 text-sm text-slate-500">Nenhuma venda registrada ainda.</td></tr>';
+
+    var clientes = (d.clientesFinais || []).map(function (c) {
+      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + c.nome + '</span><span class="text-slate-300">' + c.qtdCompras + 'x — ' + formatarMoeda(c.valorTotalComprado) + '</span></div>';
+    }).join('') || '<p class="text-sm text-slate-500">Nenhum cliente identificado ainda (a maioria das vendas foi "Consumidor Final").</p>';
+
+    document.getElementById('conteudo').innerHTML =
+      '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
+      secao('Vendas — últimos 30 dias', '<div class="card"><canvas id="grafico-vendas" height="90"></canvas></div>') +
+      '<div class="grid md:grid-cols-2 gap-6">' +
+        secao('Produtos mais vendidos', '<div class="card">' + produtos + '</div>') +
+        secao('Clientes mais frequentes', '<div class="card">' + clientes + '</div>') +
+      '</div>' +
+      secao('Vendas recentes', '<div class="card overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Data</th><th class="text-left pb-2">Nº</th><th class="text-left pb-2">Cliente</th><th class="text-right pb-2">Total</th></tr></thead><tbody>' + vendas + '</tbody></table></div>');
+
+    var labels = d.serieDiaria.map(function (p) { return formatarDataCurta(p.data); });
+    montarGrafico('grafico-vendas', labels, [
+      { label: 'Vendido por dia', data: d.serieDiaria.map(function (p) { return p.total; }), borderColor: CORES.gold, backgroundColor: 'rgba(201,162,39,.15)', fill: true, tension: .3 }
+    ]);
+  }
+
+  fetch('/api/dashboard/dados')
+    .then(function (r) { return r.json().then(function (d) { return { status: r.status, dados: d }; }); })
+    .then(function (r) {
+      if (r.status === 401) { window.location.href = '/dashboard/login'; return; }
+      document.getElementById('carregando').classList.add('hidden');
+
+      if (r.status >= 400 || !r.dados.ok) {
+        var erroEl = document.getElementById('erro');
+        erroEl.textContent = (r.dados && r.dados.erro) || 'Não consegui carregar seus dados agora.';
+        erroEl.classList.remove('hidden');
+        return;
+      }
+
+      var d = r.dados.dados;
+      document.getElementById('nome-cliente').textContent = d.nome || '';
+      document.getElementById('conteudo').classList.remove('hidden');
+
+      if (d.tipo === 'COMERCIO_MATRIZ') renderizarComercio(d);
+      else renderizarPadrao(d);
+    })
+    .catch(function () {
+      document.getElementById('carregando').classList.add('hidden');
+      var erroEl = document.getElementById('erro');
+      erroEl.textContent = 'Não consegui me conectar agora. Verifique sua internet e recarregue a página.';
+      erroEl.classList.remove('hidden');
+    });
+})();
+</script>
+</body>
+</html>

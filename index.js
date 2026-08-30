@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
 const {
-  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONSULTA,
+  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
   PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO,
 } = require('./prompts');
@@ -214,6 +214,36 @@ async function extrairVendasDeBuffer(fileBuffer, mediaType) {
   return resultado.vendas || [];
 }
 
+// Cupom de venda impresso em impressora térmica de POS (23/08/2026, módulo Comércio com Cupom
+// Térmico + Matriz de Fornecedores — ver PROMPT_CUPOM_TERMICO). Só chamada pra cliente.tipo ===
+// 'COMERCIO_MATRIZ' (ver processarMidiaRecebida em server.js). Manda a data de hoje junto, mesmo
+// motivo de extrairComprovanteDeTexto/extrairVendasDeBuffer: cupom físico às vezes não imprime o
+// ano, ou imprime borrado. max_tokens moderado (2048, igual extrairComprovanteDeBuffer) — cupom
+// físico raramente tem itens suficientes pra chegar perto do limite de extrato/fatura (32000).
+async function extrairCupomTermicoDeBuffer(fileBuffer, mediaType) {
+  const hoje = new Date().toISOString().slice(0, 10);
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2048,
+    system: PROMPT_CUPOM_TERMICO,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          construirBlocoConteudo(fileBuffer, mediaType),
+          {
+            type: 'text',
+            text: `Data de hoje: ${hoje}\n\nAnalise este cupom de venda seguindo o formato JSON definido.`,
+          },
+        ],
+      },
+    ],
+  });
+
+  return extrairJSON(extrairTextoResposta(response));
+}
+
 // max_tokens elevado de 4096 pra 32000 + thinking desabilitado em 19/08/2026 — mesma classe de
 // risco do extrato, mesma causa raiz (ver extrairExtratoDeBuffer acima): fatura/boleto detalhado
 // item a item pode ter muitas parcelas.
@@ -407,6 +437,7 @@ module.exports = {
   extrairComprovanteDeTexto,
   extrairDespesaFixaDeTexto,
   extrairVendasDeBuffer,
+  extrairCupomTermicoDeBuffer,
   extrairExtratoDeBuffer,
   extrairContasAPagarDeBuffer,
   extrairContasAReceberDeBuffer,

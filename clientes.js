@@ -2,8 +2,18 @@ require('dotenv').config();
 const { google } = require('googleapis');
 
 const ABA_CLIENTES = 'Clientes';
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos'];
+// 'Tipo' adicionada no FIM em 23/08/2026 (mesmo padrão de sempre — nunca reordena as que já
+// existem): perfil do cliente, hoje só usado pra ligar o módulo de Cupom Térmico + Matriz de
+// Fornecedores (ver comercio-matriz.js) num cliente específico sem afetar os demais. Cliente
+// antigo sem essa coluna preenchida cai em 'PADRAO' (ver carregarTodosClientes) — comportamento
+// de hoje, sem mudança nenhuma.
+// 'Senha_Hash' adicionada no FIM em 23/08/2026 (mesmo padrão — aditiva): senha do dashboard web
+// do cliente (ver dashboard.js), guardada como "saltHex:hashHex" (scrypt, nunca texto puro).
+// Cliente sem senha definida (célula vazia) simplesmente não consegue logar no dashboard ainda —
+// não afeta em nada o funcionamento por WhatsApp.
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash'];
 const LIMITE_PADRAO = 300; // usado se um cliente antigo não tiver limite salvo (ex.: cadastro manual anterior a essa coluna existir)
+const TIPO_PADRAO = 'PADRAO';
 
 let cache = null;
 let cacheExpiraEm = 0;
@@ -40,13 +50,13 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:F1`,
+    range: `${ABA_CLIENTES}!A1:H1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:F1`,
+      range: `${ABA_CLIENTES}!A1:H1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
     });
@@ -70,7 +80,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:F`,
+    range: `${ABA_CLIENTES}!A2:H`,
   });
 
   const linhas = resposta.data.values || [];
@@ -82,6 +92,11 @@ async function carregarTodosClientes() {
     ativo: (linha[3] || '').toString().trim().toLowerCase() !== 'false',
     planoEspecialista: (linha[4] || '').toString().trim().toUpperCase() === 'TRUE',
     limiteLancamentos: Number(linha[5]) || LIMITE_PADRAO,
+    // Cliente antigo (linha sem a coluna G preenchida) cai em 'PADRAO' — comportamento de hoje,
+    // ninguém muda de perfil sozinho só por essa coluna ter sido adicionada.
+    tipo: (linha[6] || '').toString().trim().toUpperCase() || TIPO_PADRAO,
+    // Vazio = ainda não tem senha de dashboard definida (ver definirSenhaDashboard).
+    senhaHash: linha[7] || '',
   }));
 }
 
@@ -157,7 +172,10 @@ async function criarPlanilhaCliente(nomeCliente) {
   return template.id;
 }
 
-async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false, limiteLancamentos = LIMITE_PADRAO) {
+// `tipo` (23/08/2026, opcional, default 'PADRAO') — perfil do cliente; hoje só 'PADRAO' ou
+// 'COMERCIO_MATRIZ' têm efeito no código (ver comercio-matriz.js). Parâmetro novo no FIM da lista,
+// então nenhuma chamada existente (cadastrar-cliente.js, checkout da landing page) precisa mudar.
+async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false, limiteLancamentos = LIMITE_PADRAO, tipo = TIPO_PADRAO) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
 
@@ -165,10 +183,10 @@ async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A:F`,
+    range: `${ABA_CLIENTES}!A:G`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE', limiteLancamentos]] },
+    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE', limiteLancamentos, tipo || TIPO_PADRAO]] },
   });
 
   cache = null;
@@ -231,6 +249,36 @@ async function ativarPlanoEspecialista(numeroWhatsapp) {
   return true;
 }
 
+// Define (ou troca) a senha do dashboard web de um cliente (23/08/2026) — mesmo padrão de
+// desativarCliente/ativarPlanoEspecialista acima (acha a linha, escreve só a célula certa).
+// Recebe o HASH já pronto (ver dashboard.js hashSenhaDashboard) — este módulo não sabe gerar hash
+// sozinho, só grava/lê, pra não duplicar a lógica de criptografia em dois arquivos.
+async function definirSenhaDashboard(numeroWhatsapp, senhaHash) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:A` });
+  const linhas = resposta.data.values || [];
+  const alvo = (numeroWhatsapp || '').trim();
+  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
+
+  if (indice === -1) return false;
+
+  const numeroLinha = indice + 2;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_CLIENTES}!H${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[senhaHash]] },
+  });
+
+  cache = null;
+  return true;
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
@@ -238,4 +286,5 @@ module.exports = {
   desativarCliente,
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
+  definirSenhaDashboard,
 };
