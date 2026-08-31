@@ -372,7 +372,14 @@ async function extrairContaAReceberDeTexto(texto) {
   return extrairJSON(extrairTextoResposta(response));
 }
 
+// 23/08/2026 (pedido do Aroldo — tolerância a "hoje"/"ontem"/"esse mês"/"mês passado"): a data de
+// hoje NUNCA era mandada aqui, diferente de toda outra função deste arquivo que lida com data
+// relativa (extrairComprovanteDeTexto, extrairCupomTermicoDeBuffer etc.) — sem isso, o Claude só
+// tinha como "adivinhar" o dia de hoje pela data mais recente presente nos dados, o que falha se o
+// cliente não mandou nada recente. Mesmo padrão das outras funções agora.
 async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
+  const hoje = new Date().toISOString().slice(0, 10);
+
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: 512,
@@ -380,7 +387,7 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
     messages: [
       {
         role: 'user',
-        content: `Dados financeiros do cliente:\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}`,
+        content: `Data de hoje: ${hoje}\n\nDados financeiros do cliente:\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}`,
       },
     ],
   });

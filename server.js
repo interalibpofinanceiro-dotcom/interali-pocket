@@ -36,13 +36,17 @@ const {
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
 } = require('./sheets');
-const { processarCupomTermico, formatarResumoCupom } = require('./comercio-matriz');
+const { processarCupomTermico, formatarResumoCupom, processarNotaCompra, formatarResumoCompra, buscarResumoComercio } = require('./comercio-matriz');
 const {
   criarSessao,
   obterSessao,
   encerrarSessao,
   extrairTokenDoCookie,
   verificarSenhaDashboard,
+  hashSenhaDashboard,
+  criarTokenReset,
+  obterTokenReset,
+  consumirTokenReset,
   montarDadosDashboard,
   NOME_COOKIE,
 } = require('./dashboard');
@@ -68,6 +72,7 @@ const {
   adicionarCliente,
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
+  definirSenhaDashboard,
 } = require('./clientes');
 const {
   jidParaFormatoPlanilha,
@@ -1354,19 +1359,27 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
   // impacto nos clientes do plano padrão. Checado ANTES do fallback genérico de comprovante único,
   // mas DEPOIS de qualquer sinal explícito de extrato/fatura/boleto/vendas/receber acima — uma
-  // legenda "extrato"/"fatura" continua tendo prioridade mesmo pra esse cliente. Documento sem
-  // nenhum sinal, pra esse tipo de cliente, é tratado por padrão como cupom de venda (é o
-  // documento mais comum no dia a dia dele) — mas o próprio prompt (PROMPT_CUPOM_TERMICO) se
-  // autocorrige (`nao_e_cupom: true`) se na verdade for um comprovante de despesa (Pix/boleto
-  // pago pelo comércio), e nesse caso cai no fluxo normal de comprovante logo abaixo.
+  // legenda "extrato"/"fatura" continua tendo prioridade mesmo pra esse cliente. O próprio prompt
+  // (PROMPT_CUPOM_TERMICO) classifica o documento em 3 tipos: "venda" (cupom de venda, o mais
+  // comum no dia a dia dele), "compra_fornecedor" (nota de compra pra repor estoque — soma
+  // Estoque_Atual em vez de Qtd_Vendida, ver processarNotaCompra) e "despesa" (Pix/boleto pago
+  // pelo comércio, sem itens) — esse último cai no fluxo normal de comprovante logo abaixo.
   if (cliente && cliente.tipo === 'COMERCIO_MATRIZ') {
-    const cupom = await extrairCupomTermicoDeBuffer(buffer, mimeType);
-    if (!cupom.nao_e_cupom) {
-      const resultado = await processarCupomTermico(sheetId, cupom);
+    const documento = await extrairCupomTermicoDeBuffer(buffer, mimeType);
+
+    if (documento.tipo_documento === 'venda') {
+      const resultado = await processarCupomTermico(sheetId, documento);
       await enviarMensagemWhatsApp(remetente, formatarResumoCupom(resultado));
       return;
     }
-    console.log(`Documento de cliente COMERCIO_MATRIZ não é cupom de venda (${cupom.motivo || 'motivo não informado'}) — seguindo fluxo normal de comprovante.`);
+
+    if (documento.tipo_documento === 'compra_fornecedor') {
+      const resultado = await processarNotaCompra(sheetId, documento);
+      await enviarMensagemWhatsApp(remetente, formatarResumoCompra(resultado));
+      return;
+    }
+
+    console.log(`Documento de cliente COMERCIO_MATRIZ é despesa (${documento.motivo || 'motivo não informado'}) — seguindo fluxo normal de comprovante.`);
   }
 
   // Nenhuma pista textual (legenda, nome de arquivo, nome de banco) decidiu nada ainda — última
@@ -1958,7 +1971,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // pra fechar a resposta com a "Nota do Consultor" lembrando da reunião mensal (ver REGRA
         // DA NOTA DO CONSULTOR em prompts.js).
         const pendenciasDuvida = lancamentos.filter((l) => l.status_conciliacao === 'PENDENTE_DUVIDA').length;
-        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes, pendenciasDuvida });
+
+        // resumoComercio: 6ª fonte de dados, SÓ pra cliente.tipo === 'COMERCIO_MATRIZ' (23/08/2026,
+        // pedido do Aroldo: "isso é pra todo o projeto... a IA vai entender que tipo de cliente
+        // conforme as imagens que forem recebendo") — dá ao Consultor Financeiro acesso a
+        // produto/estoque/fornecedor/vendas da Matriz, senão uma pergunta tipo "quanto vendi de
+        // água sanitária esse mês?" não teria como ser respondida (esses dados não existem em
+        // "lancamentos"/"itensComprovantes", só na Matriz/VendasCupom do módulo de comércio).
+        const resumoComercio = cliente.tipo === 'COMERCIO_MATRIZ' ? await buscarResumoComercio(sheetId).catch(() => null) : null;
+
+        const resposta = await consultarFluxoDeCaixa(interpretado.texto, { lancamentos, extrato, contasAPagar, itensComprovantes, pendenciasDuvida, resumoComercio });
 
         // Bug real encontrado em 14/08/2026 (caso do Aroldo, mensagem sobre recebimento recorrente
         // da Verc Contabilidade): consultarFluxoDeCaixa pode voltar com texto vazio quando a
@@ -2176,6 +2198,59 @@ app.get('/dashboard/logout', (req, res) => {
   encerrarSessao(extrairTokenDoCookie(req));
   res.clearCookie(NOME_COOKIE);
   res.redirect('/dashboard/login');
+});
+
+app.get('/dashboard/esqueci-senha', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dashboard-esqueci-senha.html'));
+});
+
+// Pede o reset — manda um link de redefinição pro WHATSAPP do cliente (não e-mail, o projeto não
+// tem serviço de e-mail configurado e o WhatsApp já é o canal que todo cliente usa). Resposta
+// SEMPRE genérica de sucesso, número cadastrado ou não — mesma prática de segurança do login (não
+// confirma pra quem pergunta se um número está cadastrado no sistema).
+app.post('/dashboard/esqueci-senha', async (req, res) => {
+  const { whatsapp } = req.body || {};
+  if (!whatsapp) {
+    return res.status(400).json({ ok: false, erro: 'Informe o WhatsApp.' });
+  }
+
+  const numeroNormalizado = normalizarWhatsapp(whatsapp);
+  const cliente = await buscarClientePorNumero(numeroNormalizado);
+
+  if (cliente) {
+    const token = criarTokenReset(cliente.numeroWhatsapp);
+    const link = `https://pocket.interali.com.br/dashboard/redefinir-senha?token=${token}`;
+    await enviarMensagemWhatsApp(
+      cliente.numeroWhatsapp,
+      `🔑 Você pediu pra redefinir a senha do seu Painel Interali Pocket.\n\nClique no link abaixo pra criar uma senha nova (válido por 30 minutos):\n${link}\n\nSe não foi você, pode ignorar esta mensagem — sua senha continua a mesma.`
+    ).catch((erro) => console.error('Falha ao enviar WhatsApp de reset de senha:', erro.message));
+  }
+
+  res.json({ ok: true, mensagem: 'Se esse WhatsApp estiver cadastrado, mandamos um link de redefinição por lá agora.' });
+});
+
+app.get('/dashboard/redefinir-senha', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'dashboard-redefinir-senha.html'));
+});
+
+app.post('/dashboard/redefinir-senha', async (req, res) => {
+  const { token, novaSenha } = req.body || {};
+  if (!token || !novaSenha) {
+    return res.status(400).json({ ok: false, erro: 'Dados incompletos.' });
+  }
+  if (novaSenha.length < 6) {
+    return res.status(400).json({ ok: false, erro: 'A senha precisa ter pelo menos 6 caracteres.' });
+  }
+
+  const entrada = obterTokenReset(token);
+  if (!entrada) {
+    return res.status(400).json({ ok: false, erro: 'Link expirado ou inválido. Peça um novo link de redefinição na tela de login.' });
+  }
+
+  await definirSenhaDashboard(entrada.numeroWhatsapp, hashSenhaDashboard(novaSenha));
+  consumirTokenReset(token); // uso único — o mesmo link não funciona de novo depois
+
+  res.json({ ok: true });
 });
 
 // Protege /dashboard e /api/dashboard/dados — sessão inválida/expirada manda pro login (página) ou

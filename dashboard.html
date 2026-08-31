@@ -148,19 +148,74 @@
     ]);
   }
 
-  function renderizarComercio(d) {
-    var cards =
-      card('Total Vendido (30d)', formatarMoeda(d.totalVendido), CORES.gold) +
-      card('Nº de Vendas (30d)', String(d.numeroVendas), null) +
-      card('Ticket Médio', formatarMoeda(d.ticketMedio), null) +
-      card('Clientes Cadastrados', String((d.clientesFinais || []).length), null);
+  function montarGraficoBarras(canvasId, labels, valores) {
+    var ctx = document.getElementById(canvasId).getContext('2d');
+    new Chart(ctx, {
+      type: 'bar',
+      data: { labels: labels, datasets: [{ label: 'Unidades vendidas', data: valores, backgroundColor: CORES.gold, borderRadius: 4 }] },
+      options: {
+        responsive: true,
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: CORES.texto }, grid: { color: CORES.grid } },
+          y: { ticks: { color: CORES.texto }, grid: { display: false } }
+        }
+      }
+    });
+  }
 
-    var produtos = (d.topProdutos || []).map(function (p, i) {
-      var saldoTexto = p.saldo !== null && p.saldo !== undefined
-        ? '<span class="text-xs ' + (p.saldo <= 0 ? 'text-red-400' : 'text-slate-500') + '">estoque: ' + p.saldo + '</span>'
-        : '<span class="text-xs text-slate-600">estoque não preenchido</span>';
-      return '<div class="flex justify-between items-center text-sm py-2 border-b border-slate-700/50"><span>' + (i + 1) + '. ' + p.produto + (p.fornecedor ? ' <span class="text-slate-500 text-xs">(' + p.fornecedor + ')</span>' : '') + '<br>' + saldoTexto + '</span><span class="text-brand-gold font-semibold">' + p.qtdVendida + ' un. vendidas</span></div>';
-    }).join('') || '<p class="text-sm text-slate-500">Nenhum produto vendido ainda.</p>';
+  function renderizarCardsPeriodo(relatorio, periodo) {
+    var r = relatorio[periodo];
+    var nomes = { dia: 'hoje', semana: 'últimos 7 dias', mes: 'este mês' };
+    var diferencaTaxas = r.total - r.liquido;
+    document.getElementById('cards-periodo').innerHTML =
+      card('Total Vendido (' + nomes[periodo] + ')', formatarMoeda(r.total), CORES.gold) +
+      card('Total Líquido (após taxa cartão)', formatarMoeda(r.liquido), CORES.green, diferencaTaxas > 0 ? '-' + formatarMoeda(diferencaTaxas) + ' em taxas' : 'sem taxa descontada') +
+      card('Nº de Vendas', String(r.numeroVendas), null) +
+      card('Ticket Médio', formatarMoeda(r.ticketMedio), null);
+  }
+
+  function renderizarComercio(d) {
+    var estoqueTexto = d.estoqueTotalAtual !== null && d.estoqueTotalAtual !== undefined ? String(d.estoqueTotalAtual) + ' un.' : '—';
+    var lucroTexto = d.lucroEstimadoTotal !== null ? formatarMoeda(d.lucroEstimadoTotal) : '—';
+    var cardsFixos =
+      card('Estoque Total Atual', estoqueTexto, null, 'soma do que foi preenchido manualmente') +
+      card('Clientes Cadastrados', String((d.clientesFinais || []).length), null) +
+      card('Lucro Estimado (mês)', lucroTexto, d.lucroEstimadoTotal !== null ? CORES.green : null, d.lucroEstimadoTotal !== null ? 'baseado no custo unitário preenchido' : 'preencha "Custo_Unitario" na Matriz pra calcular');
+
+    var ranking = (d.rankingMaisVendidos || []).slice(0, 8);
+    var labelsRanking = ranking.map(function (p) { return p.produto.length > 28 ? p.produto.slice(0, 28) + '…' : p.produto; });
+    var valoresRanking = ranking.map(function (p) { return p.qtdVendida; });
+
+    var fornecedores = d.fornecedores || [];
+    var opcoesFornecedor = '<option value="">Todos os fornecedores</option>' + fornecedores.map(function (f) { return '<option value="' + f + '">' + f + '</option>'; }).join('');
+
+    function linhaProduto(p) {
+      var saldoTexto = p.saldo !== null
+        ? '<span class="' + (p.precisaRepor ? 'text-red-400 font-semibold' : 'text-slate-400') + '">saldo: ' + p.saldo + (p.precisaRepor ? ' ⚠️ repor' : '') + '</span>'
+        : '<span class="text-slate-600">estoque não preenchido</span>';
+      return (
+        '<tr class="border-b border-slate-700/50" data-fornecedor="' + (p.fornecedor || '') + '">' +
+          '<td class="py-2 pr-3">' + p.produto + '</td>' +
+          '<td class="py-2 pr-3 text-slate-400 text-xs">' + (p.fornecedor || '—') + '</td>' +
+          '<td class="py-2 pr-3 text-right text-brand-gold font-semibold">' + p.qtdVendida + '</td>' +
+          '<td class="py-2 pr-3 text-right">' + (p.estoque !== null ? p.estoque : '—') + '</td>' +
+          '<td class="py-2 text-right text-xs">' + saldoTexto + '</td>' +
+        '</tr>'
+      );
+    }
+    var linhasEstoque = (d.produtos || []).map(linhaProduto).join('') || '<tr><td colspan="5" class="py-3 text-sm text-slate-500">Nenhum produto lançado ainda.</td></tr>';
+
+    var termometro = (d.precisamRepor || []).map(function (p) {
+      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + p.produto + (p.fornecedor ? ' <span class="text-slate-500 text-xs">(' + p.fornecedor + ')</span>' : '') + '</span><span class="text-red-400 font-semibold">saldo: ' + p.saldo + '</span></div>';
+    }).join('') || '<p class="text-sm text-slate-500">Nenhum produto abaixo do estoque mínimo agora. 🎉</p>';
+
+    var conferencia = (d.divergenciasConferencia || []).map(function (p) {
+      var cor = p.divergenciaConferencia < 0 ? 'text-red-400' : 'text-yellow-400';
+      var sinal = p.divergenciaConferencia > 0 ? '+' : '';
+      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + p.produto + '</span><span>IA: ' + p.qtdVendida + ' · físico: ' + p.conferenciaFisica + ' · <span class="' + cor + ' font-semibold">' + sinal + p.divergenciaConferencia + '</span></span></div>';
+    }).join('') || '<p class="text-sm text-slate-500">Nenhuma contagem física registrada ainda (preencha a coluna "Conferencia" na planilha pra comparar com o que a IA lançou).</p>';
 
     var vendas = (d.vendasRecentes || []).map(function (v) {
       return '<tr class="border-b border-slate-700/50"><td class="py-2 pr-3">' + formatarDataCurta(v.data) + '</td><td class="py-2 pr-3">' + (v.numeroVenda ? '#' + v.numeroVenda : '-') + '</td><td class="py-2 pr-3">' + v.cliente + '</td><td class="py-2 text-right">' + formatarMoeda(v.valorTotal) + '</td></tr>';
@@ -170,19 +225,80 @@
       return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + c.nome + '</span><span class="text-slate-300">' + c.qtdCompras + 'x — ' + formatarMoeda(c.valorTotalComprado) + '</span></div>';
     }).join('') || '<p class="text-sm text-slate-500">Nenhum cliente identificado ainda (a maioria das vendas foi "Consumidor Final").</p>';
 
+    var produtosComMargem = (d.produtos || []).filter(function (p) { return p.custoUnitario !== null; });
+    var linhasMargem = produtosComMargem.map(function (p) {
+      var margemTexto = p.margemUnitaria !== null
+        ? '<span class="' + (p.margemUnitaria >= 0 ? 'text-green-400' : 'text-red-400') + ' font-semibold">' + formatarMoeda(p.margemUnitaria) + '</span>'
+        : '<span class="text-slate-600 text-xs">sem venda registrada ainda</span>';
+      var markupTexto = p.markupPercentual !== null ? p.markupPercentual.toFixed(0) + '%' : '—';
+      return (
+        '<tr class="border-b border-slate-700/50">' +
+          '<td class="py-2 pr-3">' + p.produto + '</td>' +
+          '<td class="py-2 pr-3 text-right">' + formatarMoeda(p.custoUnitario) + '</td>' +
+          '<td class="py-2 pr-3 text-right">' + (p.precoMedioVenda !== null ? formatarMoeda(p.precoMedioVenda) : '—') + '</td>' +
+          '<td class="py-2 pr-3 text-right">' + margemTexto + '</td>' +
+          '<td class="py-2 text-right">' + markupTexto + '</td>' +
+        '</tr>'
+      );
+    }).join('') || '<tr><td colspan="5" class="py-3 text-sm text-slate-500">Nenhum produto com custo preenchido ainda — adicione o "Custo_Unitario" na aba Matriz da planilha pra ver a margem aqui.</td></tr>';
+
     document.getElementById('conteudo').innerHTML =
-      '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
-      secao('Vendas — últimos 30 dias', '<div class="card"><canvas id="grafico-vendas" height="90"></canvas></div>') +
-      '<div class="grid md:grid-cols-2 gap-6">' +
-        secao('Produtos mais vendidos', '<div class="card">' + produtos + '</div>') +
-        secao('Clientes mais frequentes', '<div class="card">' + clientes + '</div>') +
+      // Abas Dia / Semana / Mês
+      '<div>' +
+        '<div class="flex gap-2 mb-4" id="tabs-periodo">' +
+          '<button data-periodo="dia" class="btn-periodo px-4 py-1.5 rounded-full text-xs font-semibold border border-slate-700 text-slate-300">Hoje</button>' +
+          '<button data-periodo="semana" class="btn-periodo px-4 py-1.5 rounded-full text-xs font-semibold border border-slate-700 text-slate-300">Semana</button>' +
+          '<button data-periodo="mes" class="btn-periodo px-4 py-1.5 rounded-full text-xs font-semibold border border-brand-gold bg-brand-gold text-brand-tealDark">Mês</button>' +
+        '</div>' +
+        '<div id="cards-periodo" class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5"></div>' +
       '</div>' +
-      secao('Vendas recentes', '<div class="card overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Data</th><th class="text-left pb-2">Nº</th><th class="text-left pb-2">Cliente</th><th class="text-right pb-2">Total</th></tr></thead><tbody>' + vendas + '</tbody></table></div>');
+      '<div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-5">' + cardsFixos + '</div>' +
+      secao('Vendas — tendência (30 dias)', '<div class="card"><canvas id="grafico-vendas" height="90"></canvas></div>') +
+      secao('Ranking de produtos mais vendidos', '<div class="card"><canvas id="grafico-ranking" height="' + Math.max(120, ranking.length * 36) + '"></canvas></div>') +
+      '<div class="grid md:grid-cols-2 gap-6">' +
+        secao('🌡️ Termômetro de Reposição', '<div class="card">' + termometro + '</div>') +
+        secao('✅ Conferência Diária (IA × físico)', '<div class="card">' + conferencia + '</div>') +
+      '</div>' +
+      secao('Painel de Estoque & Produtos por Fornecedor',
+        '<div class="card">' +
+          '<div class="mb-3"><select id="filtro-fornecedor" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs">' + opcoesFornecedor + '</select></div>' +
+          '<div class="overflow-x-auto"><table class="w-full text-sm" id="tabela-estoque"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Produto</th><th class="text-left pb-2">Fornecedor</th><th class="text-right pb-2">Vendido</th><th class="text-right pb-2">Estoque</th><th class="text-right pb-2">Saldo</th></tr></thead><tbody>' + linhasEstoque + '</tbody></table></div>' +
+        '</div>') +
+      secao('💰 Margem & Precificação',
+        '<div class="card">' +
+          '<p class="text-xs text-slate-500 mb-3">Custo unitário é preenchido à mão na planilha (aba Matriz, coluna "Custo_Unitario"). Preço de venda é a média do que foi realmente cobrado nas vendas.</p>' +
+          '<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Produto</th><th class="text-right pb-2">Custo</th><th class="text-right pb-2">Preço médio</th><th class="text-right pb-2">Margem</th><th class="text-right pb-2">Markup</th></tr></thead><tbody>' + linhasMargem + '</tbody></table></div>' +
+        '</div>') +
+      '<div class="grid md:grid-cols-2 gap-6">' +
+        secao('Clientes mais frequentes', '<div class="card">' + clientes + '</div>') +
+        secao('Vendas recentes', '<div class="card overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Data</th><th class="text-left pb-2">Nº</th><th class="text-left pb-2">Cliente</th><th class="text-right pb-2">Total</th></tr></thead><tbody>' + vendas + '</tbody></table></div>') +
+      '</div>';
+
+    renderizarCardsPeriodo(d.relatorioPorPeriodo, 'mes');
+    document.querySelectorAll('.btn-periodo').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        document.querySelectorAll('.btn-periodo').forEach(function (b) {
+          b.classList.remove('border-brand-gold', 'bg-brand-gold', 'text-brand-tealDark');
+          b.classList.add('border-slate-700', 'text-slate-300');
+        });
+        btn.classList.remove('border-slate-700', 'text-slate-300');
+        btn.classList.add('border-brand-gold', 'bg-brand-gold', 'text-brand-tealDark');
+        renderizarCardsPeriodo(d.relatorioPorPeriodo, btn.getAttribute('data-periodo'));
+      });
+    });
+
+    document.getElementById('filtro-fornecedor').addEventListener('change', function (e) {
+      var alvo = e.target.value;
+      document.querySelectorAll('#tabela-estoque tbody tr').forEach(function (tr) {
+        tr.hidden = Boolean(alvo) && tr.getAttribute('data-fornecedor') !== alvo;
+      });
+    });
 
     var labels = d.serieDiaria.map(function (p) { return formatarDataCurta(p.data); });
     montarGrafico('grafico-vendas', labels, [
       { label: 'Vendido por dia', data: d.serieDiaria.map(function (p) { return p.total; }), borderColor: CORES.gold, backgroundColor: 'rgba(201,162,39,.15)', fill: true, tension: .3 }
     ]);
+    if (ranking.length > 0) montarGraficoBarras('grafico-ranking', labelsRanking, valoresRanking);
   }
 
   fetch('/api/dashboard/dados')

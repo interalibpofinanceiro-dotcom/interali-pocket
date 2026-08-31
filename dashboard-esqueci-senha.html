@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Esqueci minha senha — Interali Pocket</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: { teal: '#0d2b28', tealDark: '#081a18', tealLight: '#123a35', gold: '#c9a227', goldLight: '#e3c877', goldDark: '#9c7d1e' }
+        }
+      }
+    }
+  };
+</script>
+</head>
+<body class="bg-brand-teal text-slate-100 antialiased min-h-screen flex items-center justify-center px-5">
+
+  <div class="w-full max-w-sm">
+    <div class="flex items-center justify-center gap-3 mb-8">
+      <img src="/logo.jpg" alt="Interali" class="h-11 w-11 rounded-full object-cover" />
+      <span class="text-xl font-bold tracking-tight">Interali <span class="text-brand-gold">Pocket</span></span>
+    </div>
+
+    <div class="rounded-2xl border border-slate-700 bg-slate-800/50 p-7">
+      <h1 class="text-lg font-bold text-center">Esqueci minha senha</h1>
+      <p class="text-sm text-slate-400 text-center mt-1">Informe o WhatsApp cadastrado — mandamos um link de redefinição por lá.</p>
+
+      <form id="reset-form" class="mt-6 space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp</label>
+          <input required type="tel" id="input-whatsapp" placeholder="(44) 99999-9999"
+            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
+        </div>
+
+        <div id="feedback" class="hidden text-sm rounded-lg px-3.5 py-2.5"></div>
+
+        <button type="submit" id="submit-btn"
+          class="w-full bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold py-3 rounded-full transition">
+          Enviar link pelo WhatsApp
+        </button>
+      </form>
+
+      <p class="text-[11px] text-center text-slate-500 mt-5"><a href="/dashboard/login" class="hover:text-brand-gold underline">Voltar pro login</a></p>
+    </div>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("reset-form");
+  var feedback = document.getElementById("feedback");
+  var submitBtn = document.getElementById("submit-btn");
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    feedback.classList.add("hidden");
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Enviando...";
+
+    fetch("/dashboard/esqueci-senha", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ whatsapp: document.getElementById("input-whatsapp").value.trim() })
+    })
+      .then(function (r) { return r.json().then(function (d) { return { status: r.status, dados: d }; }); })
+      .then(function (r) {
+        if (r.status >= 400 || !r.dados.ok) {
+          feedback.textContent = r.dados.erro || "Não consegui processar agora. Tenta de novo.";
+          feedback.classList.remove("hidden");
+          feedback.className = "text-sm rounded-lg px-3.5 py-2.5 bg-red-500/10 text-red-300";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Enviar link pelo WhatsApp";
+          return;
+        }
+        feedback.textContent = r.dados.mensagem || "Verifique seu WhatsApp!";
+        feedback.classList.remove("hidden");
+        feedback.className = "text-sm rounded-lg px-3.5 py-2.5 bg-green-500/10 text-green-300";
+        submitBtn.textContent = "Link enviado ✓";
+      })
+      .catch(function () {
+        feedback.textContent = "Não consegui me conectar agora. Verifique sua internet e tente de novo.";
+        feedback.classList.remove("hidden");
+        feedback.className = "text-sm rounded-lg px-3.5 py-2.5 bg-red-500/10 text-red-300";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Enviar link pelo WhatsApp";
+      });
+  });
+})();
+</script>
+</body>
+</html>

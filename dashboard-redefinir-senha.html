@@ -3,21 +3,14 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Meu Painel — Interali Pocket</title>
+<title>Nova senha — Interali Pocket</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
   tailwind.config = {
     theme: {
       extend: {
         colors: {
-          brand: {
-            teal: '#0d2b28',
-            tealDark: '#081a18',
-            tealLight: '#123a35',
-            gold: '#c9a227',
-            goldLight: '#e3c877',
-            goldDark: '#9c7d1e'
-          }
+          brand: { teal: '#0d2b28', tealDark: '#081a18', tealLight: '#123a35', gold: '#c9a227', goldLight: '#e3c877', goldDark: '#9c7d1e' }
         }
       }
     }
@@ -33,19 +26,14 @@
     </div>
 
     <div class="rounded-2xl border border-slate-700 bg-slate-800/50 p-7">
-      <h1 class="text-lg font-bold text-center">Meu Painel</h1>
-      <p class="text-sm text-slate-400 text-center mt-1">Entre com o WhatsApp cadastrado no Pocket.</p>
+      <h1 class="text-lg font-bold text-center">Criar nova senha</h1>
+      <p class="text-sm text-slate-400 text-center mt-1">Escolha uma senha nova pro seu Painel.</p>
 
-      <form id="login-form" class="mt-6 space-y-4">
+      <form id="redefinir-form" class="mt-6 space-y-4">
         <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">WhatsApp</label>
-          <input required type="tel" id="input-whatsapp" placeholder="(44) 99999-9999"
-            class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3.5 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
-        </div>
-        <div>
-          <label class="block text-xs font-medium text-slate-400 mb-1.5">Senha</label>
+          <label class="block text-xs font-medium text-slate-400 mb-1.5">Nova senha</label>
           <div class="relative">
-            <input required type="password" id="input-senha" placeholder="Sua senha"
+            <input required type="password" id="input-senha" placeholder="Mínimo 6 caracteres" minlength="6"
               class="w-full bg-slate-900 border border-slate-700 rounded-lg pl-3.5 pr-10 py-2.5 text-sm focus:outline-none focus:border-brand-gold" />
             <button type="button" id="toggle-senha" aria-label="Mostrar senha"
               class="absolute right-0 top-0 h-full px-3 text-slate-500 hover:text-slate-300 transition">
@@ -64,23 +52,20 @@
 
         <button type="submit" id="submit-btn"
           class="w-full bg-brand-gold hover:bg-brand-goldLight text-brand-tealDark font-bold py-3 rounded-full transition">
-          Entrar
+          Salvar nova senha
         </button>
       </form>
-
-      <p class="text-center mt-4"><a href="/dashboard/esqueci-senha" class="text-xs text-slate-400 hover:text-brand-gold underline">Esqueci minha senha</a></p>
-      <p class="text-[11px] text-center text-slate-500 mt-3">Ainda não tem senha? Fale com a Interali pelo WhatsApp de suporte.</p>
     </div>
   </div>
 
 <script>
 (function () {
   "use strict";
-  var form = document.getElementById("login-form");
+  var form = document.getElementById("redefinir-form");
   var feedback = document.getElementById("feedback");
   var submitBtn = document.getElementById("submit-btn");
-
   var inputSenha = document.getElementById("input-senha");
+
   var toggleSenha = document.getElementById("toggle-senha");
   var olhoAberto = document.getElementById("icone-olho-aberto");
   var olhoFechado = document.getElementById("icone-olho-fechado");
@@ -89,39 +74,48 @@
     inputSenha.type = mostrando ? "password" : "text";
     olhoAberto.classList.toggle("hidden", !mostrando);
     olhoFechado.classList.toggle("hidden", mostrando);
-    toggleSenha.setAttribute("aria-label", mostrando ? "Mostrar senha" : "Ocultar senha");
   });
+
+  var params = new URLSearchParams(window.location.search);
+  var token = params.get("token");
+
+  if (!token) {
+    feedback.textContent = "Link inválido — falta o código de redefinição. Peça um novo link na tela de login.";
+    feedback.classList.remove("hidden");
+    form.querySelector("button[type=submit]").disabled = true;
+  }
 
   form.addEventListener("submit", function (e) {
     e.preventDefault();
     feedback.classList.add("hidden");
     submitBtn.disabled = true;
-    submitBtn.textContent = "Entrando...";
+    submitBtn.textContent = "Salvando...";
 
-    fetch("/dashboard/login", {
+    fetch("/dashboard/redefinir-senha", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        whatsapp: document.getElementById("input-whatsapp").value.trim(),
-        senha: document.getElementById("input-senha").value
-      })
+      body: JSON.stringify({ token: token, novaSenha: inputSenha.value })
     })
       .then(function (r) { return r.json().then(function (d) { return { status: r.status, dados: d }; }); })
       .then(function (r) {
         if (r.status >= 400 || !r.dados.ok) {
-          feedback.textContent = r.dados.erro || "Não consegui entrar agora. Tenta de novo.";
+          feedback.textContent = r.dados.erro || "Não consegui salvar a senha agora.";
           feedback.classList.remove("hidden");
           submitBtn.disabled = false;
-          submitBtn.textContent = "Entrar";
+          submitBtn.textContent = "Salvar nova senha";
           return;
         }
-        window.location.href = "/dashboard";
+        submitBtn.textContent = "Senha salva ✓";
+        feedback.className = "text-sm rounded-lg px-3.5 py-2.5 bg-green-500/10 text-green-300";
+        feedback.textContent = "Senha alterada! Redirecionando pro login...";
+        feedback.classList.remove("hidden");
+        setTimeout(function () { window.location.href = "/dashboard/login"; }, 1800);
       })
       .catch(function () {
         feedback.textContent = "Não consegui me conectar agora. Verifique sua internet e tente de novo.";
         feedback.classList.remove("hidden");
         submitBtn.disabled = false;
-        submitBtn.textContent = "Entrar";
+        submitBtn.textContent = "Salvar nova senha";
       });
   });
 })();

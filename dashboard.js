@@ -82,6 +82,40 @@ function verificarSenhaDashboard(senhaPlano, saltHashArmazenado) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// RESET DE SENHA POR WHATSAPP (23/08/2026, pedido do Aroldo — "olhinho + reset, o cliente
+// recebe e muda a senha, o padrão que todos têm"). Decisão: reset chega por WHATSAPP, não e-mail —
+// o projeto não tem serviço de e-mail configurado, e o WhatsApp já é o canal que todo cliente usa
+// e já funciona 100%. Mesmo padrão de token único de uso, curto prazo, das outras memórias em Map
+// deste projeto (ver SESSOES acima).
+// ---------------------------------------------------------------------------------------------
+
+const TOKENS_RESET_SENHA = new Map(); // token -> { numeroWhatsapp, criadoEm }
+const TTL_TOKEN_RESET_MS = 30 * 60 * 1000; // 30 minutos — link de reset expira rápido por segurança
+
+function criarTokenReset(numeroWhatsapp) {
+  const token = crypto.randomBytes(24).toString('hex');
+  TOKENS_RESET_SENHA.set(token, { numeroWhatsapp, criadoEm: Date.now() });
+  return token;
+}
+
+function obterTokenReset(token) {
+  if (!token) return null;
+  const entrada = TOKENS_RESET_SENHA.get(token);
+  if (!entrada) return null;
+  if (Date.now() - entrada.criadoEm > TTL_TOKEN_RESET_MS) {
+    TOKENS_RESET_SENHA.delete(token);
+    return null;
+  }
+  return entrada;
+}
+
+// Token é de USO ÚNICO — consumido tanto quando a senha é trocada com sucesso quanto (por quem
+// chama) se o link já tiver sido usado uma vez, evitando reuso do mesmo link depois.
+function consumirTokenReset(token) {
+  if (token) TOKENS_RESET_SENHA.delete(token);
+}
+
+// ---------------------------------------------------------------------------------------------
 // DADOS DO DASHBOARD — adaptado por cliente.tipo (mesmo princípio já usado no roteamento de
 // mídia: "o Pocket identifica e adere à planilha conforme a necessidade de cada cliente").
 // ---------------------------------------------------------------------------------------------
@@ -140,6 +174,9 @@ module.exports = {
   extrairTokenDoCookie,
   hashSenhaDashboard,
   verificarSenhaDashboard,
+  criarTokenReset,
+  obterTokenReset,
+  consumirTokenReset,
   montarDadosDashboard,
   NOME_COOKIE,
 };
