@@ -179,7 +179,9 @@ async function reordenarAbas(sheets, spreadsheetId) {
 
 // Garante a aba mensal `<competencia> · <sufixo>` com o cabeçalho certo. Cria + reordena se for
 // nova. Migração leve de cabeçalho curto, igual garantirAbaComCabecalho fazia. Devolve o título.
-async function garantirAbaMensal(sheets, spreadsheetId, competencia, sufixo, cabecalho) {
+// `opts.pularReordenar` — a migração cria dezenas de abas em sequência e reordena uma vez só no
+// fim (senão são N chamadas de get+batchUpdate a mais, risco de rate limit).
+async function garantirAbaMensal(sheets, spreadsheetId, competencia, sufixo, cabecalho, opts = {}) {
   const titulo = `${competencia} · ${sufixo}`;
   const planilha = await sheets.spreadsheets.get({ spreadsheetId });
   const existe = planilha.data.sheets.some((s) => s.properties.title === titulo);
@@ -204,7 +206,7 @@ async function garantirAbaMensal(sheets, spreadsheetId, competencia, sufixo, cab
     });
   }
 
-  if (!existe) {
+  if (!existe && !opts.pularReordenar) {
     await reordenarAbas(sheets, spreadsheetId).catch((erro) => console.error('Falha ao reordenar abas:', erro.message));
   }
 
