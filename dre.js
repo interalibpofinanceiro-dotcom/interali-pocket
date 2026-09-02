@@ -79,6 +79,14 @@ const GRUPOS_DRE = [
   { chave: 'repasse_terceiros_entrada', bloco: 'REPASSE_TERCEIROS', rotulo: 'Valores de Terceiros Recebidos (Repasse — Não é Receita Própria)' },
   { chave: 'repasse_terceiros_saida', bloco: 'REPASSE_TERCEIROS', rotulo: 'Repasse de Valores a Terceiros / Clientes' },
 
+  // Bloco à parte (02/09/2026, pedido do Aroldo — caso real: cliente move dinheiro entre os
+  // próprios bancos, ex.: Pix da conta Itaú dele pra conta Nubank dele). Mesmo CPF/CNPJ/titular
+  // nos dois lados -> NÃO é entrada nem saída de resultado, só o dinheiro trocando de conta. Mesmo
+  // raciocínio de INVESTIMENTO/REPASSE_TERCEIROS acima: `gerarDRE()` e o fechamento mensal NUNCA
+  // somam este bloco em nenhum total — só fica marcado. Ver REGRAS_TRANSFERENCIA_MESMO_TITULAR em
+  // prompts.js (aplicada em PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO e PROMPT_EXTRATO).
+  { chave: 'transferencia_entre_contas', bloco: 'TRANSFERENCIA_CONTAS', rotulo: 'Transferência entre Contas do Mesmo Titular (Não Afeta Resultado)' },
+
   { chave: 'nao_classificado', bloco: 'NAO_CLASSIFICADO', rotulo: 'Não Classificado' },
 ];
 
@@ -92,10 +100,21 @@ function porChave(chave) {
   return GRUPOS_DRE.find((g) => g.chave === chave);
 }
 
+// Blocos que NÃO entram em nenhum total de resultado (nem receita, nem despesa) — dinheiro que só
+// passa pela conta: investimento (vai pro balanço), repasse de terceiros, transferência entre
+// contas do mesmo titular. `gerarDRE` já ignora esses blocos; esta função deixa o mesmo critério
+// disponível pro fechamento mensal e pro resumo (calcularTotais em reconciliacao.js).
+const BLOCOS_FORA_DO_RESULTADO = ['INVESTIMENTO', 'REPASSE_TERCEIROS', 'TRANSFERENCIA_CONTAS'];
+
+function chaveForaDoResultado(chave) {
+  const def = porChave(chave);
+  return !!def && BLOCOS_FORA_DO_RESULTADO.includes(def.bloco);
+}
+
 // Texto pronto pra colar dentro do prompt de extração (prompts.js) — lista cada chave válida
 // com seu rótulo contábil, pra o Claude escolher a que melhor descreve o lançamento.
 function listaParaPrompt() {
   return GRUPOS_DRE.map((g) => `  - "${g.chave}" — ${g.rotulo}`).join('\n');
 }
 
-module.exports = { GRUPOS_DRE, ROTULO_BLOCO, porChave, listaParaPrompt };
+module.exports = { GRUPOS_DRE, ROTULO_BLOCO, porChave, listaParaPrompt, chaveForaDoResultado, BLOCOS_FORA_DO_RESULTADO };

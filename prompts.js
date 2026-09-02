@@ -41,7 +41,12 @@ const REGRAS_FLUXO_ENTRADA_SAIDA = `REGRAS CRÍTICAS DE FLUXO (ENTRADA vs SAÍDA
 2. DÍZIMO, OFERTA E DOAÇÃO SÃO SEMPRE SAÍDA:
    - Pagamento para igreja, paróquia, templo, ONG, ou qualquer descrição contendo "Dízimo", "Oferta" ou "Doação" -> "tipo_movimentacao": "saida", SEM EXCEÇÃO — mesmo que o comprovante seja do tipo "notificação de recebimento" do lado de quem recebeu (o titular da conta do cliente aqui é sempre quem PAGA o dízimo, nunca a igreja).
    - Nesses casos use "categoria": "Doações / Contribuições" (ou "Retirada / Pró-labore" se pelo contexto for claramente uma despesa pessoal do titular lançada na conta da empresa) e "grupo_dre": "admin_doacoes_contribuicoes".
-   - NUNCA classifique dízimo, oferta, doação ou transferência enviada como faturamento, venda ou qualquer chave do bloco RECEITA_BRUTA.`;
+   - NUNCA classifique dízimo, oferta, doação ou transferência enviada como faturamento, venda ou qualquer chave do bloco RECEITA_BRUTA.
+
+3. TRANSFERÊNCIA ENTRE CONTAS DO MESMO TITULAR (02/09/2026 — pedido do Aroldo, caso real: cliente move dinheiro entre os próprios bancos):
+   - Se o PAGADOR/REMETENTE e o RECEBEDOR/FAVORECIDO forem a MESMA pessoa ou empresa (mesmo CPF, mesmo CNPJ, ou claramente o mesmo nome/titular em bancos diferentes), OU se a descrição disser "transferência entre contas", "mesma titularidade", "aplicação"/"resgate" da própria conta -> NÃO é receita nem despesa de resultado, é só o dinheiro trocando de conta.
+   - Preencha "tipo_movimentacao" com a direção da perna que o documento mostra (entrada se é o crédito, saída se é o débito), mas use SEMPRE "categoria": "Transferência entre Contas" e "grupo_dre": "transferencia_entre_contas".
+   - NUNCA classifique isso como venda, faturamento, retirada, pró-labore, nem nenhuma chave de RECEITA_BRUTA/CUSTOS/DESPESAS.`;
 
 // 17/08/2026 (sugestão do analista financeiro do Aroldo, risco crítico real de escritório de
 // advocacia/contabilidade/consultoria) — dinheiro que passa pela conta do cliente mas não é dele:
@@ -77,6 +82,7 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   "descricao": "descrição curta e objetiva do que foi pago/recebido",
   "estabelecimento_ou_pessoa": "nome de quem recebeu ou pagou",
   "documento_identificacao": "CNPJ, CPF ou chave/ID da transação, se disponível, senão null",
+  "cnpj_fornecedor": "CNPJ do EMITENTE/FORNECEDOR do documento (quem VENDEU / quem EMITIU a nota/cupom), só os 14 dígitos ou formatado — NÃO o CNPJ/CPF do pagador. null se não houver ou se for compra de pessoa física",
   "forma_pagamento": "pix | ted | doc | boleto | dinheiro | cartao_credito | cartao_debito | outro",
   "categoria": "categoria de despesa ou receita, definida dinamicamente (ver regras abaixo)",
   "subcategoria": "opcional, mais específica que a categoria, ou null",
@@ -225,7 +231,8 @@ REGRAS CRÍTICAS DE FLUXO ("tipo" entrada vs saída) — decida ANTES de listar,
 - Descrição contendo "Dízimo", "Oferta", "Doação" (pagamento a igreja, paróquia, templo, ONG) -> SEMPRE "saida", sem exceção — nunca classifique como "entrada" mesmo que o valor pareça um recebimento.
 
 REGRAS:
-- Liste TODAS as transações visíveis no extrato, uma por item do array, na ordem em que aparecem.
+- ⚠️ NUNCA liste linha de SALDO como transação (02/09/2026, caso real da cliente Sirlene — extrato de banco que imprime "Saldo do Dia" no meio da lista). NÃO são movimentações, são o retrato da conta num instante. Ignore TODA linha cujo texto seja ou contenha "Saldo do Dia", "Saldo Anterior", "Saldo Final", "Saldo do Período", "Saldo Disponível", "Saldo Bloqueado", "Saldo em C/C", "Saldo Atual", "S A L D O", "Saldo (+)" ou parecido. Se a linha só mostra um saldo e não descreve um pagamento/recebimento/transferência, ela NÃO entra em "transacoes". No máximo, use o valor dela pra preencher o "saldo_apos" da transação real imediatamente anterior daquele dia.
+- Liste TODAS as transações visíveis no extrato (menos as linhas de saldo, acima), uma por item do array, na ordem em que aparecem.
 - "valor" é sempre positivo (o sinal é indicado pelo campo "tipo", não pelo número).
 - "tipo" é "entrada" para depósitos/recebimentos/créditos e "saida" para pagamentos/débitos/saques.
 - "saldo_apos" é o saldo da conta logo após aquela transação, se estiver visível no extrato; caso contrário, use null.

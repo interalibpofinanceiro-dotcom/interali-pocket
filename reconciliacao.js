@@ -1,4 +1,10 @@
-const { GRUPOS_DRE, ROTULO_BLOCO, porChave } = require('./dre');
+const { GRUPOS_DRE, ROTULO_BLOCO, porChave, chaveForaDoResultado } = require('./dre');
+
+// Descrições de extrato que são claramente movimentação entre contas do próprio titular /
+// aplicação / resgate — não entram no fluxo de caixa de resultado (mesma ideia da chave
+// `transferencia_entre_contas` do lado dos lançamentos). Usado só quando o total é calculado
+// direto do extrato bruto, que não tem grupo_dre.
+const RE_EXTRATO_FORA_RESULTADO = /transf(er[êe]ncia)?\s+entre\s+contas|mesma\s+titularidade|aplica[çc][ãa]o\s+autom|resgate\s+autom|aplica[çc][ãa]o\s+financeira|resgate\s+de\s+aplica/i;
 
 const TOLERANCIA_DIAS = 3;
 const TOLERANCIA_VALOR = 0.01;
@@ -119,27 +125,32 @@ function reconciliar(lancamentos, extrato) {
 //                           genérico — senão perderia o sentido de "ainda falta o comprovante".
 //   - Pendente            — comprovante normal, ainda não apareceu no extrato (o estado do dia a
 //                           dia, não é problema nenhum — só espera o próximo extrato confirmar).
+// Retorna Map cuja CHAVE é `lancamento.chave` (identificador único entre abas mensais, ver
+// mapearLancamento em sheets.js) com fallback pra `lancamento.linha` (dado que não veio do
+// buscarTodosLancamentos novo). Quem grava de volta (sincronizarConciliacaoNaPlanilha em
+// server.js) traduz a chave -> { aba, linha } real.
 function sincronizarConciliacao(lancamentos, extrato) {
   const { conciliados, somenteNosComprovantes } = reconciliar(lancamentos, extrato);
   const statusPorLinha = new Map();
+  const chaveDe = (l) => l.chave || l.linha;
 
   for (const { lancamento, divergencia, ambiguo } of conciliados) {
     if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
-      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
+      statusPorLinha.set(chaveDe(lancamento), { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
     } else if (ambiguo) {
-      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_DUVIDA', observacao: `Mais de uma transação do extrato com valor parecido (${formatarMoeda(lancamento.valor)}) nessa data — confirme qual é a correta.` });
+      statusPorLinha.set(chaveDe(lancamento), { status: 'PENDENTE_DUVIDA', observacao: `Mais de uma transação do extrato com valor parecido (${formatarMoeda(lancamento.valor)}) nessa data — confirme qual é a correta.` });
     } else {
       const observacao = divergencia !== null
         ? `Conciliado com divergência de ${formatarMoeda(Math.abs(divergencia))} (desconto/juros/arredondamento).`
         : '';
-      statusPorLinha.set(lancamento.linha, { status: 'CONCILIADO_OK', observacao });
+      statusPorLinha.set(chaveDe(lancamento), { status: 'CONCILIADO_OK', observacao });
     }
   }
   for (const lancamento of somenteNosComprovantes) {
     if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
-      statusPorLinha.set(lancamento.linha, { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
+      statusPorLinha.set(chaveDe(lancamento), { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
     } else {
-      statusPorLinha.set(lancamento.linha, { status: 'Pendente', observacao: '' });
+      statusPorLinha.set(chaveDe(lancamento), { status: 'Pendente', observacao: '' });
     }
   }
 
@@ -150,9 +161,16 @@ function sincronizarConciliacao(lancamentos, extrato) {
 // tem nenhum comprovante correspondente ainda — motiva o "identificamos um recebimento sem nota,
 // o que é isso?" logo na resposta do WhatsApp. Só olha as transações novas desta mensagem (não o
 // histórico inteiro) de propósito, pra não repetir o mesmo aviso a cada extrato seguinte enviado.
+// Rendimento de aplicação / juros sobre saldo — entrada que vem do próprio banco, classificada
+// sozinha (ver classificarTransacaoBancaria em server.js). Não é "recebimento sem nota", não
+// pergunta nada ao cliente.
+const RE_RENDIMENTO_BANCARIO = /rendimento|rend\s+pago|remunera[çc][ãa]o|juros\s+s\/?\s*saldo|juros\s+sobre\s+saldo/i;
+
 function encontrarTransacoesOrfas(transacoesNovas, lancamentos) {
   return transacoesNovas.filter((transacao) => {
     if (transacao.tipo !== 'entrada') return false;
+    if (RE_RENDIMENTO_BANCARIO.test(transacao.descricao || '')) return false;
+    if (RE_EXTRATO_FORA_RESULTADO.test(transacao.descricao || '')) return false;
     const dataTransacao = paraData(transacao.data);
 
     return !lancamentos.some((lancamento) => {
@@ -212,11 +230,17 @@ function filtrarPorPeriodo(lista, campoData, inicio, fim) {
   });
 }
 
+function foraDoResultado(item) {
+  if (item.grupo_dre) return chaveForaDoResultado(item.grupo_dre);
+  return RE_EXTRATO_FORA_RESULTADO.test(item.descricao || '');
+}
+
 function calcularTotais(lista, campoTipo) {
   let entradas = 0;
   let saidas = 0;
 
   for (const item of lista) {
+    if (foraDoResultado(item)) continue; // transferência entre contas / repasse / investimento
     if (item[campoTipo] === 'entrada') entradas += item.valor || 0;
     else if (item[campoTipo] === 'saida') saidas += item.valor || 0;
   }
@@ -639,11 +663,63 @@ function formatarDRE(dre, nomeCliente) {
   return linhas.join('\n');
 }
 
+// Fechamento mensal de UMA competência (02/09/2026) — dispara quando o cliente pede "fechar o
+// mês X" (ver server.js). Diferente do "resumo": olha só o mês-calendário da competência, casa
+// TUDO daquele mês com o extrato, e devolve os números que vão pro PDF (fechamento.js) e pras
+// abas de controle (Fechamento no cliente, Fechamentos na mestre).
+function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
+  const competencia = opcoes.competencia || new Date().toISOString().slice(0, 7);
+  const [ano, mes] = competencia.split('-').map(Number);
+  const inicio = new Date(ano, mes - 1, 1);
+  const fim = new Date(ano, mes, 0, 23, 59, 59);
+
+  const lancamentosMes = filtrarPorPeriodo(lancamentos, 'data', inicio, fim);
+  const extratoMes = filtrarPorPeriodo(extrato, 'data', inicio, fim);
+
+  const totais = calcularTotais(lancamentosMes, 'tipo_movimentacao');
+
+  const { conciliados, somenteNoExtrato, somenteNosComprovantes } = reconciliar(lancamentosMes, extratoMes);
+  const totalConciliavel = conciliados.length + somenteNosComprovantes.length;
+  const pctConciliado = totalConciliavel > 0 ? Math.round((conciliados.length / totalConciliavel) * 100) : 0;
+
+  const pendentesComprovante = lancamentosMes.filter((l) => l.status_conciliacao === 'PENDENTE_COMPROVANTE');
+  const pendentesDuvida = lancamentosMes.filter((l) => l.status_conciliacao === 'PENDENTE_DUVIDA');
+  const transferencias = lancamentosMes.filter((l) => l.grupo_dre === 'transferencia_entre_contas');
+
+  const dre = gerarDRE(lancamentos, { periodo: 'mes', referencia: fim });
+
+  const extratoComSaldo = extratoMes.filter((t) => t.saldo_apos !== null && t.saldo_apos !== undefined && t.data);
+  const saldoFinalExtrato = extratoComSaldo.length
+    ? extratoComSaldo.reduce((maisRecente, t) => (t.data >= maisRecente.data ? t : maisRecente)).saldo_apos
+    : null;
+
+  return {
+    competencia,
+    inicio,
+    fim,
+    entradas: totais.entradas,
+    saidas: totais.saidas,
+    resultado: totais.resultado,
+    qtdLancamentos: lancamentosMes.length,
+    qtdTransacoesExtrato: extratoMes.length,
+    pctConciliado,
+    conciliados: conciliados.length,
+    naoConciliados: somenteNosComprovantes.length,
+    somenteNoExtrato: somenteNoExtrato.length,
+    pendentesComprovante,
+    pendentesDuvida,
+    transferencias,
+    saldoFinalExtrato,
+    dre,
+  };
+}
+
 module.exports = {
   reconciliar,
   sincronizarConciliacao,
   encontrarTransacoesOrfas,
   gerarResumo,
+  gerarFechamento,
   formatarResumo,
   formatarDataBR,
   formatarUpsellEspecialista,

@@ -139,6 +139,36 @@ async function buscarMidiaBase64(mediaId) {
   return { buffer: Buffer.from(arrayBuffer), mimeType: info.mime_type };
 }
 
+// Envia um DOCUMENTO (PDF) — usado pro PDF do fechamento mensal (02/09/2026). Dois passos na
+// Cloud API: 1) upload do binário em /media (multipart) -> devolve um id; 2) mensagem tipo
+// "document" referenciando esse id. `FormData`/`Blob` são globais no Node 18+.
+async function enviarDocumentoWhatsApp(numeroDestinoPlanilha, buffer, nomeArquivo, legenda = '') {
+  const to = formatoPlanilhaParaNumero(numeroDestinoPlanilha);
+
+  const form = new FormData();
+  form.append('messaging_product', 'whatsapp');
+  form.append('type', 'application/pdf');
+  form.append('file', new Blob([buffer], { type: 'application/pdf' }), nomeArquivo || 'documento.pdf');
+
+  const respUpload = await fetch(`${GRAPH_API_URL}/${WHATSAPP_PHONE_NUMBER_ID}/media`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}` },
+    body: form,
+  });
+  const jsonUpload = await respUpload.json().catch(() => ({}));
+  if (!respUpload.ok || !jsonUpload.id) {
+    const detalhe = (jsonUpload.error && jsonUpload.error.message) || JSON.stringify(jsonUpload);
+    throw new Error(`Falha no upload de documento pra WhatsApp Cloud API: ${respUpload.status} ${detalhe}`);
+  }
+
+  return chamarGraphAPI(`/${WHATSAPP_PHONE_NUMBER_ID}/messages`, {
+    messaging_product: 'whatsapp',
+    to,
+    type: 'document',
+    document: { id: jsonUpload.id, filename: nomeArquivo || 'documento.pdf', caption: legenda || undefined },
+  });
+}
+
 // Confirma que as credenciais estão certas e o número tá acessível — usado no /health.
 async function testarConexaoWhatsApp() {
   return chamarGraphAPI(`/${WHATSAPP_PHONE_NUMBER_ID}?fields=display_phone_number,verified_name,quality_rating`, undefined, 'GET');
@@ -188,6 +218,7 @@ module.exports = {
   chamarGraphAPI,
   enviarMensagemWhatsApp,
   enviarTemplateWhatsApp,
+  enviarDocumentoWhatsApp,
   buscarMidiaBase64,
   testarConexaoWhatsApp,
   extrairMensagemDoWebhook,

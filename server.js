@@ -33,6 +33,8 @@ const {
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
   removerLinha,
+  competenciaDe,
+  getSheetsClient,
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
 } = require('./sheets');
@@ -65,7 +67,20 @@ const {
   gerarDRE,
   formatarDRE,
   formatarDataBR,
+  gerarFechamento,
 } = require('./reconciliacao');
+const { consultarCNPJ } = require('./cnae');
+const { sugerirPorCNAE } = require('./cnae-categorias');
+const { chaveForaDoResultado } = require('./dre');
+const {
+  registrarFechamentoCliente,
+  registrarFechamentoMestre,
+  competenciaEstaFechada,
+  gerarPdfFechamento,
+  formatarResumoFechamentoTexto,
+  interpretarComandoFechamento,
+  rotuloCompetencia,
+} = require('./fechamento');
 const {
   buscarClientePorNumero,
   listarClientesAtivos,
@@ -78,6 +93,7 @@ const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
   enviarTemplateWhatsApp,
+  enviarDocumentoWhatsApp,
   buscarMidiaBase64,
   testarConexaoWhatsApp,
   extrairMensagemDoWebhook,
@@ -593,6 +609,21 @@ async function executarCorrecao(remetente, cliente, sheetId, memoria, tipoAlvo) 
   return true;
 }
 
+// Linha de SALDO que às vezes vem no meio da lista de transações do extrato (Sicoob/BB/Cora) e o
+// Claude, mesmo com a regra no PROMPT_EXTRATO, pode escorregar e listar como transação — caso real
+// da cliente Sirlene (02/09/2026): 29 lançamentos "SALDO DO DIA" entraram como entrada e inflaram
+// o resultado. Rede de segurança: descarta antes de salvar/registrar qualquer transação cuja
+// descrição SEJA (ou comece com) uma expressão de saldo.
+const RE_LINHA_SALDO = /^\s*s\s*a\s*l\s*d\s*o\b|^\s*saldo\s*(do\s*dia|anterior|final|do\s*per[íi]odo|dispon[íi]vel|bloquead|em\s*c|atual|\(\+\)|:)?\s*$|saldo\s+do\s+dia|saldo\s+anterior/i;
+
+function ehLinhaDeSaldo(transacao) {
+  return RE_LINHA_SALDO.test((transacao.descricao || '').trim());
+}
+
+function removerLinhasDeSaldo(transacoes) {
+  return (transacoes || []).filter((t) => !ehLinhaDeSaldo(t));
+}
+
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
 // rejeitar o lote inteiro.
@@ -648,23 +679,85 @@ function existeDespesaFixaParecida(nova, despesasFixasExistentes) {
   ));
 }
 
+// Categoria "genérica" = a IA não soube classificar de verdade (deixou em "Não Classificado",
+// "Despesas Operacionais/Administrativas", ou grupo_dre nao_classificado). Só nesses casos o CNAE
+// ou a memória de fornecedor entram pra melhorar — nunca sobrescrevem uma classificação boa.
+const RE_CATEGORIA_GENERICA = /^\s*$|n[ãa]o\s*classificad|despesas?\s*(operaci|administrativ)|receita\s*operacional|n[ãa]o\s*identificad/i;
+
+function categoriaEhGenerica(dados) {
+  if (RE_CATEGORIA_GENERICA.test(dados.categoria || '')) return true;
+  if (!dados.grupo_dre || dados.grupo_dre === 'nao_classificado') return true;
+  return false;
+}
+
+// Enriquece `dados` (JSON já extraído pela IA) com o CNAE do fornecedor (02/09/2026). NUNCA faz
+// 2ª chamada ao Claude. Sempre preenche as colunas de metadado (CNPJ/razão social/CNAE) e uma
+// nota em observações. A CATEGORIA só muda quando: (a) já existe histórico do mesmo CNPJ nesse
+// cliente (memória de fornecedor); ou (b) a IA classificou genérico E o CNAE tem sugestão de
+// confiança "alta". Ver PLANO-FASE-COMPETENCIA.md item 6. Falha (API fora, sem CNPJ) é engolida
+// pelo .catch de quem chama — o lançamento segue com a categoria da IA.
+async function enriquecerLancamentoComCnae(dados, lancamentosExistentes) {
+  const registro = await consultarCNPJ(dados.cnpj_fornecedor || dados.documento_identificacao || '');
+  if (!registro) return;
+
+  dados.cnpj_fornecedor = registro.cnpj_formatado || dados.cnpj_fornecedor || '';
+  dados.razao_social_fornecedor = registro.razao_social || '';
+  dados.cnae_codigo = registro.cnae_codigo || '';
+  dados.cnae_descricao = registro.cnae_descricao || '';
+  if (!dados.fonte_categoria) dados.fonte_categoria = 'ia';
+
+  const nota = `Fornecedor: ${registro.razao_social || registro.cnpj_formatado} — atividade ${registro.cnae_codigo} ${registro.cnae_descricao}.`;
+  dados.observacoes = dados.observacoes ? `${dados.observacoes}\n${nota}` : nota;
+
+  // Transferência entre contas / repasse / investimento é decisão de contexto da IA — CNAE não mexe.
+  if (chaveForaDoResultado(dados.grupo_dre)) return;
+
+  const cnpjDigitos = (registro.cnpj || '').replace(/\D/g, '');
+  const historico = (lancamentosExistentes || [])
+    .filter((l) => (l.documento_identificacao || l.cnpj_fornecedor || '').replace(/\D/g, '') === cnpjDigitos)
+    .filter((l) => l.categoria && !RE_CATEGORIA_GENERICA.test(l.categoria) && l.grupo_dre && l.grupo_dre !== 'nao_classificado')
+    .filter((l) => l.tipo_movimentacao === dados.tipo_movimentacao);
+  const ultimo = historico[historico.length - 1];
+
+  if (categoriaEhGenerica(dados) && ultimo) {
+    dados.categoria = ultimo.categoria;
+    dados.subcategoria = ultimo.subcategoria || dados.subcategoria || '';
+    dados.grupo_dre = ultimo.grupo_dre;
+    dados.fonte_categoria = 'memoria_fornecedor';
+    return;
+  }
+
+  if (categoriaEhGenerica(dados)) {
+    const sugestao = sugerirPorCNAE(registro, dados.tipo_movimentacao);
+    if (sugestao && sugestao.confianca === 'alta' && sugestao.grupo_dre) {
+      dados.categoria = sugestao.categoria;
+      dados.subcategoria = sugestao.subcategoria || dados.subcategoria || '';
+      dados.grupo_dre = sugestao.grupo_dre;
+      dados.fonte_categoria = 'cnae';
+    }
+  }
+}
+
 // Salva o lançamento e, se o documento tinha itens detalhados (ex.: nota de fornecedor com
 // "Queijo Muçarela", "Azeitona Verde"...), salva eles também numa aba própria, ligados a este
 // lançamento — automático, sem precisar de configuração por cliente/nicho (o Claude já identifica
 // os itens sozinho na extração, só precisava parar de descartar isso ao salvar). Falha ao salvar
 // os itens não derruba o fluxo principal (o lançamento em si já está salvo) — só loga.
+// Devolve a referência { aba, linha, chave } do lançamento (abas mensais: aba = "2026-09 ·
+// Lançamentos", ver sheets.js). Quem chama usa pra ligar itens e a memória de correção.
 async function salvarComprovanteComItens(sheetId, dados) {
-  const linhaLancamento = await salvarComprovante(sheetId, dados);
+  const ref = await salvarComprovante(sheetId, dados);
 
   if (Array.isArray(dados.itens) && dados.itens.length > 0) {
     await salvarItens(sheetId, dados.itens, {
       data: dados.data,
       estabelecimento: dados.estabelecimento_ou_pessoa,
-      lancamentoLinha: linhaLancamento,
+      lancamentoLinha: ref && ref.linha,
+      lancamentoAba: ref && ref.aba,
     }).catch((erro) => console.error('Falha ao salvar itens do comprovante:', erro.message));
   }
 
-  return linhaLancamento;
+  return ref ? { ...ref, chave: `${ref.aba}#${ref.linha}` } : null;
 }
 
 // Classifica um lançamento contra uma lista de referência e executa a ação (salva direto, ou
@@ -678,12 +771,13 @@ async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, 
   if (resultado.status === 'completar') {
     // Já existia um lançamento PENDENTE_COMPROVANTE (nasceu do extrato, sem detalhe nenhum) —
     // completa a linha existente com os dados reais do comprovante em vez de criar uma nova.
-    await atualizarLancamento(sheetId, resultado.candidato.linha, {
+    const c = resultado.candidato;
+    await atualizarLancamento(sheetId, c.aba, c.linha, {
       ...dadosExtraidos,
       status_conciliacao: 'CONCILIADO_OK',
       observacao_conciliacao: 'Comprovante recebido — completou o lançamento que tinha vindo do extrato/fatura.',
     });
-    return { status: 'completar', linhaLancamento: resultado.candidato.linha };
+    return { status: 'completar', ref: { aba: c.aba, linha: c.linha, chave: c.chave || `${c.aba}#${c.linha}` } };
   }
 
   if (resultado.status === 'duplicado') {
@@ -695,8 +789,8 @@ async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, 
     return { status: 'ambiguo', candidato: resultado.candidato };
   }
 
-  const linhaLancamento = await salvarComprovanteComItens(sheetId, dadosExtraidos);
-  return { status: 'novo', linhaLancamento };
+  const ref = await salvarComprovanteComItens(sheetId, dadosExtraidos);
+  return { status: 'novo', ref };
 }
 
 // Processa um lançamento já extraído (de foto de comprovante OU do comando "lançar:" por texto) —
@@ -708,6 +802,7 @@ async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, 
 // correção de curto prazo (ver MEMORIA_ULTIMO_DOCUMENTO) pra permitir corrigir por texto depois.
 async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, documentoOriginal = null) {
   const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+  await enriquecerLancamentoComCnae(dadosExtraidos, lancamentosExistentes).catch((erro) => console.error('Falha no enriquecimento CNAE:', erro.message));
   const resultado = await classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosExistentes);
 
   if (resultado.status === 'completar') {
@@ -750,11 +845,11 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
   // Lançamento NOVO de verdade (não duplicado/completar/ambíguo) — se veio de um documento (não do
   // comando "lançar:" por texto), guarda na memória de correção de curto prazo (ver
   // aplicarCorrecaoUltimoDocumento) pra permitir "esse foi extrato"/"apaga o último" sem reenvio.
-  if (documentoOriginal && resultado.linhaLancamento) {
+  if (documentoOriginal && resultado.ref) {
     registrarMemoriaCorrecao(remetente, {
       sheetId,
-      aba: ABA_LANCAMENTOS,
-      linha: resultado.linhaLancamento,
+      aba: resultado.ref.aba,
+      linha: resultado.ref.linha,
       buffer: documentoOriginal.buffer,
       mimeType: documentoOriginal.mimeType,
       nomeArquivo: documentoOriginal.nomeArquivo,
@@ -763,6 +858,21 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
   }
 
   await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+
+  // Lançamento que cai numa competência JÁ FECHADA (comprovante retroativo — cliente mandou depois
+  // do fechamento do mês). Entra normal na aba do mês da data do comprovante, mas avisa que o
+  // fechamento daquele mês precisa ser refeito. Ver competenciaEstaFechada em fechamento.js.
+  const competenciaLancamento = competenciaDe(dadosExtraidos.data);
+  const competenciaCorrente = new Date().toISOString().slice(0, 7);
+  if (competenciaLancamento < competenciaCorrente) {
+    const fechada = await competenciaEstaFechada(cliente, competenciaLancamento).catch(() => false);
+    if (fechada) {
+      await enviarMensagemWhatsApp(
+        remetente,
+        `📌 Esse lançamento é de ${rotuloCompetencia(competenciaLancamento)}, mês que já foi fechado. Registrei na competência certa. Quando quiser, me peça pra *refazer o fechamento de ${rotuloCompetencia(competenciaLancamento)}* pra atualizar os números.`
+      );
+    }
+  }
 
   const prefixoMesAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
   const lancamentosDoMes = lancamentosExistentes.filter((l) => (l.data || '').startsWith(prefixoMesAtual));
@@ -804,14 +914,15 @@ async function processarLoteVendas(remetente, cliente, sheetId, vendas) {
     if (resultado.status === 'novo') {
       novas += 1;
       valorNovas += dados.valor || 0;
-      lancamentosParaComparar.push({ ...dados, hora: dados.hora || '' });
+      lancamentosParaComparar.push({ ...dados, hora: dados.hora || '', ...(resultado.ref || {}) });
     } else if (resultado.status === 'completar') {
       completadas += 1;
       // Atualiza a cópia em memória (mesma linha, dados novos, status já CONCILIADO_OK) pra não
       // deixar o resto do lote comparando contra a versão antiga (PENDENTE_COMPROVANTE) dessa linha.
-      const indiceExistente = lancamentosParaComparar.findIndex((l) => l.linha === resultado.linhaLancamento);
+      const chaveRef = resultado.ref && resultado.ref.chave;
+      const indiceExistente = lancamentosParaComparar.findIndex((l) => l.chave && l.chave === chaveRef);
       if (indiceExistente >= 0) {
-        lancamentosParaComparar[indiceExistente] = { ...dados, linha: resultado.linhaLancamento, hora: dados.hora || '', status_conciliacao: 'CONCILIADO_OK' };
+        lancamentosParaComparar[indiceExistente] = { ...dados, ...resultado.ref, hora: dados.hora || '', status_conciliacao: 'CONCILIADO_OK' };
       }
     } else if (resultado.status === 'duplicado') {
       jaRegistradas += 1;
@@ -953,11 +1064,11 @@ async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, 
   const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
   const atualizacoes = lancamentos
     .map((lancamento) => {
-      const novo = statusPorLinha.get(lancamento.linha) || { status: 'Pendente', observacao: '' };
-      return { linha: lancamento.linha, status: novo.status, observacao: novo.observacao, statusAnterior: lancamento.status_conciliacao };
+      const novo = statusPorLinha.get(lancamento.chave || lancamento.linha) || { status: 'Pendente', observacao: '' };
+      return { aba: lancamento.aba, linha: lancamento.linha, status: novo.status, observacao: novo.observacao, statusAnterior: lancamento.status_conciliacao };
     })
     .filter(({ status, statusAnterior }) => status !== statusAnterior)
-    .map(({ linha, status, observacao }) => ({ linha, status, observacao }));
+    .map(({ aba, linha, status, observacao }) => ({ aba, linha, status, observacao }));
 
   await atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
 }
@@ -970,11 +1081,37 @@ async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, 
 // não só perguntada). Cada uma nasce com status PENDENTE_COMPROVANTE — fica "congelada" nesse
 // status pelo sincronizarConciliacao (ver reconciliacao.js) até o comprovante de verdade chegar e
 // completar a linha (ver "completar" em classificarESalvarLancamento).
+// Classificador determinístico de tarifa bancária / rendimento de aplicação a partir da descrição
+// da transação do extrato (02/09/2026, pedido do Aroldo: "quando o extrato tiver tarifas ou
+// rendimentos, categorizar da mesma forma, não precisa perguntar de novo"). Não chama IA. Esses
+// lançamentos nascem do banco e NUNCA vão ter um comprovante, então já entram CONCILIADO_OK e
+// ficam fora da pergunta "recebimento sem nota". Devolve null quando a descrição não é nem tarifa
+// nem rendimento (segue o fluxo de órfão normal — PENDENTE_COMPROVANTE).
+const RE_TARIFA = /\btarifa|cesta\s+de\s+servi[çc]|pacote\s+de\s+servi[çc]|manuten[çc][ãa]o\s+de\s+conta|tar\s+(ted|doc|pix|pacote)|\biof\b|anuidade|taxa\s+de\s+manuten|c\/c\s+tarifa/i;
+const RE_RENDIMENTO = /rendimento|rend\s+pago|remunera[çc][ãa]o|juros\s+s\/?\s*saldo|juros\s+sobre\s+saldo|aplica[çc][ãa]o\s+autom.*rendiment|resgate.*rendiment/i;
+const RE_TRANSF_MESMO_TITULAR = /transf(er[êe]ncia)?\s+entre\s+contas|mesma\s+titularidade|entre\s+contas\s+propri|aplica[çc][ãa]o\s+autom(?!.*rendiment)|resgate\s+autom(?!.*rendiment)|aplica[çc][ãa]o\s+financeira|resgate\s+de\s+aplica/i;
+
+function classificarTransacaoBancaria(transacao) {
+  const desc = transacao.descricao || '';
+  if (RE_TRANSF_MESMO_TITULAR.test(desc)) {
+    return { categoria: 'Transferência entre Contas', subcategoria: 'Mesmo titular', grupo_dre: 'transferencia_entre_contas' };
+  }
+  if (transacao.tipo === 'saida' && RE_TARIFA.test(desc)) {
+    return { categoria: 'Tarifas Bancárias', subcategoria: 'Tarifa de conta', grupo_dre: 'financeiro_tarifas' };
+  }
+  if (transacao.tipo === 'entrada' && RE_RENDIMENTO.test(desc)) {
+    return { categoria: 'Rendimentos de Aplicações', subcategoria: 'Rendimento de conta', grupo_dre: 'financeiro_rendimentos' };
+  }
+  return null;
+}
+
 async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
   const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
   let registrados = 0;
 
   for (const transacao of somenteNoExtrato) {
+    const auto = classificarTransacaoBancaria(transacao);
+
     await salvarComprovanteComItens(sheetId, {
       data: transacao.data,
       hora: '',
@@ -982,15 +1119,55 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
       tipo_movimentacao: transacao.tipo,
       descricao: transacao.descricao || '',
       estabelecimento_ou_pessoa: transacao.descricao || '',
-      categoria: 'Não Classificado',
-      grupo_dre: 'nao_classificado',
-      status_conciliacao: 'PENDENTE_COMPROVANTE',
-      observacao_conciliacao: 'Lançado via extrato/fatura. Comprovante original pendente.',
+      categoria: auto ? auto.categoria : 'Não Classificado',
+      subcategoria: auto ? auto.subcategoria : '',
+      grupo_dre: auto ? auto.grupo_dre : 'nao_classificado',
+      status_conciliacao: auto ? 'CONCILIADO_OK' : 'PENDENTE_COMPROVANTE',
+      observacao_conciliacao: auto
+        ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
+        : 'Lançado via extrato/fatura. Comprovante original pendente.',
     });
     registrados += 1;
   }
 
   return registrados;
+}
+
+// Fechamento mensal de uma competência (02/09/2026) — disparado pelo comando "fechar <mês>".
+// Roda a conciliação, calcula o fechamento (reconciliacao.gerarFechamento), grava nas abas de
+// controle (Fechamento do cliente + Fechamentos da mestre), manda o resumo em texto e o PDF.
+async function processarFechamentoMes(remetente, cliente, sheetId, competencia) {
+  await enviarMensagemWhatsApp(remetente, `⏳ Fechando ${rotuloCompetencia(competencia)}... rodando a conciliação e montando o relatório.`);
+
+  // Recalcula o Status_Conciliacao com tudo que já foi enviado antes de fotografar o mês.
+  await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar antes do fechamento:', erro.message));
+
+  const [lancamentos, extrato, contasAPagar] = await Promise.all([
+    buscarTodosLancamentos(sheetId),
+    buscarExtrato(sheetId),
+    buscarContasAPagar(sheetId),
+  ]);
+
+  const fechamento = gerarFechamento(lancamentos, extrato, contasAPagar, { competencia });
+
+  if (fechamento.qtdLancamentos === 0 && fechamento.qtdTransacoesExtrato === 0) {
+    await enviarMensagemWhatsApp(remetente, `Não encontrei nenhum lançamento nem transação de extrato em ${rotuloCompetencia(competencia)}. Confere se você já me mandou os comprovantes e o extrato desse mês.`);
+    return;
+  }
+
+  await registrarFechamentoCliente(sheetId, fechamento, 'FECHADO').catch((erro) => console.error('Falha ao gravar Fechamento do cliente:', erro.message));
+  await registrarFechamentoMestre(cliente, fechamento, 'FECHADO').catch((erro) => console.error('Falha ao gravar Fechamentos na mestre:', erro.message));
+
+  await enviarMensagemWhatsApp(remetente, formatarResumoFechamentoTexto(cliente, fechamento));
+
+  try {
+    const pdf = await gerarPdfFechamento(cliente, fechamento);
+    const nomeArquivo = `Fechamento ${rotuloCompetencia(competencia).replace('/', '-')}.pdf`;
+    await enviarDocumentoWhatsApp(remetente, pdf, nomeArquivo, `Fechamento de ${rotuloCompetencia(competencia)}`);
+  } catch (erro) {
+    console.error('Falha ao gerar/enviar PDF do fechamento:', erro.message);
+    await enviarMensagemWhatsApp(remetente, 'O resumo acima está completo — só o PDF que não consegui gerar agora. Me avise se quiser que eu tente de novo.');
+  }
 }
 
 async function gerarProjecao(sheetId, dias) {
@@ -1262,15 +1439,15 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
 
   const contasExistentes = await buscarContasAPagar(sheetId);
   const contasNovas = filtrarContasAPagarNovas([conta], contasExistentes);
-  const linhaContaNova = await salvarContasAPagar(sheetId, contasNovas);
+  const refContaNova = await salvarContasAPagar(sheetId, contasNovas);
 
   // Registrada de verdade (não era duplicata) — grava na memória de correção de curto prazo, mesmo
-  // princípio do lançamento único acima (ver processarLancamentoExtraido).
-  if (contasNovas.length > 0 && linhaContaNova) {
+  // princípio do lançamento único acima (ver processarLancamentoExtraido). refContaNova = { aba, linha }.
+  if (contasNovas.length > 0 && refContaNova && refContaNova.linha) {
     registrarMemoriaCorrecao(remetente, {
       sheetId,
-      aba: ABA_CONTAS_A_PAGAR,
-      linha: linhaContaNova,
+      aba: refContaNova.aba,
+      linha: refContaNova.linha,
       buffer, mimeType, nomeArquivo: opts.nomeArquivo || null,
       resumoTipo: 'fatura_pendente',
     });
@@ -1392,7 +1569,10 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   if (sinal.includes('extrato')) {
-    const transacoes = await extrairExtratoDeBuffer(buffer, mimeType);
+    const transacoesBrutas = await extrairExtratoDeBuffer(buffer, mimeType);
+    const transacoes = removerLinhasDeSaldo(transacoesBrutas);
+    const linhasSaldoIgnoradas = transacoesBrutas.length - transacoes.length;
+    if (linhasSaldoIgnoradas > 0) console.log(`Extrato: ${linhasSaldoIgnoradas} linha(s) de saldo ignorada(s) (não são transação).`);
     const extratoExistente = await buscarExtrato(sheetId);
     const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
     const duplicadas = transacoes.length - transacoesNovas.length;
@@ -1857,8 +2037,14 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
       const comandoDespesaFixa = interpretarComandoDespesaFixa(interpretado.texto);
       const comandoContaAReceber = interpretarComandoContaAReceber(interpretado.texto);
+      const competenciaFechar = interpretarComandoFechamento(interpretado.texto);
 
-      if (comandoLancamento) {
+      if (competenciaFechar) {
+        // "fechar agosto" / "fazer o fechamento do mês 08" — comando explícito, a qualquer momento
+        // (normalmente no mês seguinte, depois de o cliente ter mandado os extratos). Ver
+        // fechamento.js. Checado ANTES de "resumo"/"fechamento" (que é só a leitura rápida).
+        await processarFechamentoMes(remetente, cliente, sheetId, competenciaFechar);
+      } else if (comandoLancamento) {
         // Lançamento manual por texto — sem foto, então não passa pela extração de imagem; usa
         // extrairComprovanteDeTexto (mesma categorização dinâmica por nicho, mesmo grupo_dre) e
         // depois entra no MESMO fluxo de checagem de duplicidade/salvamento que a foto usa.

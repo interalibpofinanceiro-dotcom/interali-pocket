@@ -15,68 +15,115 @@ function numeroBR(valor) {
   return Number.isNaN(numero) ? 0 : numero;
 }
 
-const ABA_LANCAMENTOS = 'Lancamentos';
-// Grupo_DRE, Conta_Bancaria e Status_Conciliacao foram ADICIONADAS no fim em 07/08/2026, e
-// Observacao_Conciliacao em 14/08/2026 (não inseridas no meio) de propósito — clientes que já
-// tinham linhas gravadas com cabeçalho mais curto continuam lendo certo, as colunas novas é que
-// ficam em branco pra eles até o próximo lançamento/sincronização.
+// ---------------------------------------------------------------------------------------------
+// ABAS MENSAIS POR COMPETÊNCIA (02/09/2026, pedido do Aroldo)
+// ---------------------------------------------------------------------------------------------
+// Antes: uma aba única por tipo (`Lancamentos`, `Extrato`, ...), append-only, pra sempre.
+// Agora: uma aba por MÊS DE COMPETÊNCIA, ex.: `2026-09 · Lançamentos`, `2026-08 · Extrato`.
+// Competência = mês da DATA DO COMPROVANTE, sempre (nunca a data de envio) — cliente que manda o
+// comprovante de agosto só em setembro continua caindo em agosto.
+// A aba do mês mais novo fica na EXTREMA ESQUERDA (índice 0), meses antigos à direita.
+//
+// Abas de config/controle NÃO são mensais e continuam únicas: `DespesasFixas`, `Fechamento`
+// (resumo por competência, ver fechamento.js), `Matriz` (comercio-matriz.js), e na planilha
+// mestre `Clientes`, `Cache_CNPJ`, `Fechamentos`.
+//
+// LEGADO: as abas únicas antigas (`Lancamentos` etc., sem ` · `) continuam sendo LIDAS junto com
+// as mensais até `scripts/migrar-competencia.js` mover as linhas e removê-las. Assim o deploy não
+// precisa ser atômico com a migração — nada some no intervalo.
+
+const SUFIXO = {
+  LANCAMENTOS: 'Lançamentos',
+  EXTRATO: 'Extrato',
+  CONTAS_A_PAGAR: 'Contas a Pagar',
+  CONTAS_A_RECEBER: 'Contas a Receber',
+  ITENS: 'Itens',
+};
+const ORDEM_SUFIXO = [SUFIXO.LANCAMENTOS, SUFIXO.EXTRATO, SUFIXO.CONTAS_A_PAGAR, SUFIXO.CONTAS_A_RECEBER, SUFIXO.ITENS];
+const RE_ABA_MENSAL = /^(\d{4}-\d{2}) · (.+)$/;
+
+// Nome da aba legada (única, pré-partição) de cada tipo — lida como fallback até a migração.
+const ABA_LEGADO = {
+  [SUFIXO.LANCAMENTOS]: 'Lancamentos',
+  [SUFIXO.EXTRATO]: 'Extrato',
+  [SUFIXO.CONTAS_A_PAGAR]: 'ContasAPagar',
+  [SUFIXO.CONTAS_A_RECEBER]: 'ContasAReceber',
+  [SUFIXO.ITENS]: 'ItensComprovante',
+};
+
+// Compat: outros módulos ainda importam ABA_LANCAMENTOS / ABA_CONTAS_A_PAGAR como identificador
+// simbólico (ex.: memória de correção em server.js). Mantidos como o SUFIXO — quem grava/apaga
+// agora passa também a competência/aba real.
+const ABA_LANCAMENTOS = SUFIXO.LANCAMENTOS;
+const ABA_CONTAS_A_PAGAR = SUFIXO.CONTAS_A_PAGAR;
+
+// Grupo_DRE, Conta_Bancaria e Status_Conciliacao foram ADICIONADAS no fim em 07/08/2026,
+// Observacao_Conciliacao em 14/08/2026, e Competencia + colunas de CNAE em 02/09/2026 — sempre no
+// FIM, nunca no meio, pra não quebrar índice de coluna já em uso (ex.: COLUNA_STATUS_CONCILIACAO).
 const CABECALHO_LANCAMENTOS = [
   'Data', 'Hora', 'Valor', 'Tipo', 'Descricao', 'Estabelecimento_Pessoa',
   'Documento', 'Forma_Pagamento', 'Categoria', 'Subcategoria', 'Observacoes', 'Registrado_Em',
   'Grupo_DRE', 'Conta_Bancaria', 'Status_Conciliacao', 'Observacao_Conciliacao',
+  'Competencia', 'CNPJ_Fornecedor', 'Razao_Social_Fornecedor', 'CNAE_Codigo', 'CNAE_Descricao', 'Fonte_Categoria',
 ];
-const COLUNA_STATUS_CONCILIACAO = 'O'; // precisa bater com a posição de Status_Conciliacao acima (15ª coluna)
-const COLUNA_OBSERVACAO_CONCILIACAO = 'P'; // 16ª coluna — detalhe do Status_Conciliacao (ex.: motivo da dúvida)
+const COLUNA_STATUS_CONCILIACAO = 'O'; // 15ª coluna — Status_Conciliacao
+const COLUNA_OBSERVACAO_CONCILIACAO = 'P'; // 16ª coluna — detalhe do Status_Conciliacao
+const RANGE_LANCAMENTOS = 'A:V';
 
-const ABA_EXTRATO = 'Extrato';
-const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em'];
+const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em', 'Competencia'];
+const RANGE_EXTRATO = 'A:G';
 
-const ABA_CONTAS_A_PAGAR = 'ContasAPagar';
-// Grupo_DRE também adicionada no fim aqui, mesmo motivo do Lancamentos acima.
 const CABECALHO_CONTAS_A_PAGAR = [
   'Vencimento', 'Valor', 'Cartao', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
-  'Grupo_DRE',
+  'Grupo_DRE', 'Competencia',
 ];
+const RANGE_CONTAS_A_PAGAR = 'A:K';
 
-// Itens individuais de cada comprovante/nota (ex.: "Queijo Muçarela 5kg", "Azeitona Verde 2kg") —
-// o Claude já extrai isso (campo `itens[]`, ver prompts.js) mas até 13/08/2026 era descartado na
-// hora de salvar, só ficava a categoria geral do documento inteiro. Guardado numa aba separada
-// (não dentro de Lancamentos, que é uma linha por documento) pra permitir responder perguntas tipo
-// "quanto comprei de queijo esse mês?" com precisão. `Lancamento_Linha` liga cada item de volta
-// pro lançamento pai (linha real na aba Lancamentos), só pra rastreabilidade/debug.
-const ABA_ITENS = 'ItensComprovante';
+const CABECALHO_CONTAS_A_RECEBER = [
+  'Vencimento', 'Valor', 'Cliente_Devedor', 'Descricao', 'Categoria', 'Documento', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
+  'Grupo_DRE', 'Competencia',
+];
+const RANGE_CONTAS_A_RECEBER = 'A:K';
+
 const CABECALHO_ITENS = [
   'Data', 'Lancamento_Linha', 'Estabelecimento_Pessoa', 'Descricao', 'Quantidade', 'Valor_Unitario', 'Valor_Total', 'Registrado_Em',
+  'Competencia', 'Lancamento_Aba',
 ];
+const RANGE_ITENS = 'A:J';
 
-// Despesas/receitas fixas recorrentes (ex.: "todo dia 10 pago marketing R$1.000") — cadastradas
-// uma vez pelo comando "recorrente:" (ver server.js) e lançadas automaticamente todo mês pelo
-// endpoint /tarefas/despesas-fixas (chamado pelo cron diário do GitHub Actions). `Ultimo_Lancamento_Mes`
-// guarda o "AAAA-MM" do último mês em que já foi lançada, pra não lançar duas vezes no mesmo mês.
+// Despesas/receitas fixas recorrentes — NÃO é aba mensal (é config, uma regra que se repete).
 const ABA_DESPESAS_FIXAS = 'DespesasFixas';
-// Dia_Da_Semana adicionada no fim em 14/08/2026 (mesmo motivo de sempre — não reordena as que já
-// existem): despesa/receita fixa pode se repetir todo MÊS (Dia_Do_Mes) OU toda SEMANA (Dia_Da_Semana,
-// 0=domingo...6=sábado) — só uma das duas é preenchida por cadastro. Ultimo_Lancamento_Mes também
-// virou Ultima_Data_Lancamento na prática (guarda a data exata do último lançamento, não só o mês)
-// pra funcionar com os dois tipos de recorrência sem precisar de 2 colunas de controle.
 const CABECALHO_DESPESAS_FIXAS = [
   'Descricao', 'Valor', 'Dia_Do_Mes', 'Tipo', 'Estabelecimento_Pessoa', 'Categoria', 'Subcategoria', 'Grupo_DRE',
   'Ativo', 'Registrado_Em', 'Ultima_Data_Lancamento', 'Dia_Da_Semana',
 ];
 
-// Contas a RECEBER (14/08/2026, pedido do Aroldo) — dinheiro que terceiros ainda devem ao
-// cliente (nota fiscal emitida, venda parcelada, serviço prestado e ainda não pago), espelhando
-// ContasAPagar mas em sentido inverso. Mesma lógica de "em aberto": não tem coluna de status —
-// uma conta some da lista assim que aparecer um lançamento de ENTRADA que bate com ela (mesmo
-// valor, perto do vencimento), igual filtrarContasEmAberto já faz pra ContasAPagar.
-const ABA_CONTAS_A_RECEBER = 'ContasAReceber';
-const CABECALHO_CONTAS_A_RECEBER = [
-  'Vencimento', 'Valor', 'Cliente_Devedor', 'Descricao', 'Categoria', 'Documento', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
-  'Grupo_DRE',
-];
+// "2026-08-14" -> "2026-08". Sem data reconhecível -> mês corrente (fallback pra documento sem data).
+function competenciaDe(dataISO) {
+  const m = String(dataISO || '').trim().match(/^(\d{4})-(\d{2})/);
+  if (m) return `${m[1]}-${m[2]}`;
+  return new Date().toISOString().slice(0, 7);
+}
+
+function competenciaDaAba(titulo) {
+  const m = String(titulo || '').match(RE_ABA_MENSAL);
+  return m ? m[1] : null;
+}
+
+function colunaLetra(n) {
+  let s = '';
+  let x = n;
+  while (x > 0) {
+    const resto = (x - 1) % 26;
+    s = String.fromCharCode(65 + resto) + s;
+    x = Math.floor((x - 1) / 26);
+  }
+  return s;
+}
 
 // Extrai o número da linha real a partir do "updatedRange" que a API do Sheets devolve depois de
-// um append (ex.: "Lancamentos!A5:O5" -> 5) — usado pra ligar os itens de volta pro lançamento pai.
+// um append (ex.: "'2026-09 · Lançamentos'!A5:V5" -> 5) — casa a partir do "!", então funciona
+// mesmo com o nome da aba entre aspas e com espaços.
 function extrairNumeroLinha(updatedRange) {
   const match = (updatedRange || '').match(/![A-Z]+(\d+):/);
   return match ? Number(match[1]) : null;
@@ -96,6 +143,75 @@ function getSheetsClient() {
   return google.sheets({ version: 'v4', auth: getAuthClient() });
 }
 
+// Reordena as abas: mensais primeiro (mês desc = mais novo à esquerda, depois ordem fixa de tipo),
+// abas de controle depois. Chamada só quando uma aba de mês novo é criada (raro).
+async function reordenarAbas(sheets, spreadsheetId) {
+  const planilha = await sheets.spreadsheets.get({ spreadsheetId });
+  const props = planilha.data.sheets.map((s) => s.properties);
+
+  const mensais = [];
+  const controle = [];
+  for (const p of props) {
+    const m = p.title.match(RE_ABA_MENSAL);
+    if (m) mensais.push({ ...p, competencia: m[1], sufixo: m[2] });
+    else controle.push(p);
+  }
+
+  mensais.sort((a, b) => {
+    if (a.competencia !== b.competencia) return b.competencia.localeCompare(a.competencia); // desc
+    const ia = ORDEM_SUFIXO.indexOf(a.sufixo);
+    const ib = ORDEM_SUFIXO.indexOf(b.sufixo);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+  });
+
+  const desejada = [...mensais, ...controle];
+  const requests = [];
+  desejada.forEach((p, idx) => {
+    if (p.index !== idx) {
+      requests.push({ updateSheetProperties: { properties: { sheetId: p.sheetId, index: idx }, fields: 'index' } });
+    }
+  });
+
+  if (requests.length) {
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
+  }
+}
+
+// Garante a aba mensal `<competencia> · <sufixo>` com o cabeçalho certo. Cria + reordena se for
+// nova. Migração leve de cabeçalho curto, igual garantirAbaComCabecalho fazia. Devolve o título.
+async function garantirAbaMensal(sheets, spreadsheetId, competencia, sufixo, cabecalho) {
+  const titulo = `${competencia} · ${sufixo}`;
+  const planilha = await sheets.spreadsheets.get({ spreadsheetId });
+  const existe = planilha.data.sheets.some((s) => s.properties.title === titulo);
+
+  if (!existe) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests: [{ addSheet: { properties: { title: titulo } } }] },
+    });
+  }
+
+  const ultima = colunaLetra(cabecalho.length);
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${titulo}!A1:${ultima}1` });
+  const cabecalhoAtual = (resposta.data.values && resposta.data.values[0]) || [];
+
+  if (cabecalhoAtual.length < cabecalho.length) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${titulo}!A1:${ultima}1`,
+      valueInputOption: 'RAW',
+      requestBody: { values: [cabecalho] },
+    });
+  }
+
+  if (!existe) {
+    await reordenarAbas(sheets, spreadsheetId).catch((erro) => console.error('Falha ao reordenar abas:', erro.message));
+  }
+
+  return titulo;
+}
+
+// Aba de config/controle (não-mensal) — mesma garantia de cabeçalho de antes.
 async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho) {
   const planilha = await sheets.spreadsheets.get({ spreadsheetId });
   const abaExiste = planilha.data.sheets.some((aba) => aba.properties.title === nomeAba);
@@ -103,24 +219,14 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   if (!abaExiste) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
-      requestBody: {
-        requests: [{ addSheet: { properties: { title: nomeAba } } }],
-      },
+      requestBody: { requests: [{ addSheet: { properties: { title: nomeAba } } }] },
     });
   }
 
-  const ultimaColuna = String.fromCharCode('A'.charCodeAt(0) + cabecalho.length - 1);
-  const resposta = await sheets.spreadsheets.values.get({
-    spreadsheetId,
-    range: `${nomeAba}!A1:${ultimaColuna}1`,
-  });
-
+  const ultimaColuna = colunaLetra(cabecalho.length);
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!A1:${ultimaColuna}1` });
   const cabecalhoAtual = (resposta.data.values && resposta.data.values[0]) || [];
 
-  // Reescreve o cabeçalho quando a aba é nova (cabeçalho vazio) OU quando o cabeçalho já
-  // existente é mais curto que o esperado — isso acontece pra clientes cadastrados antes de uma
-  // coluna nova ser adicionada (ex.: Grupo_DRE/Status_Conciliacao, 07/08/2026). É seguro porque
-  // `cabecalho` só ACRESCENTA colunas no fim, nunca reordena ou apaga as que já existem.
   if (cabecalhoAtual.length < cabecalho.length) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
@@ -133,33 +239,51 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
 
 async function buscarLinhas(spreadsheetId, nomeAba, range) {
   const sheets = getSheetsClient();
-
   try {
-    // Fica com FORMATTED_VALUE (padrão) de propósito — UNFORMATTED_VALUE resolveria o problema de
-    // número (ver numeroBR abaixo) mas quebraria as colunas de DATA, que voltariam como número de
-    // série do Sheets (ex.: 46238) em vez de "2026-08-03" — pior o remédio que a doença.
     const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}` });
     return resposta.data.values || [];
   } catch (error) {
-    if (error.code === 400 || error.code === 404) {
-      return [];
-    }
+    if (error.code === 400 || error.code === 404) return [];
     throw error;
   }
 }
 
-// Devolve o número da linha real onde o lançamento caiu (ver extrairNumeroLinha) — quem chama usa
-// isso pra ligar os itens do documento (salvarItens) de volta a este lançamento específico.
-// `dados.status_conciliacao`/`dados.observacao_conciliacao` são opcionais — por padrão começa
-// "Pendente" (aguardando aparecer no extrato, o caso normal de todo comprovante novo); quem
-// registra um lançamento a partir de um extrato órfão (sem comprovante) passa "PENDENTE_COMPROVANTE"
-// explicitamente (ver processarExtratoOrfaos em server.js).
-async function salvarComprovante(spreadsheetId, dados) {
+// Lê TODAS as abas mensais de um tipo (`sufixo`) + a aba legada única, num único batchGet.
+// Devolve [{ aba, competencia, valores: [[...linha...]] }] em ordem cronológica (mês asc).
+async function lerAbasDoTipo(spreadsheetId, sufixo, rangeCorpo) {
   const sheets = getSheetsClient();
+  const planilha = await sheets.spreadsheets.get({ spreadsheetId });
+  const titulos = planilha.data.sheets.map((s) => s.properties.title);
 
-  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_LANCAMENTOS, CABECALHO_LANCAMENTOS);
+  const mensais = titulos
+    .filter((t) => { const m = t.match(RE_ABA_MENSAL); return m && m[1] && m[2] === sufixo; })
+    .sort();
 
-  const linha = [
+  const legado = ABA_LEGADO[sufixo];
+  const temLegado = legado && titulos.includes(legado);
+  const alvos = [...mensais];
+  if (temLegado) alvos.push(legado);
+
+  if (alvos.length === 0) return [];
+
+  const resposta = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId,
+    ranges: alvos.map((t) => `${t}!${rangeCorpo}`),
+  });
+
+  return (resposta.data.valueRanges || []).map((vr, i) => ({
+    aba: alvos[i],
+    competencia: competenciaDaAba(alvos[i]),
+    valores: vr.values || [],
+  }));
+}
+
+// -------------------------------------------------------------------------------------------
+// LANÇAMENTOS
+// -------------------------------------------------------------------------------------------
+
+function linhaLancamento(dados, competencia) {
+  return [
     dados.data || '',
     dados.hora || '',
     dados.valor || 0,
@@ -174,67 +298,123 @@ async function salvarComprovante(spreadsheetId, dados) {
     new Date().toISOString(),
     dados.grupo_dre || '',
     dados.conta_bancaria || '',
-    dados.status_conciliacao || 'Pendente', // atualizado pra CONCILIADO_OK/PENDENTE_DUVIDA quando bater com o extrato (ver sincronizarConciliacao em reconciliacao.js)
+    dados.status_conciliacao || 'Pendente',
     dados.observacao_conciliacao || '',
+    competencia,
+    dados.cnpj_fornecedor || '',
+    dados.razao_social_fornecedor || '',
+    dados.cnae_codigo || '',
+    dados.cnae_descricao || '',
+    dados.fonte_categoria || '',
   ];
+}
+
+// Devolve { aba, linha } — quem chama liga os itens do documento (salvarItens) e a memória de
+// correção de curto prazo (server.js) a esse lançamento específico (aba + linha).
+async function salvarComprovante(spreadsheetId, dados) {
+  const sheets = getSheetsClient();
+  const competencia = competenciaDe(dados.data);
+  const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.LANCAMENTOS, CABECALHO_LANCAMENTOS);
 
   const resposta = await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_LANCAMENTOS}!A:P`,
+    range: `${aba}!${RANGE_LANCAMENTOS}`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [linha] },
+    requestBody: { values: [linhaLancamento(dados, competencia)] },
   });
 
-  return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
+  return { aba, linha: extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange) };
 }
 
-// Atualiza um lançamento JÁ EXISTENTE no lugar (reescreve a linha inteira, A:P) — usado quando um
-// comprovante de verdade chega depois pra "completar" um lançamento que tinha sido registrado
-// automaticamente a partir do extrato (status PENDENTE_COMPROVANTE, sem detalhe nenhum ainda).
-// Em vez de criar uma linha nova (duplicando) ou descartar o comprovante (perdendo a categoria
-// certa que ele traz), enriquece a linha existente com os dados reais e marca CONCILIADO_OK.
-async function atualizarLancamento(spreadsheetId, linha, dados) {
+// Reescreve a linha inteira (A:V) de um lançamento JÁ EXISTENTE, na aba dele — usado quando um
+// comprovante de verdade chega depois pra "completar" um lançamento que nasceu do extrato.
+async function atualizarLancamento(spreadsheetId, aba, linha, dados) {
   const sheets = getSheetsClient();
+  const competencia = competenciaDaAba(aba) || competenciaDe(dados.data);
+  const valores = linhaLancamento(dados, competencia);
+  valores[14] = dados.status_conciliacao || 'CONCILIADO_OK'; // Status_Conciliacao
 
-  const valores = [
-    dados.data || '',
-    dados.hora || '',
-    dados.valor || 0,
-    dados.tipo_movimentacao || '',
-    dados.descricao || '',
-    dados.estabelecimento_ou_pessoa || '',
-    dados.documento_identificacao || '',
-    dados.forma_pagamento || '',
-    dados.categoria || '',
-    dados.subcategoria || '',
-    dados.observacoes || '',
-    new Date().toISOString(),
-    dados.grupo_dre || '',
-    dados.conta_bancaria || '',
-    dados.status_conciliacao || 'CONCILIADO_OK',
-    dados.observacao_conciliacao || '',
-  ];
-
+  const ultima = colunaLetra(CABECALHO_LANCAMENTOS.length);
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${ABA_LANCAMENTOS}!A${linha}:P${linha}`,
+    range: `${aba}!A${linha}:${ultima}${linha}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [valores] },
   });
 }
 
-// Salva os itens individuais de um documento (campo `itens[]` da extração — ver prompts.js) numa
-// aba própria, ligados ao lançamento pai por `lancamentoLinha`. Automático: não depende de
-// configuração nenhuma por cliente/nicho, é só persistir o que o Claude já identifica sozinho.
-async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancamentoLinha }) {
-  if (!itens || itens.length === 0) {
-    return;
-  }
+function mapearLancamento(linha, aba, competenciaAba, indiceZero) {
+  const numeroLinha = indiceZero + 2;
+  return {
+    aba,
+    linha: numeroLinha,
+    chave: `${aba}#${numeroLinha}`, // identificador único entre abas — conciliação chaveia por isso
+    competencia: linha[16] || competenciaAba || competenciaDe(linha[0]),
+    data: linha[0] || '',
+    hora: linha[1] || '',
+    valor: numeroBR(linha[2]),
+    tipo_movimentacao: linha[3] || '',
+    descricao: linha[4] || '',
+    estabelecimento_ou_pessoa: linha[5] || '',
+    documento_identificacao: linha[6] || '',
+    forma_pagamento: linha[7] || '',
+    categoria: linha[8] || '',
+    subcategoria: linha[9] || '',
+    observacoes: linha[10] || '',
+    registrado_em: linha[11] || '',
+    grupo_dre: linha[12] || '',
+    conta_bancaria: linha[13] || '',
+    status_conciliacao: linha[14] || '',
+    observacao_conciliacao: linha[15] || '',
+    cnpj_fornecedor: linha[17] || '',
+    razao_social_fornecedor: linha[18] || '',
+    cnae_codigo: linha[19] || '',
+    cnae_descricao: linha[20] || '',
+    fonte_categoria: linha[21] || '',
+  };
+}
 
+async function buscarTodosLancamentos(spreadsheetId) {
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.LANCAMENTOS, RANGE_LANCAMENTOS.replace('A:', 'A2:'));
+  const saida = [];
+  for (const bloco of blocos) {
+    bloco.valores.forEach((linha, i) => saida.push(mapearLancamento(linha, bloco.aba, bloco.competencia, i)));
+  }
+  return saida;
+}
+
+// Atualiza Status_Conciliacao + Observacao_Conciliacao de várias linhas, possivelmente em abas
+// mensais diferentes — um único batchUpdate. `atualizacoes` = [{ aba, linha, status, observacao }].
+async function atualizarStatusConciliacaoEmLote(spreadsheetId, atualizacoes) {
+  if (!atualizacoes || atualizacoes.length === 0) return;
   const sheets = getSheetsClient();
 
-  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ITENS, CABECALHO_ITENS);
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      valueInputOption: 'RAW',
+      data: atualizacoes.flatMap(({ aba, linha, status, observacao }) => {
+        const celulas = [{ range: `${aba}!${COLUNA_STATUS_CONCILIACAO}${linha}`, values: [[status]] }];
+        if (observacao !== undefined) {
+          celulas.push({ range: `${aba}!${COLUNA_OBSERVACAO_CONCILIACAO}${linha}`, values: [[observacao]] });
+        }
+        return celulas;
+      }),
+    },
+  });
+}
+
+// -------------------------------------------------------------------------------------------
+// ITENS DO COMPROVANTE
+// -------------------------------------------------------------------------------------------
+
+async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancamentoLinha, lancamentoAba }) {
+  if (!itens || itens.length === 0) return;
+
+  const sheets = getSheetsClient();
+  const competencia = competenciaDe(data);
+  const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.ITENS, CABECALHO_ITENS);
 
   const registradoEm = new Date().toISOString();
   const linhas = itens.map((item) => [
@@ -246,11 +426,13 @@ async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancam
     item.valor_unitario ?? '',
     item.valor_total ?? '',
     registradoEm,
+    competencia,
+    lancamentoAba || '',
   ]);
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_ITENS}!A:H`,
+    range: `${aba}!${RANGE_ITENS}`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
     requestBody: { values: linhas },
@@ -258,22 +440,31 @@ async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancam
 }
 
 async function buscarTodosItens(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_ITENS, 'A2:H');
-
-  return linhas.map((linha) => ({
-    data: linha[0] || '',
-    lancamento_linha: linha[1] || '',
-    estabelecimento_ou_pessoa: linha[2] || '',
-    descricao: linha[3] || '',
-    quantidade: linha[4] ? numeroBR(linha[4]) : null,
-    valor_unitario: linha[5] ? numeroBR(linha[5]) : null,
-    valor_total: linha[6] ? numeroBR(linha[6]) : null,
-  }));
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.ITENS, 'A2:J');
+  const saida = [];
+  for (const bloco of blocos) {
+    for (const linha of bloco.valores) {
+      saida.push({
+        data: linha[0] || '',
+        lancamento_linha: linha[1] || '',
+        estabelecimento_ou_pessoa: linha[2] || '',
+        descricao: linha[3] || '',
+        quantidade: linha[4] ? numeroBR(linha[4]) : null,
+        valor_unitario: linha[5] ? numeroBR(linha[5]) : null,
+        valor_total: linha[6] ? numeroBR(linha[6]) : null,
+        competencia: linha[8] || bloco.competencia || competenciaDe(linha[0]),
+      });
+    }
+  }
+  return saida;
 }
+
+// -------------------------------------------------------------------------------------------
+// DESPESAS FIXAS (config, aba única)
+// -------------------------------------------------------------------------------------------
 
 async function salvarDespesaFixa(spreadsheetId, dados) {
   const sheets = getSheetsClient();
-
   await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_DESPESAS_FIXAS, CABECALHO_DESPESAS_FIXAS);
 
   const linha = [
@@ -285,9 +476,9 @@ async function salvarDespesaFixa(spreadsheetId, dados) {
     dados.categoria || '',
     dados.subcategoria || '',
     dados.grupo_dre || '',
-    'Sim', // Ativo — cadastro novo sempre começa ativo
+    'Sim',
     new Date().toISOString(),
-    '', // Ultima_Data_Lancamento — vazio até o primeiro auto-lançamento
+    '',
     dados.dia_da_semana ?? '',
   ];
 
@@ -321,12 +512,8 @@ async function buscarDespesasFixas(spreadsheetId) {
   }));
 }
 
-// Marca a data exata (YYYY-MM-DD) do último auto-lançamento — funciona tanto pra recorrência
-// mensal quanto semanal: /tarefas/despesas-fixas só lança de novo se essa data for diferente de
-// hoje, então nunca duplica no mesmo dia, seja qual for a frequência.
 async function marcarDespesaFixaLancada(spreadsheetId, linha, dataISO) {
   const sheets = getSheetsClient();
-
   await sheets.spreadsheets.values.update({
     spreadsheetId,
     range: `${ABA_DESPESAS_FIXAS}!K${linha}`,
@@ -335,210 +522,206 @@ async function marcarDespesaFixaLancada(spreadsheetId, linha, dataISO) {
   });
 }
 
-async function buscarTodosLancamentos(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_LANCAMENTOS, 'A2:P');
+// -------------------------------------------------------------------------------------------
+// EXTRATO
+// -------------------------------------------------------------------------------------------
 
-  return linhas.map((linha, indice) => ({
-    linha: indice + 2, // número real da linha na planilha (cabeçalho ocupa a 1) — usado pra reescrever só o Status_Conciliacao depois, sem tocar no resto
-    data: linha[0] || '',
-    hora: linha[1] || '',
-    valor: numeroBR(linha[2]),
-    tipo_movimentacao: linha[3] || '',
-    descricao: linha[4] || '',
-    estabelecimento_ou_pessoa: linha[5] || '',
-    documento_identificacao: linha[6] || '',
-    forma_pagamento: linha[7] || '',
-    categoria: linha[8] || '',
-    subcategoria: linha[9] || '',
-    observacoes: linha[10] || '',
-    registrado_em: linha[11] || '',
-    grupo_dre: linha[12] || '',
-    conta_bancaria: linha[13] || '',
-    status_conciliacao: linha[14] || '',
-    observacao_conciliacao: linha[15] || '',
-  }));
-}
-
-// Atualiza Status_Conciliacao + Observacao_Conciliacao das linhas informadas, sem reescrever o
-// resto do lançamento — chamada depois de rodar sincronizarConciliacao() (reconciliacao.js). Um
-// único batchUpdate mesmo quando várias linhas mudam, pra não gastar uma chamada de API por linha.
-async function atualizarStatusConciliacaoEmLote(spreadsheetId, atualizacoes) {
-  if (!atualizacoes || atualizacoes.length === 0) return;
-
+// Um extrato pode cobrir mais de um mês (ex.: 15/08 a 14/09) — cada transação vai pra aba da sua
+// própria competência (data da transação).
+async function salvarExtrato(spreadsheetId, transacoes) {
+  if (!transacoes || transacoes.length === 0) return;
   const sheets = getSheetsClient();
 
-  await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId,
-    requestBody: {
-      valueInputOption: 'RAW',
-      data: atualizacoes.flatMap(({ linha, status, observacao }) => {
-        const celulas = [{ range: `${ABA_LANCAMENTOS}!${COLUNA_STATUS_CONCILIACAO}${linha}`, values: [[status]] }];
-        if (observacao !== undefined) {
-          celulas.push({ range: `${ABA_LANCAMENTOS}!${COLUNA_OBSERVACAO_CONCILIACAO}${linha}`, values: [[observacao]] });
-        }
-        return celulas;
-      }),
-    },
-  });
-}
-
-async function salvarExtrato(spreadsheetId, transacoes) {
-  if (!transacoes || transacoes.length === 0) {
-    return;
+  const porCompetencia = new Map();
+  for (const t of transacoes) {
+    const comp = competenciaDe(t.data);
+    if (!porCompetencia.has(comp)) porCompetencia.set(comp, []);
+    porCompetencia.get(comp).push(t);
   }
 
-  const sheets = getSheetsClient();
-
-  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_EXTRATO, CABECALHO_EXTRATO);
-
   const registradoEm = new Date().toISOString();
-  const linhas = transacoes.map((transacao) => [
-    transacao.data || '',
-    transacao.descricao || '',
-    transacao.valor || 0,
-    transacao.tipo || '',
-    transacao.saldo_apos ?? '',
-    registradoEm,
-  ]);
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${ABA_EXTRATO}!A:F`,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: linhas },
-  });
+  for (const [competencia, lote] of porCompetencia) {
+    const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.EXTRATO, CABECALHO_EXTRATO);
+    const linhas = lote.map((transacao) => [
+      transacao.data || '',
+      transacao.descricao || '',
+      transacao.valor || 0,
+      transacao.tipo || '',
+      transacao.saldo_apos ?? '',
+      registradoEm,
+      competencia,
+    ]);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${aba}!${RANGE_EXTRATO}`,
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: linhas },
+    });
+  }
 }
 
 async function buscarExtrato(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_EXTRATO, 'A2:F');
-
-  return linhas.map((linha) => ({
-    data: linha[0] || '',
-    descricao: linha[1] || '',
-    valor: numeroBR(linha[2]),
-    tipo: linha[3] || '',
-    saldo_apos: linha[4] ? numeroBR(linha[4]) : null,
-  }));
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.EXTRATO, 'A2:G');
+  const saida = [];
+  for (const bloco of blocos) {
+    for (const linha of bloco.valores) {
+      saida.push({
+        data: linha[0] || '',
+        descricao: linha[1] || '',
+        valor: numeroBR(linha[2]),
+        tipo: linha[3] || '',
+        saldo_apos: linha[4] ? numeroBR(linha[4]) : null,
+        competencia: linha[6] || bloco.competencia || competenciaDe(linha[0]),
+      });
+    }
+  }
+  return saida;
 }
 
-async function salvarContasAPagar(spreadsheetId, contas) {
-  if (!contas || contas.length === 0) {
-    return;
-  }
+// -------------------------------------------------------------------------------------------
+// CONTAS A PAGAR / A RECEBER — competência pelo VENCIMENTO
+// -------------------------------------------------------------------------------------------
 
+async function salvarContasAPagar(spreadsheetId, contas) {
+  if (!contas || contas.length === 0) return null;
   const sheets = getSheetsClient();
 
-  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_CONTAS_A_PAGAR, CABECALHO_CONTAS_A_PAGAR);
+  const porCompetencia = new Map();
+  for (const c of contas) {
+    const comp = competenciaDe(c.vencimento);
+    if (!porCompetencia.has(comp)) porCompetencia.set(comp, []);
+    porCompetencia.get(comp).push(c);
+  }
 
   const registradoEm = new Date().toISOString();
-  const linhas = contas.map((conta) => [
-    conta.vencimento || '',
-    conta.valor || 0,
-    conta.cartao || '',
-    conta.beneficiario || '',
-    conta.descricao || '',
-    conta.categoria || '',
-    conta.parcela_atual ?? '',
-    conta.parcela_total ?? '',
-    registradoEm,
-    conta.grupo_dre || '',
-  ]);
+  let primeiraLinha = null;
 
-  const resposta = await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${ABA_CONTAS_A_PAGAR}!A:J`,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: linhas },
-  });
+  for (const [competencia, lote] of porCompetencia) {
+    const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.CONTAS_A_PAGAR, CABECALHO_CONTAS_A_PAGAR);
+    const linhas = lote.map((conta) => [
+      conta.vencimento || '',
+      conta.valor || 0,
+      conta.cartao || '',
+      conta.beneficiario || '',
+      conta.descricao || '',
+      conta.categoria || '',
+      conta.parcela_atual ?? '',
+      conta.parcela_total ?? '',
+      registradoEm,
+      conta.grupo_dre || '',
+      competencia,
+    ]);
+    const resposta = await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${aba}!${RANGE_CONTAS_A_PAGAR}`,
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: linhas },
+    });
+    if (primeiraLinha === null) {
+      primeiraLinha = { aba, linha: extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange) };
+    }
+  }
 
-  // Devolve a linha da PRIMEIRA conta gravada (23/08/2026) — só é preciso/usado quando `contas`
-  // tem exatamente 1 item (caso da fatura-resumo pendente, ver processarFaturaComoResumo em
-  // server.js), pra alimentar a memória de correção de curto prazo. Com mais de 1 conta o valor
-  // ainda é o da primeira linha do lote, mas quem chama com lote não usa esse retorno.
-  return extrairNumeroLinha(resposta.data.updates && resposta.data.updates.updatedRange);
+  // Compat: processarFaturaComoResumo (pendente) chama com 1 conta só e usa o retorno pra memória
+  // de correção — devolve { aba, linha } da primeira. Com lote, quem chama não usa o retorno.
+  return primeiraLinha;
 }
 
 async function buscarContasAPagar(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_PAGAR, 'A2:J');
-
-  return linhas.map((linha) => ({
-    vencimento: linha[0] || '',
-    valor: numeroBR(linha[1]),
-    cartao: linha[2] || '',
-    beneficiario: linha[3] || '',
-    descricao: linha[4] || '',
-    categoria: linha[5] || '',
-    parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
-    parcela_total: linha[7] ? numeroBR(linha[7]) : null,
-    grupo_dre: linha[9] || '',
-  }));
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.CONTAS_A_PAGAR, 'A2:K');
+  const saida = [];
+  for (const bloco of blocos) {
+    for (const linha of bloco.valores) {
+      saida.push({
+        vencimento: linha[0] || '',
+        valor: numeroBR(linha[1]),
+        cartao: linha[2] || '',
+        beneficiario: linha[3] || '',
+        descricao: linha[4] || '',
+        categoria: linha[5] || '',
+        parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
+        parcela_total: linha[7] ? numeroBR(linha[7]) : null,
+        grupo_dre: linha[9] || '',
+        competencia: linha[10] || bloco.competencia || competenciaDe(linha[0]),
+      });
+    }
+  }
+  return saida;
 }
 
 async function salvarContasAReceber(spreadsheetId, contas) {
-  if (!contas || contas.length === 0) {
-    return;
-  }
-
+  if (!contas || contas.length === 0) return;
   const sheets = getSheetsClient();
 
-  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_CONTAS_A_RECEBER, CABECALHO_CONTAS_A_RECEBER);
+  const porCompetencia = new Map();
+  for (const c of contas) {
+    const comp = competenciaDe(c.vencimento);
+    if (!porCompetencia.has(comp)) porCompetencia.set(comp, []);
+    porCompetencia.get(comp).push(c);
+  }
 
   const registradoEm = new Date().toISOString();
-  const linhas = contas.map((conta) => [
-    conta.vencimento || '',
-    conta.valor || 0,
-    conta.cliente_devedor || '',
-    conta.descricao || '',
-    conta.categoria || '',
-    conta.documento || '',
-    conta.parcela_atual ?? '',
-    conta.parcela_total ?? '',
-    registradoEm,
-    conta.grupo_dre || '',
-  ]);
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId,
-    range: `${ABA_CONTAS_A_RECEBER}!A:J`,
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: linhas },
-  });
+  for (const [competencia, lote] of porCompetencia) {
+    const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.CONTAS_A_RECEBER, CABECALHO_CONTAS_A_RECEBER);
+    const linhas = lote.map((conta) => [
+      conta.vencimento || '',
+      conta.valor || 0,
+      conta.cliente_devedor || '',
+      conta.descricao || '',
+      conta.categoria || '',
+      conta.documento || '',
+      conta.parcela_atual ?? '',
+      conta.parcela_total ?? '',
+      registradoEm,
+      conta.grupo_dre || '',
+      competencia,
+    ]);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${aba}!${RANGE_CONTAS_A_RECEBER}`,
+      valueInputOption: 'USER_ENTERED',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values: linhas },
+    });
+  }
 }
 
 async function buscarContasAReceber(spreadsheetId) {
-  const linhas = await buscarLinhas(spreadsheetId, ABA_CONTAS_A_RECEBER, 'A2:J');
-
-  return linhas.map((linha) => ({
-    vencimento: linha[0] || '',
-    valor: numeroBR(linha[1]),
-    cliente_devedor: linha[2] || '',
-    descricao: linha[3] || '',
-    categoria: linha[4] || '',
-    documento: linha[5] || '',
-    parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
-    parcela_total: linha[7] ? numeroBR(linha[7]) : null,
-    grupo_dre: linha[9] || '',
-  }));
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.CONTAS_A_RECEBER, 'A2:K');
+  const saida = [];
+  for (const bloco of blocos) {
+    for (const linha of bloco.valores) {
+      saida.push({
+        vencimento: linha[0] || '',
+        valor: numeroBR(linha[1]),
+        cliente_devedor: linha[2] || '',
+        descricao: linha[3] || '',
+        categoria: linha[4] || '',
+        documento: linha[5] || '',
+        parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
+        parcela_total: linha[7] ? numeroBR(linha[7]) : null,
+        grupo_dre: linha[9] || '',
+        competencia: linha[10] || bloco.competencia || competenciaDe(linha[0]),
+      });
+    }
+  }
+  return saida;
 }
 
-// Descobre o sheetId NUMÉRICO (gid) de uma aba pelo nome — batchUpdate.deleteDimension (usado por
-// removerLinha, abaixo) opera por índice de aba, diferente de values.update/append que usam o nome.
+// -------------------------------------------------------------------------------------------
+// REMOVER LINHA (memória de correção "apaga o último")
+// -------------------------------------------------------------------------------------------
+
 async function obterSheetIdNumerico(sheets, spreadsheetId, nomeAba) {
   const planilha = await sheets.spreadsheets.get({ spreadsheetId });
   const aba = planilha.data.sheets.find((a) => a.properties.title === nomeAba);
   return aba ? aba.properties.sheetId : null;
 }
 
-// Remove uma linha específica de uma aba (23/08/2026, pedido do Aroldo: memória de correção de
-// curto prazo — "apaga o último"/"esse foi extrato" precisa desfazer o lançamento anterior de
-// verdade, não só marcar). ⚠️ Só é seguro chamar isso pra linha MAIS RECENTE da aba (a última
-// gravada) — deletar uma linha do meio desalinha qualquer número de linha já guardado em outro
-// lugar (ex.: Lancamento_Linha em ItensComprovante, ou candidatos de duplicidade em memória
-// apontando pra linhas abaixo dela). O chamador (ver aplicarCorrecaoUltimoDocumento em server.js)
-// só usa isso dentro da janela de 10min da memória de correção, exatamente pra essa garantia valer.
+// ⚠️ Só é seguro pra a linha MAIS RECENTE da aba (ver comentário original) — o chamador
+// (aplicarCorrecaoUltimoDocumento em server.js) só usa dentro da janela de 10min da memória.
 async function removerLinha(spreadsheetId, nomeAba, numeroLinha) {
   if (!numeroLinha) return false;
   const sheets = getSheetsClient();
@@ -550,12 +733,7 @@ async function removerLinha(spreadsheetId, nomeAba, numeroLinha) {
     requestBody: {
       requests: [{
         deleteDimension: {
-          range: {
-            sheetId,
-            dimension: 'ROWS',
-            startIndex: numeroLinha - 1, // deleteDimension é 0-indexed; numeroLinha vem 1-indexed (igual todo o resto do arquivo)
-            endIndex: numeroLinha,
-          },
+          range: { sheetId, dimension: 'ROWS', startIndex: numeroLinha - 1, endIndex: numeroLinha },
         },
       }],
     },
@@ -580,6 +758,20 @@ module.exports = {
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
   removerLinha,
+  competenciaDe,
+  garantirAbaMensal,
+  garantirAbaComCabecalho,
+  reordenarAbas,
+  getSheetsClient,
+  buscarLinhas,
+  SUFIXO,
+  RE_ABA_MENSAL,
+  ABA_LEGADO,
+  CABECALHO_LANCAMENTOS,
+  CABECALHO_EXTRATO,
+  CABECALHO_CONTAS_A_PAGAR,
+  CABECALHO_CONTAS_A_RECEBER,
+  CABECALHO_ITENS,
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
 };
