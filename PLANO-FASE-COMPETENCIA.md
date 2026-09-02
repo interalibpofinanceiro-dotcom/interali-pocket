@@ -158,6 +158,18 @@ Depende da Fase 1/2 estável (compartilha prompts.js/server.js/sheets.js).
 
 Retrocompatível com as planilhas existentes.
 
+## FASE 4 — Design executivo das planilhas (pedido do Aroldo 02/09/2026, NÃO iniciado)
+
+`sheets-styler.js` novo + `estilizarPlanilhaCliente(spreadsheetId)` exportada em sheets.js.
+Aplica via batchUpdate: congelar linha 1, `setBasicFilter` em todas as colunas, cabeçalho azul
+marinho `#1E293B` texto branco bold 11pt centralizado, formatação condicional (Tipo:
+entrada=verde `#DCFCE7`/`#15803D`, saída=vermelho `#FEE2E2`/`#B91C1C`; Status: CONCILIADO=verde,
+PENDENTE=amarelo `#FEF9C3`/`#A16207`, DUVIDA=laranja `#FFEDD5`/`#C2410C`), moeda BR
+`R$ #,##0.00;[Red]-R$ #,##0.00`, data centralizada DD/MM/YYYY, zebra + bordas `#E2E8F0`.
+Roda no cadastrar-cliente e como `npm run estilizar-planilhas` (todas as planilhas ativas).
+Risco: baixo (só formatação, não toca dado nem lógica financeira) — mas só depois da Fase 1-2
+verificada em produção, pra não empilhar deploy não-testado.
+
 ## Pendências / decisões em aberto
 - Nome exato das abas: `2026-09 · Lançamentos` (com ` · `) — confirmar com Aroldo se ok
 - Contas a pagar/receber: competência pelo `vencimento` — confirmar

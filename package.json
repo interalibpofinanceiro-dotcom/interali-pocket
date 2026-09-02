@@ -13,7 +13,10 @@
     "cadastrar-cliente": "node cadastrar-cliente.js",
     "desativar-cliente": "node desativar-cliente.js",
     "criar-voucher": "node criar-voucher.js",
-    "definir-senha-dashboard": "node definir-senha-dashboard.js"
+    "definir-senha-dashboard": "node definir-senha-dashboard.js",
+    "estilizar-planilhas": "node scripts/estilizar-planilhas.js",
+    "migrar-competencia": "node scripts/migrar-competencia.js",
+    "limpar-linhas-saldo": "node scripts/limpar-linhas-saldo.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
