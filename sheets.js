@@ -98,9 +98,34 @@ const CABECALHO_DESPESAS_FIXAS = [
   'Ativo', 'Registrado_Em', 'Ultima_Data_Lancamento', 'Dia_Da_Semana',
 ];
 
-// "2026-08-14" -> "2026-08". Sem data reconhecível -> mês corrente (fallback pra documento sem data).
-function competenciaDe(dataISO) {
-  const m = String(dataISO || '').trim().match(/^(\d{4})-(\d{2})/);
+// Datas: guardadas na PLANILHA como data de verdade que o Sheets exibe "01/09/2026" (padrão BR,
+// 02/09/2026, pedido do Aroldo), mas o CÓDIGO trabalha sempre com ISO "2026-09-01" (ordenação,
+// comparação, competência). paraDataBR() na escrita, normalizarDataISO() na leitura.
+function normalizarDataISO(valor) {
+  const s = String(valor == null ? '' : valor).trim();
+  if (!s) return '';
+  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (br) return `${br[3]}-${br[2].padStart(2, '0')}-${br[1].padStart(2, '0')}`;
+  // Número de série do Sheets (dias desde 1899-12-30) — caso o cliente formate a coluna e o
+  // FORMATTED_VALUE volte numérico.
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const d = new Date(Date.UTC(1899, 11, 30) + Number(s) * 86400000);
+    if (!Number.isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+  }
+  return s;
+}
+
+function paraDataBR(valor) {
+  const iso = normalizarDataISO(valor);
+  const m = iso.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : String(valor || '');
+}
+
+// "2026-08-14" ou "14/08/2026" -> "2026-08". Sem data -> mês corrente.
+function competenciaDe(data) {
+  const m = normalizarDataISO(data).match(/^(\d{4})-(\d{2})/);
   if (m) return `${m[1]}-${m[2]}`;
   return new Date().toISOString().slice(0, 7);
 }
@@ -286,7 +311,7 @@ async function lerAbasDoTipo(spreadsheetId, sufixo, rangeCorpo) {
 
 function linhaLancamento(dados, competencia) {
   return [
-    dados.data || '',
+    paraDataBR(dados.data),
     dados.hora || '',
     dados.valor || 0,
     dados.tipo_movimentacao || '',
@@ -353,7 +378,7 @@ function mapearLancamento(linha, aba, competenciaAba, indiceZero) {
     linha: numeroLinha,
     chave: `${aba}#${numeroLinha}`, // identificador único entre abas — conciliação chaveia por isso
     competencia: linha[16] || competenciaAba || competenciaDe(linha[0]),
-    data: linha[0] || '',
+    data: normalizarDataISO(linha[0]),
     hora: linha[1] || '',
     valor: numeroBR(linha[2]),
     tipo_movimentacao: linha[3] || '',
@@ -420,7 +445,7 @@ async function salvarItens(spreadsheetId, itens, { data, estabelecimento, lancam
 
   const registradoEm = new Date().toISOString();
   const linhas = itens.map((item) => [
-    data || '',
+    paraDataBR(data),
     lancamentoLinha ?? '',
     estabelecimento || '',
     item.descricao || '',
@@ -447,7 +472,7 @@ async function buscarTodosItens(spreadsheetId) {
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
       saida.push({
-        data: linha[0] || '',
+        data: normalizarDataISO(linha[0]),
         lancamento_linha: linha[1] || '',
         estabelecimento_ou_pessoa: linha[2] || '',
         descricao: linha[3] || '',
@@ -545,7 +570,7 @@ async function salvarExtrato(spreadsheetId, transacoes) {
   for (const [competencia, lote] of porCompetencia) {
     const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.EXTRATO, CABECALHO_EXTRATO);
     const linhas = lote.map((transacao) => [
-      transacao.data || '',
+      paraDataBR(transacao.data),
       transacao.descricao || '',
       transacao.valor || 0,
       transacao.tipo || '',
@@ -569,7 +594,7 @@ async function buscarExtrato(spreadsheetId) {
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
       saida.push({
-        data: linha[0] || '',
+        data: normalizarDataISO(linha[0]),
         descricao: linha[1] || '',
         valor: numeroBR(linha[2]),
         tipo: linha[3] || '',
@@ -602,7 +627,7 @@ async function salvarContasAPagar(spreadsheetId, contas) {
   for (const [competencia, lote] of porCompetencia) {
     const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.CONTAS_A_PAGAR, CABECALHO_CONTAS_A_PAGAR);
     const linhas = lote.map((conta) => [
-      conta.vencimento || '',
+      paraDataBR(conta.vencimento),
       conta.valor || 0,
       conta.cartao || '',
       conta.beneficiario || '',
@@ -637,7 +662,7 @@ async function buscarContasAPagar(spreadsheetId) {
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
       saida.push({
-        vencimento: linha[0] || '',
+        vencimento: normalizarDataISO(linha[0]),
         valor: numeroBR(linha[1]),
         cartao: linha[2] || '',
         beneficiario: linha[3] || '',
@@ -668,7 +693,7 @@ async function salvarContasAReceber(spreadsheetId, contas) {
   for (const [competencia, lote] of porCompetencia) {
     const aba = await garantirAbaMensal(sheets, spreadsheetId, competencia, SUFIXO.CONTAS_A_RECEBER, CABECALHO_CONTAS_A_RECEBER);
     const linhas = lote.map((conta) => [
-      conta.vencimento || '',
+      paraDataBR(conta.vencimento),
       conta.valor || 0,
       conta.cliente_devedor || '',
       conta.descricao || '',
@@ -696,7 +721,7 @@ async function buscarContasAReceber(spreadsheetId) {
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
       saida.push({
-        vencimento: linha[0] || '',
+        vencimento: normalizarDataISO(linha[0]),
         valor: numeroBR(linha[1]),
         cliente_devedor: linha[2] || '',
         descricao: linha[3] || '',
@@ -761,6 +786,8 @@ module.exports = {
   marcarDespesaFixaLancada,
   removerLinha,
   competenciaDe,
+  normalizarDataISO,
+  paraDataBR,
   garantirAbaMensal,
   garantirAbaComCabecalho,
   reordenarAbas,

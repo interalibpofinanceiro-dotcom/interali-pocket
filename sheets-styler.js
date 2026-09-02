@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { getSheetsClient, RE_ABA_MENSAL, SUFIXO } = require('./sheets');
+const { getSheetsClient, RE_ABA_MENSAL, SUFIXO, paraDataBR, normalizarDataISO } = require('./sheets');
 
 // 02/09/2026 (pedido do Aroldo) — formatação executiva das planilhas de cliente via Sheets API
 // batchUpdate: linha 1 congelada + filtro, cabeçalho azul marinho, cores condicionais por
@@ -130,10 +130,39 @@ function requestsParaAba(prop) {
   return reqs;
 }
 
+// Converte as células de data de TEXTO ("2026-09-01", herança da gravação antiga e da migração)
+// pra DATA de verdade ("01/09/2026" via USER_ENTERED, que o Sheets pt-BR interpreta como data) —
+// só assim o formato dd/mm/yyyy pega. Uma escrita por coluna de data por aba.
+async function converterDatasParaValor(sheets, spreadsheetId, props) {
+  for (const p of props) {
+    const perfil = perfilDaAba(p.title);
+    if (!perfil) continue;
+    for (const c of perfil.data) {
+      const colL = String.fromCharCode(65 + c);
+      const r = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${p.title}!${colL}2:${colL}` }).catch(() => ({ data: {} }));
+      const linhas = r.data.values || [];
+      if (linhas.length === 0) continue;
+      const convertidas = linhas.map((row) => {
+        const v = (row && row[0]) || '';
+        const iso = normalizarDataISO(v);
+        return [/^\d{4}-\d{2}-\d{2}$/.test(iso) ? paraDataBR(iso) : v];
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${p.title}!${colL}2:${colL}${convertidas.length + 1}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: convertidas },
+      }).catch((e) => console.error(`styler: converter datas de ${p.title} falhou:`, e.message));
+    }
+  }
+}
+
 async function estilizarPlanilhaCliente(spreadsheetId) {
   const sheets = getSheetsClient();
   const meta = await sheets.spreadsheets.get({ spreadsheetId });
   const props = meta.data.sheets.map((s) => s.properties);
+
+  await converterDatasParaValor(sheets, spreadsheetId, props);
 
   // Limpa bandings e filtros antigos primeiro (senão addBanding/setBasicFilter podem colidir).
   // Cada limpeza no seu próprio batch — clearBasicFilter numa aba sem filtro dá erro, e não quero

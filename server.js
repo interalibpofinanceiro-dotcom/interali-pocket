@@ -981,7 +981,7 @@ function formatarResumoComprovante(dados) {
   const linhas = [
     '✅ Comprovante processado!',
     '',
-    `📅 Data da compra: ${dados.data || 'não identificada'}`,
+    `📅 Data da compra: ${dados.data ? formatarDataBR(dados.data) : 'não identificada'}`,
     `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`,
     `💰 Valor: ${formatarNumero(dados.valor)}`,
     `↕️ Tipo: ${dados.tipo_movimentacao === 'entrada' ? 'Entrada' : 'Saída'}`,

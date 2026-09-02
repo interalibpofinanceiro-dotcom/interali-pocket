@@ -18,7 +18,7 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 const {
-  competenciaDe, garantirAbaMensal, reordenarAbas, SUFIXO, RE_ABA_MENSAL,
+  competenciaDe, paraDataBR, garantirAbaMensal, reordenarAbas, SUFIXO, RE_ABA_MENSAL,
   CABECALHO_LANCAMENTOS, CABECALHO_EXTRATO, CABECALHO_CONTAS_A_PAGAR, CABECALHO_CONTAS_A_RECEBER, CABECALHO_ITENS,
 } = require('../sheets');
 
@@ -142,6 +142,7 @@ async function migrarCliente(sheets, cliente) {
       if (ehSaldo(linha, tipo.colSaldoDesc)) { saldoPulado += 1; continue; }
       const comp = competenciaDe(linha[tipo.colData]);
       const preenchida = [...linha];
+      preenchida[tipo.colData] = paraDataBR(linha[tipo.colData]); // data vira "01/09/2026"
       while (preenchida.length < tipo.colsLegado) preenchida.push('');
       preenchida[tipo.colsLegado] = comp;
       while (preenchida.length < tipo.colsNovas) preenchida.push('');
