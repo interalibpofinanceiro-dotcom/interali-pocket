@@ -1621,13 +1621,15 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   if (sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart')) {
-    if (extenso) {
-      // PDF extenso (várias páginas) pedindo leitura de boleto/fatura — vai direto pro resumo em
-      // vez de arriscar a extração item a item, que é justamente o que estourava antes (17/08/2026).
-      await processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
-    } else {
-      await processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
-    }
+    // 02/09/2026: quando o cliente DIZ que é fatura/boleto/cartão, sempre tenta a extração item a
+    // item primeiro — mesmo com muitas páginas. `extrairContasAPagarDeBuffer` já roda com
+    // max_tokens 32000 e thinking desabilitado (cobre fatura de 10-15 páginas tranquilo). Se
+    // MESMO ASSIM a resposta cortar (RespostaCortadaError), o catch geral cai no fluxo
+    // "total"/"itens" (PENDENCIAS_ESCOLHA_FATURA) — o cliente escolhe, sem perder o arquivo.
+    // O atalho antigo "extenso -> só resumo" era de quando max_tokens era 4096; hoje é blunt
+    // demais e escondia os itens de faturas grandes (pedido do Aroldo: "teremos clientes com
+    // fatura de 10 páginas"). O resumo continua sendo o caminho pra documento SEM legenda (abaixo).
+    await processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
     return;
   }
 
