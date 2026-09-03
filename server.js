@@ -1262,15 +1262,23 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
   const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
   const registrados = []; // { transacao, ref, auto }
 
-  // Rede de segurança extra (03/09/2026): NUNCA registra um órfão que já é lançamento (mesma
-  // data+valor+tipo), nem dois órfãos iguais na mesma passada — mesmo que o reconciliar tenha
-  // deixado passar (ex.: extratoTotal com linha duplicada por reenvio).
+  // Rede de segurança extra (03/09/2026): NUNCA registra um órfão que já é lançamento com mesma
+  // DATA + VALOR + TIPO (sem olhar descrição — um órfão não tem comprovante mesmo, e se já existe
+  // um lançamento daquele valor/dia é quase certo que é a mesma transação vinda de outro formato
+  // de extrato). Nem dois órfãos iguais na mesma passada. Cobre o caso de reenviar o extrato num
+  // layout diferente (Sicoob PDF vs export do app), em que a descrição muda e transacoesIguais
+  // não pega.
+  const mesmaTransacaoBasica = (a, b) => (
+    (a.data || '') === (b.data || '') &&
+    Math.abs((a.valor || 0) - (b.valor || 0)) < 0.01 &&
+    (a.tipo || '') === (b.tipo || '')
+  );
   const jaRegistrados = [];
   const orfasUnicas = somenteNoExtrato.filter((t) => {
-    const comoLanc = { data: t.data, valor: t.valor, tipo: t.tipo, descricao: t.descricao };
-    if (lancamentos.some((l) => transacoesIguais({ data: l.data, valor: l.valor, tipo: l.tipo_movimentacao, descricao: l.descricao }, comoLanc))) return false;
-    if (jaRegistrados.some((j) => transacoesIguais(j, comoLanc))) return false;
-    jaRegistrados.push(comoLanc);
+    const chave = { data: t.data, valor: t.valor, tipo: t.tipo };
+    if (lancamentos.some((l) => mesmaTransacaoBasica({ data: l.data, valor: l.valor, tipo: l.tipo_movimentacao }, chave))) return false;
+    if (jaRegistrados.some((j) => mesmaTransacaoBasica(j, chave))) return false;
+    jaRegistrados.push(chave);
     return true;
   });
 

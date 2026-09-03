@@ -41,10 +41,10 @@ function normDesc(desc) {
     .trim();
 }
 
-// { colData, colValor, colTipo, colDesc } por sufixo
+// { colData, colValor, colTipo, colDesc, colStatus } por sufixo
 const PERFIL = {
-  [SUFIXO.LANCAMENTOS]: { colData: 0, colValor: 2, colTipo: 3, colDesc: 4, ultima: 'V' },
-  [SUFIXO.EXTRATO]: { colData: 0, colValor: 2, colTipo: 3, colDesc: 1, ultima: 'G' },
+  [SUFIXO.LANCAMENTOS]: { colData: 0, colValor: 2, colTipo: 3, colDesc: 4, colStatus: 14, ultima: 'V' },
+  [SUFIXO.EXTRATO]: { colData: 0, colValor: 2, colTipo: 3, colDesc: 1, colStatus: null, ultima: 'G' },
 };
 
 async function clientes(sheets) {
@@ -64,17 +64,25 @@ async function limparAba(sheets, spreadsheetId, prop, perfil) {
   const linhas = r.data.values || [];
   const vistas = new Set();
   const duplicadas = [];
+  let valorZero = 0;
 
   linhas.forEach((row, i) => {
-    const chave = [
+    const valor = num(row[perfil.colValor]);
+    // Linha com valor 0/vazio: NÃO entra na deduplicação (pode ser transação distinta com valor
+    // que a IA não capturou — apagar seria perder dado). Só conta pra avisar.
+    if (Math.abs(valor) < 0.01) { valorZero += 1; return; }
+
+    const base = [
       String(row[perfil.colData] || '').trim(),
-      num(row[perfil.colValor]).toFixed(2),
+      valor.toFixed(2),
       String(row[perfil.colTipo] || '').trim().toLowerCase(),
-      normDesc(row[perfil.colDesc]),
     ].join('|');
+    const status = perfil.colStatus !== null ? String(row[perfil.colStatus] || '').trim().toUpperCase() : '';
+    const chave = status === 'PENDENTE_COMPROVANTE' ? base : `${base}|${normDesc(row[perfil.colDesc])}`;
     if (vistas.has(chave)) duplicadas.push({ linhaPlanilha: i + 2, chave, desc: row[perfil.colDesc], valor: row[perfil.colValor] });
     else vistas.add(chave);
   });
+  if (valorZero > 0) console.log(`  [${prop.title}] ⚠️ ${valorZero} linha(s) com valor 0/vazio — ignoradas na dedup (conferir manualmente)`);
 
   if (duplicadas.length === 0) { console.log(`  [${prop.title}] sem duplicatas (${linhas.length} linhas)`); return 0; }
   console.log(`  [${prop.title}] ${linhas.length} linhas, ${duplicadas.length} DUPLICATA(s):`);
