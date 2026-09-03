@@ -29,7 +29,7 @@ const FORMATO_DATA = 'dd/mm/yyyy';
 const PERFIL = {
   [SUFIXO.LANCAMENTOS]: { cols: 22, data: [0], moeda: [2], tipo: 3, status: 14 },
   [SUFIXO.EXTRATO]: { cols: 7, data: [0], moeda: [2, 4], tipo: 3, status: null },
-  [SUFIXO.CONTAS_A_PAGAR]: { cols: 11, data: [0], moeda: [1], tipo: null, status: null },
+  [SUFIXO.CONTAS_A_PAGAR]: { cols: 15, data: [0], moeda: [1], tipo: null, status: null },
   [SUFIXO.CONTAS_A_RECEBER]: { cols: 11, data: [0], moeda: [1], tipo: null, status: null },
   [SUFIXO.ITENS]: { cols: 10, data: [0], moeda: [5, 6], tipo: null, status: null },
 };

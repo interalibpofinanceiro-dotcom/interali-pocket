@@ -13,6 +13,7 @@ const {
   extrairContaAReceberDeTexto,
   extrairResumoFaturaDeBuffer,
   extrairResumoExtratoDeBuffer,
+  esclarecerOrfaosDeTexto,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -400,6 +401,89 @@ function enfileirarDuplicidadeAmbigua(remetente, dados, sheetId, candidato) {
   PENDENCIAS_DUPLICIDADE.set(remetente, pendencia);
 }
 
+// Recebimentos do extrato sem comprovante que o bot perguntou "o que foi isso?" e está esperando
+// o cliente responder (03/09/2026 — caso real da Sirlene: ela respondeu e o bot não entendeu,
+// jogou na mensagem genérica de "recorrente:"). Map remetente -> { sheetId, itens: [{ valor, data,
+// descricao, aba, linha }], criadoEm }. Enquanto estiver ativo, uma mensagem de texto livre é
+// testada primeiro como resposta a essas perguntas (ver responderSobreOrfaos). Expira em 24h.
+const PENDENCIAS_ORFAOS = new Map();
+const TIMEOUT_PENDENCIA_ORFAOS_MS = 24 * 60 * 60 * 1000;
+
+function registrarPendenciaOrfaos(remetente, sheetId, itens) {
+  if (!remetente || !itens || itens.length === 0) return;
+  PENDENCIAS_ORFAOS.set(remetente, { sheetId, itens, criadoEm: Date.now() });
+}
+
+function obterPendenciaOrfaos(remetente) {
+  const p = PENDENCIAS_ORFAOS.get(remetente);
+  if (!p) return null;
+  if (Date.now() - p.criadoEm > TIMEOUT_PENDENCIA_ORFAOS_MS) {
+    PENDENCIAS_ORFAOS.delete(remetente);
+    return null;
+  }
+  return p;
+}
+
+// Cliente respondeu (texto livre) às perguntas "o que foi esse recebimento de R$X?". Casa a
+// resposta com a lista pendente (Claude, ver esclarecerOrfaosDeTexto) e atualiza os lançamentos
+// órfãos com descrição/categoria/nome. Devolve true se tratou (não segue o roteamento normal),
+// false se a mensagem não era sobre isso.
+async function responderSobreOrfaos(remetente, cliente, sheetId, texto) {
+  const pendencia = obterPendenciaOrfaos(remetente);
+  if (!pendencia || !texto || !texto.trim()) return false;
+
+  let resultado;
+  try {
+    resultado = await esclarecerOrfaosDeTexto(pendencia.itens, texto);
+  } catch (erro) {
+    console.error('Falha ao esclarecer órfãos:', erro.message);
+    return false;
+  }
+
+  const esclarecimentos = (resultado && resultado.esclarecimentos) || [];
+  if (esclarecimentos.length === 0) return false; // não era resposta sobre os recebimentos
+
+  const lancamentos = await buscarTodosLancamentos(sheetId);
+  const confirmados = [];
+  const indicesResolvidos = new Set();
+
+  for (const esc of esclarecimentos) {
+    const item = pendencia.itens[esc.indice];
+    if (!item) continue;
+    const atual = lancamentos.find((l) => l.aba === item.aba && l.linha === item.linha);
+    if (!atual) continue;
+
+    await atualizarLancamento(sheetId, item.aba, item.linha, {
+      ...atual,
+      descricao: esc.descricao || atual.descricao,
+      estabelecimento_ou_pessoa: esc.estabelecimento_ou_pessoa || atual.estabelecimento_ou_pessoa,
+      categoria: esc.categoria || atual.categoria,
+      subcategoria: esc.subcategoria || atual.subcategoria || '',
+      grupo_dre: esc.grupo_dre || atual.grupo_dre,
+      status_conciliacao: 'CONCILIADO_OK',
+      observacao_conciliacao: 'Recebimento do extrato esclarecido pelo cliente (sem comprovante).',
+    }).catch((e) => console.error('Falha ao atualizar órfão esclarecido:', e.message));
+
+    confirmados.push({ item, esc });
+    indicesResolvidos.add(esc.indice);
+  }
+
+  if (confirmados.length === 0) return false;
+
+  pendencia.itens = pendencia.itens.filter((_, i) => !indicesResolvidos.has(i));
+  if (pendencia.itens.length === 0) PENDENCIAS_ORFAOS.delete(remetente);
+  else PENDENCIAS_ORFAOS.set(remetente, pendencia);
+
+  const linhasOk = confirmados.map((c) => `✅ ${formatarNumero(c.item.valor)} (${formatarDataBR(c.item.data)}) → ${c.esc.descricao}${c.esc.estabelecimento_ou_pessoa ? ` — ${c.esc.estabelecimento_ou_pessoa}` : ''}`);
+  let msg = `Atualizei ${confirmados.length} recebimento(s):\n${linhasOk.join('\n')}`;
+  if (pendencia.itens.length > 0) {
+    msg += `\n\n*Ainda faltam ${pendencia.itens.length}:*\n` + pendencia.itens.map((o) => `🔎 ${formatarNumero(o.valor)} em ${formatarDataBR(o.data)}${o.descricao ? ` — "${o.descricao}"` : ''}`).join('\n');
+  }
+  await enviarMensagemWhatsApp(remetente, msg);
+  await sincronizarConciliacaoNaPlanilha(sheetId).catch(() => {});
+  return true;
+}
+
 // Pergunta ao cliente sobre o item na frente da fila — mesmo texto usado tanto quando a pergunta é
 // feita pela primeira vez quanto quando se avança pro próximo item da fila depois de resolver o anterior.
 async function perguntarProximaDuplicidadeAmbigua(remetente, item) {
@@ -719,6 +803,8 @@ async function enriquecerLancamentoComCnae(dados, lancamentosExistentes) {
     .filter((l) => l.tipo_movimentacao === dados.tipo_movimentacao);
   const ultimo = historico[historico.length - 1];
 
+  // (a) Memória de fornecedor — mesmo CNPJ já classificado antes nesse cliente. Prioridade máxima,
+  // só entra quando a IA deixou genérico (não sobrescreve uma leitura boa da nota atual).
   if (categoriaEhGenerica(dados) && ultimo) {
     dados.categoria = ultimo.categoria;
     dados.subcategoria = ultimo.subcategoria || dados.subcategoria || '';
@@ -727,13 +813,51 @@ async function enriquecerLancamentoComCnae(dados, lancamentosExistentes) {
     return;
   }
 
-  if (categoriaEhGenerica(dados)) {
-    const sugestao = sugerirPorCNAE(registro, dados.tipo_movimentacao);
-    if (sugestao && sugestao.confianca === 'alta' && sugestao.grupo_dre) {
-      dados.categoria = sugestao.categoria;
-      dados.subcategoria = sugestao.subcategoria || dados.subcategoria || '';
+  // (b) Sugestão pelo CNAE (03/09/2026 — mais forte, pedido do Aroldo):
+  //   - confiança "alta": aplica o grupo_dre SEMPRE (atividade de serviço B2B inequívoca);
+  //     a categoria só se a IA tiver deixado genérica.
+  //   - confiança "media": aplica o grupo_dre só se a IA deixou nao_classificado/vazio.
+  const sugestao = sugerirPorCNAE(registro, dados.tipo_movimentacao);
+  if (sugestao && sugestao.grupo_dre) {
+    const iaGenerica = categoriaEhGenerica(dados);
+    if (sugestao.confianca === 'alta' || iaGenerica) {
+      const trocouGrupo = dados.grupo_dre !== sugestao.grupo_dre;
       dados.grupo_dre = sugestao.grupo_dre;
-      dados.fonte_categoria = 'cnae';
+      if (iaGenerica) {
+        dados.categoria = sugestao.categoria;
+        dados.subcategoria = sugestao.subcategoria || dados.subcategoria || '';
+      }
+      dados.fonte_categoria = (trocouGrupo || iaGenerica) ? 'cnae' : dados.fonte_categoria || 'ia';
+    }
+  } else if (sugestao && categoriaEhGenerica(dados)) {
+    // CNAE sem grupo_dre (comércio ambíguo) mas a IA não classificou — pelo menos dá um rótulo.
+    dados.categoria = sugestao.categoria;
+    dados.subcategoria = sugestao.subcategoria || dados.subcategoria || '';
+    dados.fonte_categoria = 'cnae';
+  }
+}
+
+// Enriquecimento de CNAE pras linhas de conta a pagar (fatura/boleto) que trouxeram um CNPJ.
+// Mais simples que o de lançamento: sem memória de fornecedor, só metadado + grupo_dre de
+// atividade "alta" (serviço B2B inequívoco). A maioria das linhas de fatura de cartão não tem
+// CNPJ — essas passam batido e ficam com a classificação da IA por nome do estabelecimento.
+async function enriquecerContasComCnae(contas) {
+  for (const conta of contas || []) {
+    const registro = await consultarCNPJ(conta.cnpj_fornecedor || '').catch(() => null);
+    if (!registro) continue;
+    conta.cnpj_fornecedor = registro.cnpj_formatado || conta.cnpj_fornecedor || '';
+    conta.cnae_codigo = registro.cnae_codigo || '';
+    if (!conta.fonte_categoria) conta.fonte_categoria = 'ia';
+
+    if (chaveForaDoResultado(conta.grupo_dre)) continue;
+    const sugestao = sugerirPorCNAE(registro, 'saida');
+    if (sugestao && sugestao.grupo_dre && (sugestao.confianca === 'alta' || !conta.grupo_dre || conta.grupo_dre === 'nao_classificado')) {
+      conta.grupo_dre = sugestao.grupo_dre;
+      if (RE_CATEGORIA_GENERICA.test(conta.categoria || '') || !conta.categoria) {
+        conta.categoria = sugestao.categoria;
+        conta.subcategoria = sugestao.subcategoria || conta.subcategoria || '';
+      }
+      conta.fonte_categoria = 'cnae';
     }
   }
 }
@@ -1107,12 +1231,12 @@ function classificarTransacaoBancaria(transacao) {
 
 async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
   const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
-  let registrados = 0;
+  const registrados = []; // { transacao, ref, auto }
 
   for (const transacao of somenteNoExtrato) {
     const auto = classificarTransacaoBancaria(transacao);
 
-    await salvarComprovanteComItens(sheetId, {
+    const ref = await salvarComprovanteComItens(sheetId, {
       data: transacao.data,
       hora: '',
       valor: transacao.valor,
@@ -1127,7 +1251,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
         ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
         : 'Lançado via extrato/fatura. Comprovante original pendente.',
     });
-    registrados += 1;
+    registrados.push({ transacao, ref, auto: !!auto });
   }
 
   return registrados;
@@ -1506,6 +1630,10 @@ async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mim
   const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
   const contasAPagarDuplicadas = contas.length - contasAPagarNovas.length;
 
+  // CNAE por linha da fatura que tenha CNPJ visível (raro em fatura de cartão, mas acontece em
+  // boleto/nota) — só metadado + ajuste de grupo_dre por atividade "alta" (03/09/2026).
+  await enriquecerContasComCnae(contasAPagarNovas).catch((erro) => console.error('Falha no CNAE de contas a pagar:', erro.message));
+
   await salvarContasAPagar(sheetId, contasAPagarNovas);
   const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
   const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
@@ -1592,18 +1720,32 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
     const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
       console.error('Falha ao registrar órfãos do extrato:', erro.message);
-      return 0;
+      return [];
     });
 
     // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
     // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
     await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
 
+    // Recebimentos sem comprovante que AINDA precisam de esclarecimento (os que não foram
+    // auto-classificados como tarifa/rendimento). Casa cada um com a linha registrada (ref) pra
+    // poder atualizar depois quando o cliente responder (ver PENDENCIAS_ORFAOS / responderSobreOrfaos).
+    const orfasPendentes = registrados
+      .filter((r) => !r.auto && r.ref && r.transacao.tipo === 'entrada')
+      .map((r) => ({ valor: r.transacao.valor, data: r.transacao.data, descricao: r.transacao.descricao || '', aba: r.ref.aba, linha: r.ref.linha }));
+
     const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-    const avisoRegistrados = registrados > 0 ? `\n📌 ${registrados} lançamento(s) sem comprovante foram registrados automaticamente como pendentes.` : '';
-    const avisoOrfas = orfas.length > 0
-      ? '\n\n🔎 ' + orfas.map((t) => `Identifiquei um recebimento de ${formatarNumero(t.valor)} em ${formatarDataBR(t.data)} no extrato sem comprovante vinculado. O que foi isso? Me conta que eu registro certinho.`).join('\n🔎 ')
-      : '';
+    const avisoRegistrados = registrados.length > 0 ? `\n📌 ${registrados.length} lançamento(s) sem comprovante foram registrados automaticamente.` : '';
+
+    let avisoOrfas = '';
+    if (orfasPendentes.length > 0) {
+      registrarPendenciaOrfaos(remetente, sheetId, orfasPendentes);
+      const mostrar = orfasPendentes.slice(0, 5);
+      const linhas = mostrar.map((o) => `🔎 ${formatarNumero(o.valor)} em ${formatarDataBR(o.data)}${o.descricao ? ` — "${o.descricao}"` : ''}`);
+      const resto = orfasPendentes.length - mostrar.length;
+      avisoOrfas = `\n\n*${orfasPendentes.length} recebimento(s) sem comprovante* — já registrei todos, só me diga o que foi cada um pra eu categorizar:\n${linhas.join('\n')}${resto > 0 ? `\n…e mais ${resto}` : ''}\n\nPode responder tudo numa mensagem só, ex.: _"o de 2.000 do dia 14 foi venda pra Maria, o de 300 foi aluguel recebido"_.`;
+    }
+
     await enviarMensagemWhatsApp(remetente, formatarResumoExtrato(transacoesNovas, avisoDuplicadas) + avisoRegistrados + avisoOrfas);
     return;
   }
@@ -2003,6 +2145,13 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
     // Só entra em jogo se existir memória recente (ver MEMORIA_ULTIMO_DOCUMENTO) — sem isso,
     // aplicarCorrecaoUltimoDocumento devolve false e segue o fluxo normal abaixo.
     if (!interpretado.tipoMidia && await aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, interpretado.texto || '')) {
+      return;
+    }
+
+    // Resposta do cliente às perguntas "o que foi esse recebimento de R$X?" (03/09/2026, caso da
+    // Sirlene). Checa ANTES do roteamento normal — senão "o de 2000 foi venda pra Maria" cairia na
+    // mensagem genérica de "recorrente:". Só entra se houver pendência de órfãos ativa.
+    if (!interpretado.tipoMidia && await responderSobreOrfaos(remetente, cliente, sheetId, interpretado.texto || '')) {
       return;
     }
 

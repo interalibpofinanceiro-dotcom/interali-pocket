@@ -44,6 +44,11 @@ const GRUPOS_DRE = [
   { chave: 'admin_servicos_tecnicos', bloco: 'DESPESAS_ADMIN', rotulo: 'Serviços Técnicos (Contador, Advogado)' },
   { chave: 'admin_sistemas_softwares', bloco: 'DESPESAS_ADMIN', rotulo: 'Sistemas e Softwares (ERP, SaaS, Nuvem)' },
   { chave: 'admin_manutencao', bloco: 'DESPESAS_ADMIN', rotulo: 'Manutenção e Reparos Gerais' },
+  // 03/09/2026 — combustível, manutenção de veículo, estacionamento, pedágio, locação de carro,
+  // app de transporte (Uber/99) pra fins da empresa. Chave própria pra não misturar com
+  // "Manutenção Geral" nem forçar em "Fretes de Entregas" (que é logística de mercadoria, não
+  // deslocamento). Ver mapa CNAE (cnae-categorias.js).
+  { chave: 'admin_veiculos', bloco: 'DESPESAS_ADMIN', rotulo: 'Veículos (Combustível, Manutenção, Estacionamento, App de Transporte)' },
   // 16/08/2026 — dízimo/oferta/doação (pedido do Aroldo, caso real de lançamento errado como
   // entrada). Chave própria pra não forçar em "Rendimentos" nem em nenhum grupo de receita — ver
   // REGRAS_FLUXO_ENTRADA_SAIDA em prompts.js.

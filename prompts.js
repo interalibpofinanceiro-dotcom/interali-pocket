@@ -251,22 +251,30 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
       "valor": 0.00,
       "beneficiario": "quem vai receber o pagamento",
       "descricao": "descrição curta do que é a cobrança",
-      "categoria": "categoria de despesa, definida dinamicamente igual às regras de comprovantes",
-      "grupo_dre": "uma das chaves fixas de despesa/custo/dedução listadas em CLASSIFICAÇÃO PARA A DRE do prompt de comprovantes (ex.: 'admin_ocupacao', 'custo_cmv') — nunca use uma chave do bloco RECEITA_BRUTA aqui, conta a pagar é sempre despesa",
+      "categoria": "categoria de despesa, definida dinamicamente (ver REGRAS DE CATEGORIZAÇÃO abaixo)",
+      "subcategoria": "opcional, mais específica que a categoria, ou null",
+      "grupo_dre": "uma das chaves fixas da lista CLASSIFICAÇÃO PARA A DRE, abaixo",
+      "cnpj_fornecedor": "CNPJ do estabelecimento/lojista dessa linha, só os 14 dígitos, SE estiver visível (raro em fatura de cartão) — senão null",
       "parcela_atual": null,
       "parcela_total": null
     }
   ]
 }
 
+CLASSIFICAÇÃO PARA A DRE (grupo_dre) — conta a pagar / lançamento de fatura é SEMPRE despesa, custo ou dedução. Escolha SEMPRE uma destas chaves (NUNCA invente, NUNCA use uma chave de RECEITA_BRUTA):
+${listaParaPrompt()}
+- Use "nao_classificado" só como último recurso, quando genuinamente não der pra decidir.
+- Cada lançamento da fatura é classificado pelo NOME DO ESTABELECIMENTO (ex.: "ACADEMIA X" -> saúde/bem-estar; "POSTO Y" -> combustível/veículos; "RESTAURANTE Z" -> alimentação; "UBER/99" -> transporte; "NETFLIX/SPOTIFY" -> assinaturas; "FARMÁCIA" -> saúde; supermercado -> insumos ou CMV conforme o nicho do cliente). NÃO jogue tudo na mesma categoria.
+
+${REGRAS_CATEGORIZACAO_DINAMICA}
+
 REGRAS:
 - Se for um BOLETO único: retorne um único item em "contas".
-- Se for uma FATURA DE CARTÃO DE CRÉDITO com vários lançamentos: retorne um item por lançamento da fatura atual, todos com o mesmo "vencimento" (a data de vencimento desta fatura).
+- Se for uma FATURA DE CARTÃO DE CRÉDITO com vários lançamentos: retorne um item por lançamento da fatura atual, todos com o mesmo "vencimento" (a data de vencimento desta fatura). Classifique CADA UM individualmente pelo nome do estabelecimento.
 - Se algum lançamento da fatura indicar parcelamento (ex.: "3/12"), preencha "parcela_atual" e "parcela_total" com esses números; caso contrário, use null nos dois.
 - ATENÇÃO — parcelas futuras: muitas faturas de cartão brasileiras trazem, além dos lançamentos desta fatura, uma seção separada de "compras parceladas" ou "parcelas futuras" mostrando os valores e vencimentos das parcelas que ainda vão aparecer nas PRÓXIMAS faturas (ex.: "Notebook 4/12 R$ 250,00 — vence em 25/09", "5/12 vence em 25/10" etc.). Se essa seção existir na imagem, inclua CADA parcela futura como um item adicional em "contas", com o "vencimento" real dela (a data futura mostrada, não a data desta fatura) e "parcela_atual"/"parcela_total" preenchidos. Se essa seção não existir ou não estiver legível, não invente — inclua só o que está visível.
 - "valor" é sempre positivo.
 - Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente (e o próximo ano se o mês/dia já tiver passado no ano corrente).
-- Categorize seguindo a mesma lógica dinâmica por nicho de mercado usada para comprovantes (ex.: "Insumos - Carnes", "Despesas Administrativas", etc.), ou "Não Classificado" se não for possível inferir.
 - Se não conseguir identificar nenhuma cobrança, retorne "contas" como array vazio [].
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
@@ -562,7 +570,42 @@ REGRAS:
 - Datas sempre no formato YYYY-MM-DD. Se o ano não estiver explícito, assuma o ano corrente.
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
+// 03/09/2026 (caso real Sirlene) — o bot perguntou "o que foi esse recebimento de R$X?" sobre
+// vários créditos do extrato sem comprovante, a cliente respondeu tudo numa mensagem, e o bot não
+// entendeu (caiu na mensagem genérica de "recorrente:"). Este prompt casa a resposta livre dela
+// com a lista de recebimentos pendentes.
+const PROMPT_ESCLARECER_ORFAOS = `Você recebe uma LISTA de recebimentos que caíram no extrato bancário de um cliente e ainda não foram categorizados, e uma MENSAGEM em que o cliente explica o que foi um, alguns ou todos.
+
+Sua tarefa: casar a explicação do cliente com os itens da lista e retornar SOMENTE um JSON:
+
+{
+  "esclarecimentos": [
+    {
+      "indice": 0,
+      "descricao": "descrição curta do que foi (com as palavras do cliente)",
+      "estabelecimento_ou_pessoa": "nome de quem pagou / origem do dinheiro, se o cliente disse",
+      "categoria": "categoria dinâmica por nicho",
+      "subcategoria": "opcional ou null",
+      "grupo_dre": "uma chave da lista CLASSIFICAÇÃO PARA A DRE abaixo"
+    }
+  ],
+  "nao_reconhecido": false
+}
+
+REGRAS:
+- "indice" = a posição do item na lista (0, 1, 2...) que o cliente esclareceu. Case por VALOR, por DATA, ou pela ORDEM ("o primeiro", "o de dois mil do dia 14"). Só inclua itens que o cliente REALMENTE explicou.
+- Se o cliente disser algo genérico que cobre todos ("todos foram vendas", "tudo isso foi pix de cliente"), gere um esclarecimento para CADA item da lista.
+- Se a mensagem claramente NÃO é uma resposta sobre esses recebimentos (é outra pergunta, outro assunto, um comando) -> retorne "esclarecimentos": [] e "nao_reconhecido": true.
+- Todos os itens são ENTRADA (recebimento). Nunca use chave de despesa/custo.
+- Responda APENAS com o JSON.
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre) — só chaves de entrada:
+${listaParaPrompt()}
+
+${REGRAS_CATEGORIZACAO_DINAMICA}`;
+
 module.exports = {
+  PROMPT_ESCLARECER_ORFAOS,
   PROMPT_EXTRACAO,
   PROMPT_EXTRACAO_TEXTO,
   PROMPT_DESPESA_FIXA,

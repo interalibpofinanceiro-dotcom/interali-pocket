@@ -5,7 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const {
   PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
-  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO,
+  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS,
 } = require('./prompts');
 
 const anthropic = new Anthropic({
@@ -398,6 +398,24 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
     .join('');
 }
 
+// Casa a resposta livre do cliente com a lista de recebimentos do extrato sem comprovante
+// (ver PROMPT_ESCLARECER_ORFAOS / PENDENCIAS_ORFAOS em server.js). `itens` = [{ valor, data,
+// descricao }] na MESMA ordem em que foram mostrados pro cliente (o índice do JSON aponta pra cá).
+async function esclarecerOrfaosDeTexto(itens, texto) {
+  const lista = itens.map((it, i) => `${i}. R$ ${it.valor} em ${it.data}${it.descricao ? ` — "${it.descricao}"` : ''}`).join('\n');
+
+  const response = await anthropic.messages.create({
+    model: CLAUDE_MODEL,
+    max_tokens: 2048,
+    system: PROMPT_ESCLARECER_ORFAOS,
+    messages: [
+      { role: 'user', content: `RECEBIMENTOS PENDENTES:\n${lista}\n\nMENSAGEM DO CLIENTE:\n${texto}` },
+    ],
+  });
+
+  return extrairJSON(extrairTextoResposta(response));
+}
+
 async function testarAnthropic() {
   return anthropic.messages.create({
     model: CLAUDE_MODEL,
@@ -451,6 +469,7 @@ module.exports = {
   extrairContaAReceberDeTexto,
   extrairResumoFaturaDeBuffer,
   extrairResumoExtratoDeBuffer,
+  esclarecerOrfaosDeTexto,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

@@ -48,7 +48,7 @@ const SUFIXO_POR_APELIDO = {
 const TIPOS = [
   { legado: 'Lancamentos', sufixo: SUFIXO.LANCAMENTOS, colData: 0, colsLegado: 16, colsNovas: 22, colSaldoDesc: [4, 5] },
   { legado: 'Extrato', sufixo: SUFIXO.EXTRATO, colData: 0, colsLegado: 6, colsNovas: 7, colSaldoDesc: [1] },
-  { legado: 'ContasAPagar', sufixo: SUFIXO.CONTAS_A_PAGAR, colData: 0, colsLegado: 10, colsNovas: 11, colSaldoDesc: [] },
+  { legado: 'ContasAPagar', sufixo: SUFIXO.CONTAS_A_PAGAR, colData: 0, colsLegado: 10, colsNovas: 15, colSaldoDesc: [] },
   { legado: 'ContasAReceber', sufixo: SUFIXO.CONTAS_A_RECEBER, colData: 0, colsLegado: 10, colsNovas: 11, colSaldoDesc: [] },
   { legado: 'ItensComprovante', sufixo: SUFIXO.ITENS, colData: 0, colsLegado: 8, colsNovas: 10, colSaldoDesc: [] },
 ];

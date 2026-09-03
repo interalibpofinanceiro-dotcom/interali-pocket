@@ -10,8 +10,13 @@ const { google } = require('googleapis');
 function numeroBR(valor) {
   if (typeof valor === 'number') return valor;
   if (valor === null || valor === undefined || valor === '') return 0;
-  const limpo = String(valor).trim().replace(/\./g, '').replace(',', '.');
-  const numero = Number(limpo);
+  // 03/09/2026: depois da formatação de moeda (sheets-styler.js) o FORMATTED_VALUE volta como
+  // "R$ 1.234,56" ou "-R$ 50,00" — tira TUDO que não é dígito/ponto/vírgula/sinal antes de parsear
+  // (antes só tirava ".", e "R$ 89,00" virava NaN -> 0, zerando DRE/fechamento).
+  let s = String(valor).trim().replace(/[^\d.,-]/g, '');
+  if (!s || s === '-' || s === '.' || s === ',') return 0;
+  s = s.replace(/\./g, '').replace(',', '.'); // ponto = milhar BR, vírgula = decimal
+  const numero = Number(s);
   return Number.isNaN(numero) ? 0 : numero;
 }
 
@@ -75,9 +80,9 @@ const RANGE_EXTRATO = 'A:G';
 
 const CABECALHO_CONTAS_A_PAGAR = [
   'Vencimento', 'Valor', 'Cartao', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
-  'Grupo_DRE', 'Competencia',
+  'Grupo_DRE', 'Competencia', 'Subcategoria', 'CNPJ_Fornecedor', 'CNAE_Codigo', 'Fonte_Categoria',
 ];
-const RANGE_CONTAS_A_PAGAR = 'A:K';
+const RANGE_CONTAS_A_PAGAR = 'A:O';
 
 const CABECALHO_CONTAS_A_RECEBER = [
   'Vencimento', 'Valor', 'Cliente_Devedor', 'Descricao', 'Categoria', 'Documento', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
@@ -638,6 +643,10 @@ async function salvarContasAPagar(spreadsheetId, contas) {
       registradoEm,
       conta.grupo_dre || '',
       competencia,
+      conta.subcategoria || '',
+      conta.cnpj_fornecedor || '',
+      conta.cnae_codigo || '',
+      conta.fonte_categoria || '',
     ]);
     const resposta = await sheets.spreadsheets.values.append({
       spreadsheetId,
@@ -657,7 +666,7 @@ async function salvarContasAPagar(spreadsheetId, contas) {
 }
 
 async function buscarContasAPagar(spreadsheetId) {
-  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.CONTAS_A_PAGAR, 'A2:K');
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.CONTAS_A_PAGAR, 'A2:O');
   const saida = [];
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
@@ -672,6 +681,10 @@ async function buscarContasAPagar(spreadsheetId) {
         parcela_total: linha[7] ? numeroBR(linha[7]) : null,
         grupo_dre: linha[9] || '',
         competencia: linha[10] || bloco.competencia || competenciaDe(linha[0]),
+        subcategoria: linha[11] || '',
+        cnpj_fornecedor: linha[12] || '',
+        cnae_codigo: linha[13] || '',
+        fonte_categoria: linha[14] || '',
       });
     }
   }
