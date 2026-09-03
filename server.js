@@ -711,13 +711,42 @@ function removerLinhasDeSaldo(transacoes) {
 // Mesma data + mesmo valor + mesma descrição pra transação de extrato — o extrato inteiro é
 // reenviado às vezes (ex.: duas pessoas mandam o mesmo PDF), então filtra item a item em vez de
 // rejeitar o lote inteiro.
+// Normaliza a descrição da transação pra comparação (03/09/2026, caso real Sirlene: reenviou o
+// extrato, a IA leu "PIX TRANSF AROLDO 19/08" numa vez e "Pix Transf Aroldo" na outra, a
+// comparação por texto EXATO não bateu, e o extrato + os órfãos duplicaram inteiros). Tira acento,
+// caixa, datas e espaços/pontuação repetidos — mantém os outros números (nº de documento ajuda a
+// distinguir "PAG TIT INT 001" de "PAG TIT INT 002").
+function normalizarDescricaoTransacao(desc) {
+  return String(desc || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?/g, ' ') // remove datas tipo 19/08 ou 19/08/2026
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Duas transações do extrato são "a mesma" quando batem data + valor (ao centavo) + tipo, E as
+// descrições normalizadas ou são iguais, ou uma contém a outra, ou uma está vazia. Data+valor+tipo
+// exatos já é sinal forte de repetição num extrato bancário; a checagem de descrição só evita
+// juntar por engano duas transações genuinamente diferentes de mesmo valor no mesmo dia.
+function transacoesIguais(a, b) {
+  if ((a.data || '') !== (b.data || '')) return false;
+  if (Math.abs((a.valor || 0) - (b.valor || 0)) >= 0.01) return false;
+  if ((a.tipo || '') !== (b.tipo || '')) return false;
+  const da = normalizarDescricaoTransacao(a.descricao);
+  const db = normalizarDescricaoTransacao(b.descricao);
+  if (!da || !db) return true;
+  return da === db || da.includes(db) || db.includes(da);
+}
+
 function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
-  return transacoesExtraidas.filter((nova) => !extratoExistente.some((existente) => (
-    existente.data === nova.data &&
-    Math.abs((existente.valor || 0) - (nova.valor || 0)) < 0.01 &&
-    existente.tipo === nova.tipo &&
-    (existente.descricao || '') === (nova.descricao || '')
-  )));
+  const jaVistas = []; // pega duplicata DENTRO do próprio lote também (extrato com linha repetida)
+  return transacoesExtraidas.filter((nova) => {
+    if (extratoExistente.some((ex) => transacoesIguais(ex, nova))) return false;
+    if (jaVistas.some((v) => transacoesIguais(v, nova))) return false;
+    jaVistas.push(nova);
+    return true;
+  });
 }
 
 // Mesma ideia de filtrarTransacoesNovas (extrato) acima, aplicada a conta a pagar/receber — ATÉ
@@ -1233,7 +1262,19 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
   const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
   const registrados = []; // { transacao, ref, auto }
 
-  for (const transacao of somenteNoExtrato) {
+  // Rede de segurança extra (03/09/2026): NUNCA registra um órfão que já é lançamento (mesma
+  // data+valor+tipo), nem dois órfãos iguais na mesma passada — mesmo que o reconciliar tenha
+  // deixado passar (ex.: extratoTotal com linha duplicada por reenvio).
+  const jaRegistrados = [];
+  const orfasUnicas = somenteNoExtrato.filter((t) => {
+    const comoLanc = { data: t.data, valor: t.valor, tipo: t.tipo, descricao: t.descricao };
+    if (lancamentos.some((l) => transacoesIguais({ data: l.data, valor: l.valor, tipo: l.tipo_movimentacao, descricao: l.descricao }, comoLanc))) return false;
+    if (jaRegistrados.some((j) => transacoesIguais(j, comoLanc))) return false;
+    jaRegistrados.push(comoLanc);
+    return true;
+  });
+
+  for (const transacao of orfasUnicas) {
     const auto = classificarTransacaoBancaria(transacao);
 
     const ref = await salvarComprovanteComItens(sheetId, {

@@ -269,10 +269,17 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   }
 }
 
+// 03/09/2026 — UNFORMATTED_VALUE + FORMATTED_STRING pras datas: número volta como NÚMERO de
+// verdade (não string "R$ 89,00" que quebrava o numeroBR depois da formatação de moeda — bug real
+// que zerou DRE de cliente), e data volta como string legível "01/08/2026" (não serial 46235).
+// numeroBR e normalizarDataISO seguem como rede de segurança pra qualquer coisa que ainda venha
+// como texto (planilha antiga, coluna sem formato).
+const OPCOES_LEITURA = { valueRenderOption: 'UNFORMATTED_VALUE', dateTimeRenderOption: 'FORMATTED_STRING' };
+
 async function buscarLinhas(spreadsheetId, nomeAba, range) {
   const sheets = getSheetsClient();
   try {
-    const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}` });
+    const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}`, ...OPCOES_LEITURA });
     return resposta.data.values || [];
   } catch (error) {
     if (error.code === 400 || error.code === 404) return [];
@@ -301,6 +308,7 @@ async function lerAbasDoTipo(spreadsheetId, sufixo, rangeCorpo) {
   const resposta = await sheets.spreadsheets.values.batchGet({
     spreadsheetId,
     ranges: alvos.map((t) => `${t}!${rangeCorpo}`),
+    ...OPCOES_LEITURA,
   });
 
   return (resposta.data.valueRanges || []).map((vr, i) => ({
