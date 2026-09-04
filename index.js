@@ -79,9 +79,13 @@ function construirBlocoConteudo(buffer, mediaType) {
 async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    // 2048 em vez de 1024 (14/08/2026) — folga extra pra documentos com mais itens do que o normal
-    // (ex.: nota de fornecedor com muita linha), sem chegar nem perto do limite de extrato (4096).
-    max_tokens: 2048,
+    // 16000 + thinking desabilitado (04/09/2026, caso real: cupom/nota longa cortando com
+    // RespostaCortadaError) — mesma causa raiz e mesmo remédio já aplicado em extrato/fatura/
+    // contas a receber (19/08/2026): 2048 (era o valor até aqui) é curto demais pra comprovante com
+    // muitos itens (nota de fornecedor, cupom fiscal extenso). Este é o único ponto de extração que
+    // ainda estava com o limite antigo.
+    max_tokens: 16000,
+    thinking: { type: 'disabled' },
     system: PROMPT_EXTRACAO,
     messages: [
       {
@@ -218,14 +222,16 @@ async function extrairVendasDeBuffer(fileBuffer, mediaType) {
 // Térmico + Matriz de Fornecedores — ver PROMPT_CUPOM_TERMICO). Só chamada pra cliente.tipo ===
 // 'COMERCIO_MATRIZ' (ver processarMidiaRecebida em server.js). Manda a data de hoje junto, mesmo
 // motivo de extrairComprovanteDeTexto/extrairVendasDeBuffer: cupom físico às vezes não imprime o
-// ano, ou imprime borrado. max_tokens moderado (2048, igual extrairComprovanteDeBuffer) — cupom
-// físico raramente tem itens suficientes pra chegar perto do limite de extrato/fatura (32000).
+// ano, ou imprime borrado. max_tokens elevado pra 16000 (04/09/2026, mesmo motivo/remédio de
+// extrairComprovanteDeBuffer) — cupom físico normalmente tem poucos itens, mas comércio com nota
+// grande de fornecedor pode ter muitos.
 async function extrairCupomTermicoDeBuffer(fileBuffer, mediaType) {
   const hoje = new Date().toISOString().slice(0, 10);
 
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
-    max_tokens: 2048,
+    max_tokens: 16000,
+    thinking: { type: 'disabled' },
     system: PROMPT_CUPOM_TERMICO,
     messages: [
       {
