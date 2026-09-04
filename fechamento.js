@@ -188,6 +188,18 @@ function formatarResumoFechamentoTexto(cliente, fechamento) {
     fechamento.saldoFinalExtrato !== null ? `💰 Saldo final no extrato: ${formatarMoeda(fechamento.saldoFinalExtrato)}` : '',
   ].filter(Boolean);
 
+  if (fechamento.comparacaoMesAnterior) {
+    const c = fechamento.comparacaoMesAnterior;
+    const seta = c.diferenca >= 0 ? '📈' : '📉';
+    const pct = c.percentual !== null ? ` (${c.percentual >= 0 ? '+' : ''}${c.percentual.toFixed(0)}%)` : '';
+    linhas.push('', `${seta} *Vs. ${rotuloCompetencia(c.competenciaAnterior)}*: resultado ${c.diferenca >= 0 ? 'melhorou' : 'piorou'} ${formatarMoeda(Math.abs(c.diferenca))}${pct} (era ${formatarMoeda(c.resultado)}).`);
+  }
+
+  if (fechamento.topCategorias && fechamento.topCategorias.length) {
+    linhas.push('', '🏷️ *Maiores gastos do mês:*');
+    fechamento.topCategorias.forEach(([categoria, valor], i) => linhas.push(`   ${i + 1}. ${categoria} — ${formatarMoeda(valor)}`));
+  }
+
   const pend = contarPendencias(fechamento);
   if (pend > 0) {
     linhas.push('', `⚠️ ${pend} pendência(s):`);
@@ -239,6 +251,22 @@ function gerarPdfFechamento(cliente, fechamento) {
       linha('Transações no extrato', String(fechamento.qtdTransacoesExtrato));
       linha('Conciliação', `${fechamento.pctConciliado}%`);
       if (fechamento.saldoFinalExtrato !== null) linha('Saldo final no extrato', formatarMoeda(fechamento.saldoFinalExtrato));
+
+      if (fechamento.comparacaoMesAnterior) {
+        const c = fechamento.comparacaoMesAnterior;
+        doc.moveDown(0.8).font('Helvetica-Bold').fontSize(13).text(`Vs. ${rotuloCompetencia(c.competenciaAnterior)}`);
+        doc.font('Helvetica').fontSize(11);
+        const pct = c.percentual !== null ? ` (${c.percentual >= 0 ? '+' : ''}${c.percentual.toFixed(0)}%)` : '';
+        doc.fillColor(c.diferenca >= 0 ? '#15803D' : '#B91C1C')
+          .text(`Resultado ${c.diferenca >= 0 ? 'melhorou' : 'piorou'} ${formatarMoeda(Math.abs(c.diferenca))}${pct} — era ${formatarMoeda(c.resultado)}, agora ${formatarMoeda(fechamento.resultado)}.`)
+          .fillColor('#000');
+      }
+
+      if (fechamento.topCategorias && fechamento.topCategorias.length) {
+        doc.moveDown(0.8).font('Helvetica-Bold').fontSize(13).text('Maiores Gastos do Mês');
+        doc.font('Helvetica').fontSize(11);
+        fechamento.topCategorias.forEach(([categoria, valor], i) => linha(`${i + 1}. ${categoria}`, formatarMoeda(valor)));
+      }
 
       const pend = contarPendencias(fechamento);
       doc.moveDown(0.8).font('Helvetica-Bold').fontSize(13).text('Pendências');

@@ -677,6 +677,27 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
   const extratoMes = filtrarPorPeriodo(extrato, 'data', inicio, fim);
 
   const totais = calcularTotais(lancamentosMes, 'tipo_movimentacao');
+  const topCategorias = calcularTopCategorias(lancamentosMes, 5);
+
+  // Comparação com o mês anterior (04/09/2026, pedido do Aroldo — "relatório final" mais
+  // executivo). Só entra se houver algum lançamento no mês anterior; senão fica null (1º mês do
+  // cliente, ou mês anterior nunca fechado/enviado).
+  const inicioAnterior = new Date(ano, mes - 2, 1);
+  const fimAnterior = new Date(ano, mes - 1, 0, 23, 59, 59);
+  const lancamentosMesAnterior = filtrarPorPeriodo(lancamentos, 'data', inicioAnterior, fimAnterior);
+  let comparacaoMesAnterior = null;
+  if (lancamentosMesAnterior.length > 0) {
+    const totaisAnteriores = calcularTotais(lancamentosMesAnterior, 'tipo_movimentacao');
+    const diferenca = totais.resultado - totaisAnteriores.resultado;
+    comparacaoMesAnterior = {
+      competenciaAnterior: `${inicioAnterior.getFullYear()}-${String(inicioAnterior.getMonth() + 1).padStart(2, '0')}`,
+      entradas: totaisAnteriores.entradas,
+      saidas: totaisAnteriores.saidas,
+      resultado: totaisAnteriores.resultado,
+      diferenca,
+      percentual: totaisAnteriores.resultado !== 0 ? (diferenca / Math.abs(totaisAnteriores.resultado)) * 100 : null,
+    };
+  }
 
   const { conciliados, somenteNoExtrato, somenteNosComprovantes } = reconciliar(lancamentosMes, extratoMes);
   const totalConciliavel = conciliados.length + somenteNosComprovantes.length;
@@ -710,6 +731,8 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     pendentesDuvida,
     transferencias,
     saldoFinalExtrato,
+    topCategorias,
+    comparacaoMesAnterior,
     dre,
   };
 }
