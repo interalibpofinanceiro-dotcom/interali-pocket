@@ -328,9 +328,9 @@ function idEhTransacaoUnica(id) {
 // lançamento novo provavelmente É o comprovante que faltava, não uma repetição — melhor
 // completar a linha existente com os detalhes certos do que rejeitar ou perguntar à toa.
 function verificarDuplicidade(lancamentosExistentes, novo) {
-  const idNovo = (novo.documento_identificacao || '').trim();
+  const idNovo = String(novo.documento_identificacao || '').trim();
   if (idNovo && idEhTransacaoUnica(idNovo)) {
-    const candidatoPorId = lancamentosExistentes.find((l) => (l.documento_identificacao || '').trim() === idNovo);
+    const candidatoPorId = lancamentosExistentes.find((l) => String(l.documento_identificacao || '').trim() === idNovo);
     if (candidatoPorId) {
       return candidatoPorId.status_conciliacao === 'PENDENTE_COMPROVANTE'
         ? { status: 'completar', candidato: candidatoPorId }
@@ -827,7 +827,7 @@ async function enriquecerLancamentoComCnae(dados, lancamentosExistentes) {
 
   const cnpjDigitos = (registro.cnpj || '').replace(/\D/g, '');
   const historico = (lancamentosExistentes || [])
-    .filter((l) => (l.documento_identificacao || l.cnpj_fornecedor || '').replace(/\D/g, '') === cnpjDigitos)
+    .filter((l) => String(l.documento_identificacao || l.cnpj_fornecedor || '').replace(/\D/g, '') === cnpjDigitos)
     .filter((l) => l.categoria && !RE_CATEGORIA_GENERICA.test(l.categoria) && l.grupo_dre && l.grupo_dre !== 'nao_classificado')
     .filter((l) => l.tipo_movimentacao === dados.tipo_movimentacao);
   const ultimo = historico[historico.length - 1];

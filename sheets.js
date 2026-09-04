@@ -269,17 +269,15 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   }
 }
 
-// 03/09/2026 — UNFORMATTED_VALUE + FORMATTED_STRING pras datas: número volta como NÚMERO de
-// verdade (não string "R$ 89,00" que quebrava o numeroBR depois da formatação de moeda — bug real
-// que zerou DRE de cliente), e data volta como string legível "01/08/2026" (não serial 46235).
-// numeroBR e normalizarDataISO seguem como rede de segurança pra qualquer coisa que ainda venha
-// como texto (planilha antiga, coluna sem formato).
-const OPCOES_LEITURA = { valueRenderOption: 'UNFORMATTED_VALUE', dateTimeRenderOption: 'FORMATTED_STRING' };
+// 03/09/2026: fica com FORMATTED_VALUE (padrão) de propósito. Tentei UNFORMATTED_VALUE pra number
+// voltar como number, mas aí campo de TEXTO que é só dígito (ex.: "Documento" = NFC-e "000021485")
+// volta como number e quebra `.trim()`/`.replace()` no código. FORMATTED_VALUE + numeroBR robusto
+// (tira "R$", ".", etc.) + normalizarDataISO cobrem tudo sem esse efeito colateral.
 
 async function buscarLinhas(spreadsheetId, nomeAba, range) {
   const sheets = getSheetsClient();
   try {
-    const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}`, ...OPCOES_LEITURA });
+    const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${nomeAba}!${range}` });
     return resposta.data.values || [];
   } catch (error) {
     if (error.code === 400 || error.code === 404) return [];
@@ -308,7 +306,6 @@ async function lerAbasDoTipo(spreadsheetId, sufixo, rangeCorpo) {
   const resposta = await sheets.spreadsheets.values.batchGet({
     spreadsheetId,
     ranges: alvos.map((t) => `${t}!${rangeCorpo}`),
-    ...OPCOES_LEITURA,
   });
 
   return (resposta.data.valueRanges || []).map((vr, i) => ({
