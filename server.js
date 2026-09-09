@@ -1626,6 +1626,7 @@ function formatarResumoDespesaFixa(dados) {
 // enviando mais uma mensagem).
 async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
   const resumo = await extrairResumoFaturaDeBuffer(buffer, mimeType);
+  console.log('[DIAG] processarFaturaComoResumo — resumo extraído:', JSON.stringify(resumo));
   const cartao = extrairNomeCartao(legendaLower) || resumo.banco_emissor || '';
   const dicaLegenda = opts.semLegenda
     ? '\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉'
@@ -1769,6 +1770,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
+  console.log(`[DIAG] processarMidiaRecebida — sinal:"${sinal}" extenso:${extenso} nomeArquivo:"${nomeArquivo || ''}" tamanho:${buffer.length}`);
 
   // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
@@ -1921,6 +1923,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType, cliente && cliente.nome);
+  console.log('[DIAG] Comprovante único extraído:', JSON.stringify(dadosExtraidos));
 
   if (dadosExtraidos.tipo_documento === 'extrato_bancario') {
     // Nenhuma pista textual nem de conteúdo (conteudoPareceExtratoBancario, PDF pode ter stream
