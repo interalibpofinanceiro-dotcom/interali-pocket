@@ -214,6 +214,7 @@ const PROMPT_EXTRATO = `Você é um especialista em leitura de extratos bancári
 Sua tarefa é analisar o extrato enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
 
 {
+  "banco_conta": "nome do banco e, se visível, a identificação da conta (ex.: 'Banco do Brasil', 'Itaú Ag 1234 CC 56789-0', 'Nubank PJ'), lido do CABEÇALHO do extrato — ou null se não conseguir identificar",
   "transacoes": [
     {
       "data": "YYYY-MM-DD",
@@ -224,6 +225,11 @@ Sua tarefa é analisar o extrato enviado e retornar SOMENTE um JSON válido (sem
     }
   ]
 }
+
+REGRAS SOBRE "banco_conta" (09/09/2026, caso real: cliente com várias contas diferentes precisando saber de qual extrato cada lançamento veio):
+- Leia o NOME DO BANCO e, se aparecer, a identificação da conta (agência/número, "PJ"/"PF", ou o nome como o próprio extrato se identifica) — normalmente no cabeçalho/topo do documento, às vezes no rodapé.
+- Esse dado é do EXTRATO INTEIRO (1 valor só), não de cada transação — não confunda com o nome de quem pagou/recebeu em cada linha.
+- Se não conseguir identificar com confiança, use null — nunca invente um nome de banco.
 
 REGRAS CRÍTICAS DE FLUXO ("tipo" entrada vs saída) — decida ANTES de listar, com base na descrição de cada linha do extrato:
 - Transferência/Pix/boleto ENVIADO pelo titular da conta (débito) -> SEMPRE "saida", mesmo que a descrição do banco pareça ambígua.
@@ -388,6 +394,33 @@ REGRAS GERAIS:
 - Valores monetários sempre como número (ponto decimal, sem separador de milhar, sem símbolo de moeda).
 - Se não conseguir identificar um valor numérico claro, use "valor": 0.
 - Se não conseguir identificar se é entrada ou saída, use "saida" como padrão (é o caso mais comum de despesa fixa recorrente).
+- Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
+
+// Orçamento por competência (09/09/2026, item "DRE e Orçado vs Realizado" do curso "Seu financeiro
+// no Claude") — comando "orçamento: marketing 1000 esse mês", "orçamento: 2000 pra aluguel em
+// outubro". Uma linha (1 grupo_dre) por mensagem, igual ao padrão de PROMPT_DESPESA_FIXA acima —
+// o cliente manda uma mensagem por categoria que quiser orçar.
+const PROMPT_ORCAMENTO = `Você é um especialista em extrair uma meta de orçamento a partir de uma mensagem curta que um cliente brasileiro escreveu no WhatsApp — ex.: "orçamento: marketing 1000 esse mês", "orçamento: 2000 pra aluguel em outubro", "quero orçar 500 de material de escritório".
+
+Sua tarefa é interpretar essa mensagem e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
+
+{
+  "valor_orcado": 0.00,
+  "competencia": "AAAA-MM",
+  "grupo_dre": "uma das chaves fixas da lista em CLASSIFICAÇÃO PARA A DRE, abaixo"
+}
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre):
+${listaParaPrompt()}
+- Escolha a chave que melhor descreve a CATEGORIA que o cliente quer orçar (ex.: "marketing" → "vendas_marketing"; "aluguel" → "admin_ocupacao"). Use "nao_classificado" só quando genuinamente não der pra decidir.
+
+REGRAS SOBRE A COMPETÊNCIA:
+- "Competência atual" vem informada junto com a mensagem do cliente — use ela quando o cliente disser "esse mês", "este mês", ou não mencionar mês nenhum.
+- Se o cliente mencionar um mês explícito (ex.: "em outubro", "pra novembro"), calcule a competência AAAA-MM correspondente (mesmo ano da competência atual informada, a menos que o mês já tenha passado esse ano — nesse caso assuma o ano seguinte).
+
+REGRAS GERAIS:
+- Valores monetários sempre como número (ponto decimal, sem separador de milhar, sem símbolo de moeda).
+- Se não conseguir identificar um valor numérico claro, use "valor_orcado": 0.
 - Responda APENAS com o JSON, sem nenhum texto antes ou depois.`;
 
 // Relatório de vendas de app de delivery ou sistema/PDV (print, PDF ou foto do fechamento de
@@ -609,6 +642,7 @@ module.exports = {
   PROMPT_EXTRACAO,
   PROMPT_EXTRACAO_TEXTO,
   PROMPT_DESPESA_FIXA,
+  PROMPT_ORCAMENTO,
   PROMPT_VENDAS,
   PROMPT_CUPOM_TERMICO,
   PROMPT_CONSULTA,

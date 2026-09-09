@@ -5,6 +5,7 @@ const {
   extrairComprovanteDeBuffer,
   extrairComprovanteDeTexto,
   extrairDespesaFixaDeTexto,
+  extrairOrcamentoDeTexto,
   extrairVendasDeBuffer,
   extrairCupomTermicoDeBuffer,
   extrairExtratoDeBuffer,
@@ -33,6 +34,8 @@ const {
   salvarDespesaFixa,
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
+  salvarOrcamento,
+  buscarOrcamento,
   removerLinha,
   competenciaDe,
   getSheetsClient,
@@ -69,16 +72,19 @@ const {
   formatarDRE,
   formatarDataBR,
   gerarFechamento,
+  projetarFluxoSemanal,
+  formatarProjecaoSemanal,
 } = require('./reconciliacao');
 const { consultarCNPJ } = require('./cnae');
 const { sugerirPorCNAE } = require('./cnae-categorias');
-const { chaveForaDoResultado } = require('./dre');
+const { chaveForaDoResultado, porChave } = require('./dre');
 const {
   registrarFechamentoCliente,
   registrarFechamentoMestre,
   competenciaEstaFechada,
   gerarPdfFechamento,
   formatarResumoFechamentoTexto,
+  gerarRelatorioExecutivo,
   interpretarComandoFechamento,
   rotuloCompetencia,
 } = require('./fechamento');
@@ -159,7 +165,10 @@ function montarMensagemBoasVindas(nome) {
     '🛵 Mande o relatório de vendas do seu sistema/app de delivery (iFood, Rappi, PDV, etc.) escrevendo "vendas" ou "sistema" na legenda, para eu registrar cada venda certinha.\n' +
     '✍️ Não tem comprovante pra tirar foto (ex.: mensalidade, honorário)? Escreva "lançar: " + o que foi (ex.: "lançar: paguei 300 de contador hoje") que eu registro do mesmo jeito.\n' +
     '🔁 Entrada ou saída que se repete todo mês/semana, sem boleto nem extrato (ex.: mensalidade de cliente, aluguel)? Escreva "recorrente: " dizendo se é RECEBIMENTO ou PAGAMENTO + valor + dia (ex.: "recorrente: recebo 500 da Empresa X todo dia 10", ou "recorrente: pago 1000 de marketing todo dia 10") — se não disser "recebo" ou "pago", eu assumo pagamento (saída) por padrão, então melhor deixar claro.\n' +
-    '💬 Pergunte "resumo do mês", "resumo da semana", "previsão" ou "DRE do mês" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n\n' +
+    '💬 Pergunte "resumo do mês", "resumo da semana", "previsão" ou "DRE do mês" para ver seus relatórios — ou qualquer pergunta tipo "quanto eu gastei esse mês?".\n' +
+    '📋 Escreva "fechar o mês" (ou "fechar agosto") pra fechar o mês com PDF completo, ou só "checklist" pra ver o andamento do mês atual sem fechar.\n' +
+    '🎯 Quer comparar com uma meta? Escreva "orçamento: marketing 1000 esse mês" — no fechamento eu mostro orçado vs. realizado dessa categoria.\n' +
+    '📆 Pergunte "semanas de aperto" pra ver a previsão semana a semana das próximas 12 semanas, já considerando o que se repete no seu histórico.\n\n' +
     '💡 Dicas rápidas:\n' +
     '• Comprovante = já pago, só a foto. Boleto/fatura = ainda não pago, sempre com legenda.\n' +
     '• Uma foto por mensagem.\n' +
@@ -1295,6 +1304,9 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
       categoria: auto ? auto.categoria : 'Não Classificado',
       subcategoria: auto ? auto.subcategoria : '',
       grupo_dre: auto ? auto.grupo_dre : 'nao_classificado',
+      // 09/09/2026 — antes ficava sempre vazio pra lançamento órfão (não tinha imagem nem legenda
+      // própria pro Claude ler); agora herda do extrato de onde a transação veio (ver banco_conta).
+      conta_bancaria: transacao.conta_bancaria || '',
       status_conciliacao: auto ? 'CONCILIADO_OK' : 'PENDENTE_COMPROVANTE',
       observacao_conciliacao: auto
         ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
@@ -1315,13 +1327,15 @@ async function processarFechamentoMes(remetente, cliente, sheetId, competencia) 
   // Recalcula o Status_Conciliacao com tudo que já foi enviado antes de fotografar o mês.
   await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar antes do fechamento:', erro.message));
 
-  const [lancamentos, extrato, contasAPagar] = await Promise.all([
+  const [lancamentos, extrato, contasAPagar, contasAReceber, orcamento] = await Promise.all([
     buscarTodosLancamentos(sheetId),
     buscarExtrato(sheetId),
     buscarContasAPagar(sheetId),
+    buscarContasAReceber(sheetId),
+    buscarOrcamento(sheetId).catch(() => []), // aba nova (09/09/2026) — se ainda não existe, segue sem orçado x realizado
   ]);
 
-  const fechamento = gerarFechamento(lancamentos, extrato, contasAPagar, { competencia });
+  const fechamento = gerarFechamento(lancamentos, extrato, contasAPagar, { competencia, contasAReceber, orcamento });
 
   if (fechamento.qtdLancamentos === 0 && fechamento.qtdTransacoesExtrato === 0) {
     await enviarMensagemWhatsApp(remetente, `Não encontrei nenhum lançamento nem transação de extrato em ${rotuloCompetencia(competencia)}. Confere se você já me mandou os comprovantes e o extrato desse mês.`);
@@ -1355,6 +1369,23 @@ async function gerarProjecao(sheetId, dias) {
   const contasEmAberto = filtrarContasEmAberto(contasAPagar, lancamentos);
   const contasReceberEmAberto = filtrarContasEmAbertoReceber(contasAReceber, lancamentos);
   return projetarFluxoDeCaixa(saldoAtual, contasEmAberto, contasReceberEmAberto, dias);
+}
+
+// Previsão SEMANAL com "semanas de aperto" (09/09/2026) — comando separado de "previsão" (que
+// continua igual, projeção só do total do período). Usa o histórico inteiro de lançamentos pra
+// detectar recorrência automática (ver detectarRecorrenciaAutomatica em reconciliacao.js).
+async function gerarProjecaoSemanal(sheetId) {
+  const [lancamentos, extrato, contasAPagar, contasAReceber] = await Promise.all([
+    buscarTodosLancamentos(sheetId),
+    buscarExtrato(sheetId),
+    buscarContasAPagar(sheetId),
+    buscarContasAReceber(sheetId),
+  ]);
+
+  const saldoAtual = obterSaldoAtual(extrato);
+  const contasEmAberto = filtrarContasEmAberto(contasAPagar, lancamentos);
+  const contasReceberEmAberto = filtrarContasEmAbertoReceber(contasAReceber, lancamentos);
+  return projetarFluxoSemanal(saldoAtual, contasEmAberto, contasReceberEmAberto, lancamentos);
 }
 
 // Extrai o nome do cartão da legenda (ex.: "lançar como Cartão Bradesco" → "Bradesco"),
@@ -1528,6 +1559,24 @@ function interpretarComandoDespesaFixa(texto) {
 function interpretarComandoContaAReceber(texto) {
   const match = (texto || '').trim().match(/^(?:receber|a\s*receber|cobran[çc]a)\s*[:\-]\s*(.+)$/i);
   return match ? match[1].trim() : null;
+}
+
+// Reconhece o comando de cadastro de orçamento por competência (09/09/2026): "orçamento: marketing
+// 1000 esse mês". Mesmo padrão de gatilho explícito das outras heurísticas de comando deste arquivo.
+function interpretarComandoOrcamento(texto) {
+  const match = (texto || '').trim().match(/^(?:or[çc]amento|or[çc]ar)\s*[:\-]\s*(.+)$/i);
+  return match ? match[1].trim() : null;
+}
+
+function formatarResumoOrcamento(dados) {
+  const def = porChave(dados.grupo_dre);
+  return (
+    '✅ Orçamento registrado!\n\n' +
+    `📅 Competência: ${rotuloCompetencia(dados.competencia)}\n` +
+    `🏷️ ${def ? def.rotulo : dados.grupo_dre}\n` +
+    `💰 Valor orçado: ${formatarNumero(dados.valor_orcado)}\n\n` +
+    'Quando você pedir "fechar o mês" dessa competência, o fechamento já vem com o comparativo orçado vs. realizado dessa categoria.'
+  );
 }
 
 function formatarResumoContaAReceber(dados) {
@@ -1746,7 +1795,13 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   if (sinal.includes('extrato')) {
-    const transacoesBrutas = await extrairExtratoDeBuffer(buffer, mimeType);
+    const resultadoExtrato = await extrairExtratoDeBuffer(buffer, mimeType);
+    // Conta bancária do extrato inteiro (09/09/2026) — legenda do cliente ("conta Itaú PJ") tem
+    // prioridade sobre o que o Claude leu no cabeçalho do documento, mesmo padrão de extrairNomeConta
+    // já usado pro comprovante único. Propagada pra TODA transação deste extrato (Extrato) e, quando
+    // virar lançamento órfão sem comprovante (registrarOrfaosDoExtrato, abaixo), pra Lancamentos também.
+    const contaBancariaExtrato = extrairNomeConta(legendaLower) || resultadoExtrato.banco_conta || '';
+    const transacoesBrutas = resultadoExtrato.transacoes.map((t) => ({ ...t, conta_bancaria: contaBancariaExtrato }));
     const transacoes = removerLinhasDeSaldo(transacoesBrutas);
     const linhasSaldoIgnoradas = transacoesBrutas.length - transacoes.length;
     if (linhasSaldoIgnoradas > 0) console.log(`Extrato: ${linhasSaldoIgnoradas} linha(s) de saldo ignorada(s) (não são transação).`);
@@ -1754,7 +1809,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
     const duplicadas = transacoes.length - transacoesNovas.length;
 
-    console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
+    console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)${contaBancariaExtrato ? ` — conta: ${contaBancariaExtrato}` : ''}`);
 
     const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
     const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
@@ -2237,6 +2292,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
       const comandoDespesaFixa = interpretarComandoDespesaFixa(interpretado.texto);
       const comandoContaAReceber = interpretarComandoContaAReceber(interpretado.texto);
+      const comandoOrcamento = interpretarComandoOrcamento(interpretado.texto);
       const competenciaFechar = interpretarComandoFechamento(interpretado.texto);
 
       if (competenciaFechar) {
@@ -2283,6 +2339,45 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
           await salvarContasAReceber(sheetId, [dadosContaAReceber]);
           await enviarMensagemWhatsApp(remetente, formatarResumoContaAReceber(dadosContaAReceber));
         }
+      } else if (comandoOrcamento) {
+        const dadosOrcamento = await extrairOrcamentoDeTexto(comandoOrcamento);
+        console.log('Orçamento cadastrado:', JSON.stringify(dadosOrcamento, null, 2));
+        await salvarOrcamento(sheetId, dadosOrcamento);
+        await enviarMensagemWhatsApp(remetente, formatarResumoOrcamento(dadosOrcamento));
+      } else if (corpoLower.includes('checklist')) {
+        // Prévia do checklist de 15 etapas (09/09/2026) — mesmo cálculo do "fechar o mês", mas NÃO
+        // grava nada nas abas de controle nem manda PDF. Serve pra o cliente ver o que falta ANTES
+        // de fechar de verdade. Competência = mês atual (diferente de "fechar", que por padrão
+        // fecha o mês ANTERIOR — aqui o cliente quer saber o andamento do mês em curso).
+        const competenciaAtual = new Date().toISOString().slice(0, 7);
+        const [lancamentos, extrato, contasAPagar, contasAReceber, orcamento] = await Promise.all([
+          buscarTodosLancamentos(sheetId), buscarExtrato(sheetId), buscarContasAPagar(sheetId),
+          buscarContasAReceber(sheetId), buscarOrcamento(sheetId).catch(() => []),
+        ]);
+        const fechamento = gerarFechamento(lancamentos, extrato, contasAPagar, { competencia: competenciaAtual, contasAReceber, orcamento });
+        const linhas = [`✅ *Checklist de Fechamento — ${rotuloCompetencia(competenciaAtual)}*`, ''];
+        fechamento.checklist.forEach((e) => {
+          const marca = e.status === 'Feito' ? '✅' : e.status === 'Pendente' ? '⏳' : '➖';
+          linhas.push(`${marca} ${e.numero}. ${e.etapa}`);
+        });
+        if (fechamento.pontosDeAtencao.length) {
+          linhas.push('', '🚩 *Pontos de atenção:*');
+          fechamento.pontosDeAtencao.forEach((p) => linhas.push(`   • ${p}`));
+        }
+        linhas.push('', 'Quando quiser fechar de verdade (com PDF), escreva "fechar o mês".');
+        await enviarMensagemWhatsApp(remetente, linhas.join('\n'));
+      } else if (/relat[óo]rio\s+(executivo|(para\s+)?diretoria)/.test(corpoLower)) {
+        // Relatório narrativo de 1 tela (09/09/2026) — reaproveita gerarFechamento (mesmo cálculo de
+        // "fechar o mês"), só NÃO grava nada nas abas de controle nem manda PDF. Competência padrão
+        // = mês anterior (mesma lógica de interpretarComandoFechamento sem mês explícito).
+        const anterior = new Date(); anterior.setMonth(anterior.getMonth() - 1);
+        const competenciaRelatorio = `${anterior.getFullYear()}-${String(anterior.getMonth() + 1).padStart(2, '0')}`;
+        const [lancamentos, extrato, contasAPagar, contasAReceber, orcamento] = await Promise.all([
+          buscarTodosLancamentos(sheetId), buscarExtrato(sheetId), buscarContasAPagar(sheetId),
+          buscarContasAReceber(sheetId), buscarOrcamento(sheetId).catch(() => []),
+        ]);
+        const fechamentoRelatorio = gerarFechamento(lancamentos, extrato, contasAPagar, { competencia: competenciaRelatorio, contasAReceber, orcamento });
+        await enviarMensagemWhatsApp(remetente, gerarRelatorioExecutivo(cliente, fechamentoRelatorio));
       } else if (corpoLower.includes('resumo') || corpoLower.includes('fechamento')) {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const [lancamentos, extrato] = await Promise.all([buscarTodosLancamentos(sheetId), buscarExtrato(sheetId)]);
@@ -2332,6 +2427,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
             `🧑‍💼 Cliente pediu upgrade do Especialista pelo WhatsApp, mas não achei assinatura Asaas rastreada pra esse número (provável cadastro manual) — precisa combinar a cobrança manual.\n\n👤 ${cliente.nome}\n📱 ${remetente}`
           );
         }
+      } else if (corpoLower.includes('semanas de aperto') || corpoLower.includes('fluxo semanal') || corpoLower.includes('previsao semanal') || corpoLower.includes('previsão semanal')) {
+        // Checado ANTES da "previsão" genérica abaixo — pedido mais específico tem prioridade.
+        const projecaoSemanal = await gerarProjecaoSemanal(sheetId);
+        await enviarMensagemWhatsApp(remetente, formatarProjecaoSemanal(projecaoSemanal));
       } else if (corpoLower.includes('previsao') || corpoLower.includes('previsão') || corpoLower.includes('projecao') || corpoLower.includes('projeção')) {
         const dias = corpoLower.includes('semana') ? 7 : 30;
         const projecao = await gerarProjecao(sheetId, dias);

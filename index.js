@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
 const {
-  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
+  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_ORCAMENTO, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
   PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS,
 } = require('./prompts');
@@ -149,6 +149,15 @@ async function extrairDespesaFixaDeTexto(texto) {
   return extrairJSON(resposta);
 }
 
+// Cadastro de orçamento por competência (comando "orçamento:" — ver server.js, 09/09/2026). Manda a
+// competência ATUAL explicitamente (mesmo motivo de extrairComprovanteDeTexto) — "esse mês" só faz
+// sentido se o Claude souber qual é o mês atual.
+async function extrairOrcamentoDeTexto(texto) {
+  const competenciaAtual = new Date().toISOString().slice(0, 7); // "AAAA-MM"
+  const resposta = await chamarExtracaoTexto(PROMPT_ORCAMENTO, `Competência atual: ${competenciaAtual}\n\nMensagem do cliente: ${texto}`, 512);
+  return extrairJSON(resposta);
+}
+
 async function extrairComprovante(imagePath) {
   const imageBuffer = fs.readFileSync(imagePath);
   const mediaType = getMediaType(imagePath);
@@ -163,13 +172,17 @@ async function extrairComprovante(imagePath) {
 // folga (25699 tokens usados). O produto promete "manda uma vez, funciona" — nunca pedir pro
 // cliente dividir o arquivo; ver processarExtratoComoResumo em server.js pra quando mesmo assim
 // não couber.
+// 09/09/2026 — passou a devolver também `banco_conta` (nome do banco/conta lido do cabeçalho do
+// extrato, ver PROMPT_EXTRATO), não só o array de transações. Quem chama (server.js) usa isso pra
+// preencher a coluna Conta_Bancaria tanto no Extrato quanto nos lançamentos "órfãos" auto-registrados
+// a partir dele — antes esse campo ficava sempre vazio pra esses lançamentos.
 async function extrairExtratoDeBuffer(fileBuffer, mediaType) {
   const texto = await chamarExtracaoVisao(
     PROMPT_EXTRATO, fileBuffer, mediaType,
     'Extraia todas as transações deste extrato bancário seguindo o formato JSON definido.'
   );
   const resultado = extrairJSON(texto);
-  return resultado.transacoes || [];
+  return { transacoes: resultado.transacoes || [], banco_conta: resultado.banco_conta || null };
 }
 
 // Relatório de vendas do sistema/PDV/app de delivery (iFood, Rappi, InstaDelivery, etc. — o prompt
@@ -337,6 +350,7 @@ module.exports = {
   extrairComprovanteDeBuffer,
   extrairComprovanteDeTexto,
   extrairDespesaFixaDeTexto,
+  extrairOrcamentoDeTexto,
   extrairVendasDeBuffer,
   extrairCupomTermicoDeBuffer,
   extrairExtratoDeBuffer,

@@ -106,7 +106,17 @@ function reconciliar(lancamentos, extrato) {
 
   const somenteNoExtrato = extratoDisponivel.filter((transacao) => !transacao.usado);
 
-  return { conciliados, somenteNoExtrato, somenteNosComprovantes };
+  // Agrupamento (09/09/2026) roda por ÚLTIMO, só com quem sobrou das duas passadas acima — nunca
+  // disputa com um casamento 1-para-1 que já bateu.
+  const agrupamento = encontrarAgrupamentos(somenteNosComprovantes, somenteNoExtrato);
+
+  return {
+    conciliados,
+    somenteNoExtrato: agrupamento.extratoRestante,
+    somenteNosComprovantes: agrupamento.comprovantesRestantes,
+    agrupamentosPorTransacao: agrupamento.agrupamentosPorTransacao,
+    agrupamentosPorComprovante: agrupamento.agrupamentosPorComprovante,
+  };
 }
 
 // Recalcula o Status_Conciliacao de CADA lançamento (histórico inteiro, não só o período de um
@@ -130,9 +140,19 @@ function reconciliar(lancamentos, extrato) {
 // buscarTodosLancamentos novo). Quem grava de volta (sincronizarConciliacaoNaPlanilha em
 // server.js) traduz a chave -> { aba, linha } real.
 function sincronizarConciliacao(lancamentos, extrato) {
-  const { conciliados, somenteNosComprovantes } = reconciliar(lancamentos, extrato);
+  const { conciliados, somenteNosComprovantes, agrupamentosPorTransacao, agrupamentosPorComprovante } = reconciliar(lancamentos, extrato);
   const statusPorLinha = new Map();
   const chaveDe = (l) => l.chave || l.linha;
+
+  // Agrupamento (09/09/2026): cada lançamento envolvido também vira CONCILIADO_OK, com a observação
+  // explicando o grupo — mesmo vocabulário fixo de status, só muda o texto da observação.
+  for (const { transacao, lancamentos: doGrupo } of agrupamentosPorTransacao) {
+    const obs = `Conciliado por agrupamento — soma de ${doGrupo.length} lançamento(s) bate com 1 transação do extrato de ${formatarMoeda(transacao.valor)} em ${formatarDataBR(transacao.data)}.`;
+    doGrupo.forEach((l) => statusPorLinha.set(chaveDe(l), { status: 'CONCILIADO_OK', observacao: obs }));
+  }
+  for (const { lancamento, transacoes } of agrupamentosPorComprovante) {
+    statusPorLinha.set(chaveDe(lancamento), { status: 'CONCILIADO_OK', observacao: `Conciliado por agrupamento — este lançamento bate com a soma de ${transacoes.length} transação(ões) do extrato.` });
+  }
 
   for (const { lancamento, divergencia, ambiguo } of conciliados) {
     if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
@@ -185,6 +205,100 @@ function encontrarTransacoesOrfas(transacoesNovas, lancamentos) {
       return diferencaEmDias(dataLancamento, dataTransacao) <= TOLERANCIA_DIAS;
     });
   });
+}
+
+// "Conciliado por agrupamento" (09/09/2026, inspirado no projeto de Conciliação Bancária do curso
+// "Seu financeiro no Claude") — cobre o caso em que 1 transação do extrato bate com a SOMA de
+// vários comprovantes lançados (ex.: cliente recebe várias vendas num Pix só) ou o inverso (1
+// comprovante/fatura bate com a soma de várias transações do extrato — ex.: parcelamento que
+// aparece separado no banco). Só entra em jogo com quem SOBROU depois das duas passadas normais de
+// reconciliar() (exata + divergência) — nunca compete com um casamento 1-para-1 que já bateu, e
+// nunca reduz a confiança de nada que já conciliava antes desta mudança (09/09/2026).
+const LIMITE_ITENS_AGRUPAMENTO = 15; // 2^15 combinações no pior caso — rápido e seguro (<1s)
+const JANELA_DIAS_AGRUPAMENTO = 10; // batelada de pagamento costuma sair até ~10 dias depois da compra
+
+// Busca por bitmask o subconjunto de `itens` (já pré-filtrado e limitado a LIMITE_ITENS_AGRUPAMENTO
+// antes de chamar) cuja soma bate com `alvo` dentro da tolerância. Exige 2+ itens (1 item sozinho já
+// seria pego pelo casamento normal 1-para-1, não é "agrupamento"). Em caso de mais de um subconjunto
+// bater, prefere o de MENOS itens (agrupamento mais simples/crível).
+function encontrarSubconjuntoComSoma(itens, alvo, tolerancia) {
+  let melhor = null;
+  const n = itens.length;
+  for (let mascara = 3; mascara < (1 << n); mascara++) { // começa em 3 (0b11) — pula os de 0 e 1 item
+    let soma = 0;
+    let qtd = 0;
+    for (let i = 0; i < n; i++) {
+      if (mascara & (1 << i)) { soma += itens[i].valor; qtd += 1; }
+    }
+    if (qtd < 2) continue;
+    if (Math.abs(soma - alvo) > tolerancia) continue;
+    if (!melhor || qtd < melhor.qtd) {
+      const selecionados = [];
+      for (let i = 0; i < n; i++) if (mascara & (1 << i)) selecionados.push(itens[i]);
+      melhor = { qtd, selecionados, soma };
+    }
+  }
+  return melhor;
+}
+
+function encontrarAgrupamentos(somenteNosComprovantes, somenteNoExtrato) {
+  const comprovantesLivres = somenteNosComprovantes.map((l, indice) => ({ ...l, _indice: indice, tipo: l.tipo_movimentacao }));
+  const extratoLivre = somenteNoExtrato.map((t, indice) => ({ ...t, _indice: indice }));
+
+  const usadoComprovante = new Set();
+  const usadoExtrato = new Set();
+  const agrupamentosPorTransacao = []; // 1 transação do extrato = soma de N comprovantes
+  const agrupamentosPorComprovante = []; // 1 comprovante = soma de N transações do extrato
+
+  const dentroDaJanela = (dataAlvo, dataItem) => {
+    if (!dataAlvo || !dataItem) return false;
+    const diffDias = (dataAlvo.getTime() - dataItem.getTime()) / (1000 * 60 * 60 * 24);
+    return diffDias >= 0 && diffDias <= JANELA_DIAS_AGRUPAMENTO;
+  };
+
+  // Passada 1: 1 transação do extrato <- soma de vários comprovantes de mesmo tipo (entrada/saída).
+  for (const transacao of extratoLivre) {
+    const dataTransacao = paraData(transacao.data);
+    if (!dataTransacao) continue;
+
+    const candidatos = comprovantesLivres.filter((l) => (
+      !usadoComprovante.has(l._indice) && l.tipo === transacao.tipo && dentroDaJanela(dataTransacao, paraData(l.data))
+    )).slice(0, LIMITE_ITENS_AGRUPAMENTO);
+
+    if (candidatos.length < 2) continue;
+    const achado = encontrarSubconjuntoComSoma(candidatos, transacao.valor, TOLERANCIA_VALOR);
+    if (achado) {
+      achado.selecionados.forEach((l) => usadoComprovante.add(l._indice));
+      usadoExtrato.add(transacao._indice);
+      agrupamentosPorTransacao.push({ transacao, lancamentos: achado.selecionados });
+    }
+  }
+
+  // Passada 2: 1 comprovante <- soma de várias transações do extrato (o que sobrou da passada 1).
+  for (const lancamento of comprovantesLivres) {
+    if (usadoComprovante.has(lancamento._indice)) continue;
+    const dataLancamento = paraData(lancamento.data);
+    if (!dataLancamento) continue;
+
+    const candidatos = extratoLivre.filter((t) => (
+      !usadoExtrato.has(t._indice) && t.tipo === lancamento.tipo && dentroDaJanela(paraData(t.data), dataLancamento)
+    )).slice(0, LIMITE_ITENS_AGRUPAMENTO);
+
+    if (candidatos.length < 2) continue;
+    const achado = encontrarSubconjuntoComSoma(candidatos, lancamento.valor, TOLERANCIA_VALOR);
+    if (achado) {
+      achado.selecionados.forEach((t) => usadoExtrato.add(t._indice));
+      usadoComprovante.add(lancamento._indice);
+      agrupamentosPorComprovante.push({ lancamento, transacoes: achado.selecionados });
+    }
+  }
+
+  return {
+    agrupamentosPorTransacao,
+    agrupamentosPorComprovante,
+    comprovantesRestantes: somenteNosComprovantes.filter((_, indice) => !usadoComprovante.has(indice)),
+    extratoRestante: somenteNoExtrato.filter((_, indice) => !usadoExtrato.has(indice)),
+  };
 }
 
 function calcularPeriodo(tipo, referencia) {
@@ -498,6 +612,136 @@ function formatarProjecao(projecao) {
   return linhas.join('\n');
 }
 
+// Detecção automática de recorrência (09/09/2026, inspirado no projeto Fluxo de Caixa e Projeção do
+// curso "Seu financeiro no Claude") — diferente do cadastro manual via "recorrente:" (que já existia
+// e continua funcionando igual), isso olha o HISTÓRICO de lançamentos já salvos e identifica sozinho
+// o que se repete: mesmo grupo_dre + mesmo tipo aparecendo em 2+ competências diferentes vira
+// "recorrente detectado", com valor = média das ocorrências. Não escreve nada na planilha, só
+// alimenta a projeção semanal (projetarFluxoSemanal) — puramente informativo/aditivo.
+function detectarRecorrenciaAutomatica(lancamentosHistorico, mesesMinimo = 2) {
+  const porChaveMesGrupo = {};
+  for (const l of lancamentosHistorico) {
+    if (!l.grupo_dre || !l.data || chaveForaDoResultado(l.grupo_dre)) continue;
+    const chave = `${l.grupo_dre}|${l.tipo_movimentacao}`;
+    const competencia = String(l.data).slice(0, 7);
+    if (!porChaveMesGrupo[chave]) porChaveMesGrupo[chave] = {};
+    if (!porChaveMesGrupo[chave][competencia]) porChaveMesGrupo[chave][competencia] = [];
+    porChaveMesGrupo[chave][competencia].push(l.valor || 0);
+  }
+
+  const recorrentes = [];
+  for (const [chave, porCompetencia] of Object.entries(porChaveMesGrupo)) {
+    const competencias = Object.keys(porCompetencia);
+    if (competencias.length < mesesMinimo) continue;
+    const [grupoDre, tipo] = chave.split('|');
+    const todosValores = competencias.flatMap((c) => porCompetencia[c]);
+    const valorMedio = todosValores.reduce((s, v) => s + v, 0) / todosValores.length;
+    const def = porChave(grupoDre);
+    recorrentes.push({ grupoDre, tipo, valorMedio, ocorrencias: competencias.length, rotulo: def ? def.rotulo : grupoDre });
+  }
+  return recorrentes;
+}
+
+// Alertas de sazonalidade (09/09/2026) — avisa mesmo SEM histórico prévio, calendário fixo (mesma
+// lista do curso): 13º/férias em nov-jan, IPTU/IPVA em janeiro, IRPJ/CSLL trimestral no presumido.
+function alertasSazonalidade(referencia) {
+  const mes = referencia.getMonth() + 1;
+  const alertas = [];
+  if (mes === 11 || mes === 12) alertas.push('13º salário (1ª e 2ª parcela) costuma pesar no caixa em novembro/dezembro.');
+  if (mes === 12 || mes === 1) alertas.push('Férias coletivas e provisão de férias costumam concentrar em dezembro/janeiro.');
+  if (mes === 1) alertas.push('IPTU, IPVA, licenciamentos e seguros anuais costumam vencer em janeiro.');
+  if ([3, 6, 9, 12].includes(mes)) alertas.push('Se você é Lucro Presumido, IRPJ e CSLL trimestral costumam vencer nesse mês.');
+  return alertas;
+}
+
+// Projeção SEMANAL com "semanas de aperto" (09/09/2026) — complementa projetarFluxoDeCaixa (que
+// continua existindo e funcionando exatamente igual, usado pelo comando "previsão" de sempre). Aqui
+// a projeção é semana a semana, somando contas a pagar/receber JÁ CADASTRADAS (mesmo dado de sempre)
+// + o valor médio dos recorrentes DETECTADOS automaticamente no histórico (distribuído 1/4,33 por
+// semana) — cobre entrada/saída que se repete mas o cliente nunca cadastrou via "recorrente:".
+// Mínimo de caixa: se não informado, usa 1 semana de saída operacional média (mesma régua do curso:
+// "um mês de saída média" ÷ 4,33). Semana com saldo projetado abaixo desse mínimo (ou abaixo de
+// zero) entra em "aperto".
+function projetarFluxoSemanal(saldoAtual, contasAPagarEmAberto, contasAReceberEmAberto, lancamentosHistorico, opcoes = {}) {
+  const numSemanas = opcoes.semanas || 12;
+  const referencia = opcoes.referencia || new Date();
+  const recorrentes = detectarRecorrenciaAutomatica(lancamentosHistorico);
+
+  const saidasHistoricas = lancamentosHistorico.filter((l) => l.tipo_movimentacao === 'saida' && !chaveForaDoResultado(l.grupo_dre));
+  const competenciasComSaida = new Set(saidasHistoricas.map((l) => String(l.data).slice(0, 7)));
+  const saidaMediaMensal = competenciasComSaida.size > 0
+    ? saidasHistoricas.reduce((s, l) => s + (l.valor || 0), 0) / competenciasComSaida.size
+    : 0;
+  const minimoCaixa = opcoes.minimoCaixa !== undefined ? opcoes.minimoCaixa : saidaMediaMensal / 4.33;
+
+  const totalRecorrenteEntradaSemana = recorrentes.filter((r) => r.tipo === 'entrada').reduce((s, r) => s + r.valorMedio, 0) / 4.33;
+  const totalRecorrenteSaidaSemana = recorrentes.filter((r) => r.tipo === 'saida').reduce((s, r) => s + r.valorMedio, 0) / 4.33;
+
+  let saldoCorrente = saldoAtual;
+  const semanas = [];
+
+  for (let i = 0; i < numSemanas; i++) {
+    const inicioSemana = new Date(referencia);
+    inicioSemana.setDate(inicioSemana.getDate() + i * 7);
+    const fimSemana = new Date(inicioSemana);
+    fimSemana.setDate(fimSemana.getDate() + 6);
+
+    const noPeriodo = (contas) => contas.filter((c) => { const v = paraData(c.vencimento); return v && v >= inicioSemana && v <= fimSemana; });
+    const contasPagarSemana = noPeriodo(contasAPagarEmAberto);
+    const contasReceberSemana = noPeriodo(contasAReceberEmAberto);
+
+    const entradas = contasReceberSemana.reduce((s, c) => s + (c.valor || 0), 0) + totalRecorrenteEntradaSemana;
+    const saidas = contasPagarSemana.reduce((s, c) => s + (c.valor || 0), 0) + totalRecorrenteSaidaSemana;
+
+    saldoCorrente = saldoCorrente !== null ? saldoCorrente + entradas - saidas : null;
+
+    semanas.push({
+      inicio: inicioSemana,
+      fim: fimSemana,
+      entradas,
+      saidas,
+      contasPagar: contasPagarSemana,
+      contasReceber: contasReceberSemana,
+      saldoProjetado: saldoCorrente,
+      aperto: saldoCorrente !== null && saldoCorrente < Math.max(0, minimoCaixa),
+    });
+  }
+
+  return { semanas, recorrentesDetectados: recorrentes, minimoCaixa, alertasSazonalidade: alertasSazonalidade(referencia) };
+}
+
+function formatarProjecaoSemanal(projecao) {
+  const linhas = ['🔮 Previsão semanal (próximas 12 semanas)', ''];
+
+  if (projecao.semanas[0].saldoProjetado === null) {
+    linhas.push('⚠️ Ainda não tenho um saldo atual confiável (preciso de um extrato recente com o saldo visível).', '');
+  }
+
+  const semanasDeAperto = projecao.semanas.filter((s) => s.aperto);
+  if (semanasDeAperto.length > 0) {
+    linhas.push(`⚠️ *${semanasDeAperto.length} semana(s) de aperto* (saldo projetado abaixo do mínimo de ${formatarMoeda(projecao.minimoCaixa)}):`);
+    semanasDeAperto.slice(0, 6).forEach((s) => {
+      linhas.push(`   • ${formatarDataBR(s.inicio.toISOString().slice(0, 10))} a ${formatarDataBR(s.fim.toISOString().slice(0, 10))}: saldo projetado ${formatarMoeda(s.saldoProjetado)}`);
+    });
+  } else {
+    linhas.push('✅ Nenhuma semana de aperto nas próximas 12 semanas, com o que já está cadastrado.');
+  }
+
+  if (projecao.recorrentesDetectados.length > 0) {
+    linhas.push('', '🔁 Recorrentes identificados no seu histórico (considerados na projeção mesmo sem cadastro):');
+    projecao.recorrentesDetectados.slice(0, 8).forEach((r) => {
+      linhas.push(`   • ${r.tipo === 'entrada' ? '🟢' : '🔴'} ${r.rotulo} — ${formatarMoeda(r.valorMedio)}/mês (visto em ${r.ocorrencias} meses)`);
+    });
+  }
+
+  if (projecao.alertasSazonalidade.length > 0) {
+    linhas.push('', '📅 Fique de olho:');
+    projecao.alertasSazonalidade.forEach((a) => linhas.push(`   • ${a}`));
+  }
+
+  return linhas.join('\n');
+}
+
 // Upsell do Plano com Especialista, anexado ao final do resumo MENSAL — só pra clientes que
 // ainda não têm o upgrade (Plano_Especialista=FALSE na planilha mestre). Usa os mesmos totais
 // já calculados no resumo, sem reprocessar nada.
@@ -572,6 +816,9 @@ function gerarDRE(lancamentos, opcoes = {}) {
     tipoPeriodo,
     inicio,
     fim,
+    // Realizado por chave, exposto pra fora (09/09/2026) — usado pelo comparativo orçado vs
+    // realizado (compararOrcadoRealizado) sem precisar recalcular tudo de novo.
+    totalPorChave,
     receitaBruta: { linhas: linhasBloco('RECEITA_BRUTA'), outrasReceitas, total: receitaBrutaTotal },
     deducoes: { linhas: linhasBloco('DEDUCOES'), total: deducoesTotal },
     receitaLiquida,
@@ -663,6 +910,180 @@ function formatarDRE(dre, nomeCliente) {
   return linhas.join('\n');
 }
 
+// "Prova dos saldos" (09/09/2026, inspirada no projeto de Conciliação Bancária do curso "Seu
+// financeiro no Claude") — confirma que a LEITURA do extrato do mês está internamente consistente:
+// saldo inicial (saldo_apos da 1ª transação, subtraindo o próprio valor dela) + soma de entradas −
+// soma de saídas do mês deveria bater com o saldo final (saldo_apos da última transação). Não é o
+// mesmo "saldo do razão vs. saldo do banco" do curso original — o Pocket não mantém um saldo interno
+// separado do banco — aqui a prova serve pra pegar bug de LEITURA/parsing do extrato (já aconteceu
+// antes com número em formato BR mal convertido, ver numeroBR em sheets.js) antes que o cliente veja
+// um resultado errado. Retorna null se não há transação com saldo_apos suficiente pra calcular.
+function calcularProvaDosSaldos(extratoDoPeriodo) {
+  const comSaldo = extratoDoPeriodo
+    .filter((t) => t.saldo_apos !== null && t.saldo_apos !== undefined && paraData(t.data))
+    .sort((a, b) => paraData(a.data) - paraData(b.data));
+
+  if (comSaldo.length === 0) return null;
+
+  const primeira = comSaldo[0];
+  const ultima = comSaldo[comSaldo.length - 1];
+  const valorComSinal = (t) => (t.tipo === 'saida' ? -1 : 1) * (t.valor || 0);
+
+  const saldoInicial = primeira.saldo_apos - valorComSinal(primeira);
+  const movimento = comSaldo.reduce((soma, t) => soma + valorComSinal(t), 0);
+  const saldoCalculado = saldoInicial + movimento;
+  const saldoFinalReal = ultima.saldo_apos;
+  const diferenca = saldoFinalReal - saldoCalculado;
+
+  return { saldoInicial, movimento, saldoCalculado, saldoFinalReal, diferenca, fechou: Math.abs(diferenca) <= 0.02 };
+}
+
+// Orçado vs Realizado (09/09/2026, inspirado no projeto "DRE e Orçado vs Realizado" do curso "Seu
+// financeiro no Claude") — compara o orçamento cadastrado pelo cliente (comando "orçamento:", ver
+// prompts.js/server.js) por grupo_dre com o realizado do mesmo período (totalPorChave do gerarDRE).
+// Tolerância de 5% pra status "Dentro do orçado" (mesma do curso). Retorna null se o cliente não
+// cadastrou orçamento pra essa competência — nesse caso o fechamento continua exatamente como
+// sempre foi, sem essa seção.
+const TOLERANCIA_ORCADO_PERCENTUAL = 5;
+
+function compararOrcadoRealizado(totalPorChaveRealizado, orcamentoCompetencia) {
+  if (!orcamentoCompetencia || orcamentoCompetencia.length === 0) return null;
+
+  const linhas = orcamentoCompetencia.map((item) => {
+    const def = porChave(item.grupo_dre);
+    const orcado = item.valor_orcado || 0;
+    const realizado = totalPorChaveRealizado[item.grupo_dre] || 0;
+    const variacaoValor = realizado - orcado;
+    const variacaoPercentual = orcado !== 0 ? (variacaoValor / orcado) * 100 : null;
+
+    let status = 'Dentro';
+    if (variacaoPercentual === null) status = realizado > 0 ? 'Acima do orçado' : 'Dentro';
+    else if (variacaoPercentual > TOLERANCIA_ORCADO_PERCENTUAL) status = 'Acima do orçado';
+    else if (variacaoPercentual < -TOLERANCIA_ORCADO_PERCENTUAL) status = 'Abaixo do orçado';
+
+    return { grupoDre: item.grupo_dre, rotulo: def ? def.rotulo : item.grupo_dre, orcado, realizado, variacaoValor, variacaoPercentual, status };
+  });
+
+  const maioresVariacoes = [...linhas].sort((a, b) => Math.abs(b.variacaoValor) - Math.abs(a.variacaoValor)).slice(0, 5);
+
+  return { linhas, maioresVariacoes };
+}
+
+// Pontos de atenção automáticos (09/09/2026, inspirado no projeto de Fechamento Mensal do curso
+// "Seu financeiro no Claude") — os mesmos 4 sinais de alerta que um controller levaria pra
+// diretoria, calculados a partir do que já está na planilha, sem precisar de dado novo do cliente.
+// Máximo 5 itens (mesmo limite do curso) — se mais de um bater, prioriza por relevância financeira.
+function calcularConcentracao(lancamentosMes, tipoMovimentacao, totalDoTipo) {
+  if (!totalDoTipo) return null;
+  const porContraparte = {};
+  for (const l of lancamentosMes) {
+    if (l.tipo_movimentacao !== tipoMovimentacao) continue;
+    const nome = (l.estabelecimento_ou_pessoa || '').trim();
+    if (!nome) continue;
+    porContraparte[nome] = (porContraparte[nome] || 0) + (l.valor || 0);
+  }
+  const maior = Object.entries(porContraparte).sort((a, b) => b[1] - a[1])[0];
+  if (!maior) return null;
+  return { nome: maior[0], valor: maior[1], percentual: (maior[1] / totalDoTipo) * 100 };
+}
+
+function calcularPontosDeAtencao(fechamento, lancamentosMes) {
+  const pontos = [];
+
+  const concentracaoFornecedor = calcularConcentracao(lancamentosMes, 'saida', fechamento.saidas);
+  if (concentracaoFornecedor && concentracaoFornecedor.percentual > 20) {
+    pontos.push({ prioridade: concentracaoFornecedor.percentual, texto: `Fornecedor "${concentracaoFornecedor.nome}" concentra ${concentracaoFornecedor.percentual.toFixed(0)}% da despesa do mês (${formatarMoeda(concentracaoFornecedor.valor)}).` });
+  }
+
+  const concentracaoCliente = calcularConcentracao(lancamentosMes, 'entrada', fechamento.entradas);
+  if (concentracaoCliente && concentracaoCliente.percentual > 30) {
+    pontos.push({ prioridade: concentracaoCliente.percentual, texto: `Receita concentrada: "${concentracaoCliente.nome}" representa ${concentracaoCliente.percentual.toFixed(0)}% do faturamento do mês (${formatarMoeda(concentracaoCliente.valor)}).` });
+  }
+
+  if (fechamento.resultado < 0) {
+    pontos.push({ prioridade: 1000, texto: `Resultado do mês foi negativo: ${formatarMoeda(fechamento.resultado)}.` });
+  }
+
+  if (fechamento.comparacaoMesAnterior) {
+    const margemAtual = fechamento.entradas ? (fechamento.resultado / fechamento.entradas) * 100 : null;
+    const c = fechamento.comparacaoMesAnterior;
+    const margemAnterior = c.entradas ? (c.resultado / c.entradas) * 100 : null;
+    if (margemAtual !== null && margemAnterior !== null && margemAnterior - margemAtual > 5) {
+      pontos.push({ prioridade: margemAnterior - margemAtual + 100, texto: `Margem caiu ${(margemAnterior - margemAtual).toFixed(1)} pontos percentuais vs. o mês anterior (${margemAnterior.toFixed(1)}% → ${margemAtual.toFixed(1)}%).` });
+    }
+  }
+
+  // "Saldo abaixo de 1 mês de despesa" — usa as saídas do próprio mês fechado como proxy de "1 mês
+  // de despesa" (o Pocket não separa fixo/variável hoje). Só avalia quando há saldo real do extrato.
+  if (fechamento.saldoFinalExtrato !== null && fechamento.saidas > 0 && fechamento.saldoFinalExtrato < fechamento.saidas) {
+    pontos.push({ prioridade: 500, texto: `Saldo em conta (${formatarMoeda(fechamento.saldoFinalExtrato)}) está abaixo de 1 mês de despesa (${formatarMoeda(fechamento.saidas)}) — pouca folga pra um mês ruim.` });
+  }
+
+  return pontos.sort((a, b) => b.prioridade - a.prioridade).slice(0, 5).map((p) => p.texto);
+}
+
+// Decisões pendentes formuladas como pergunta fechada (09/09/2026, inspirado no projeto Relatório
+// para Diretoria do curso "Seu financeiro no Claude") — reaproveita os mesmos sinais de
+// calcularPontosDeAtencao, mas reformulados pra virar uma pergunta que dá pra responder sim/não sem
+// pedir mais dado. Máximo 3 (mesmo limite do curso — mais que isso vira lista de tarefa, não relatório).
+function calcularDecisoesPendentes(fechamento, lancamentosMes) {
+  const decisoes = [];
+
+  const concentracaoFornecedor = calcularConcentracao(lancamentosMes, 'saida', fechamento.saidas);
+  if (concentracaoFornecedor && concentracaoFornecedor.percentual > 20) {
+    decisoes.push({ prioridade: concentracaoFornecedor.percentual, texto: `Manter o fornecedor "${concentracaoFornecedor.nome}" concentrando ${concentracaoFornecedor.percentual.toFixed(0)}% da despesa do mês, ou buscar outro fornecedor pra diluir o risco?` });
+  }
+
+  const concentracaoCliente = calcularConcentracao(lancamentosMes, 'entrada', fechamento.entradas);
+  if (concentracaoCliente && concentracaoCliente.percentual > 30) {
+    decisoes.push({ prioridade: concentracaoCliente.percentual, texto: `A receita depende ${concentracaoCliente.percentual.toFixed(0)}% de "${concentracaoCliente.nome}" — vale priorizar captar novos clientes esse mês pra diluir esse risco?` });
+  }
+
+  if (fechamento.resultado < 0) {
+    decisoes.push({ prioridade: 1000, texto: `O mês fechou negativo em ${formatarMoeda(Math.abs(fechamento.resultado))} — cortar despesa já no próximo mês, ou é esperado e vai reverter sozinho?` });
+  }
+
+  if (fechamento.orcadoVsRealizado && fechamento.orcadoVsRealizado.maioresVariacoes.length > 0) {
+    const pior = fechamento.orcadoVsRealizado.maioresVariacoes[0];
+    if (pior.status === 'Acima do orçado') {
+      decisoes.push({ prioridade: Math.abs(pior.variacaoPercentual || 0) + 200, texto: `Manter "${pior.rotulo}" no ritmo atual (${formatarMoeda(pior.realizado)}, ${pior.variacaoPercentual.toFixed(0)}% acima do orçado de ${formatarMoeda(pior.orcado)}), ou revisar o orçamento dessa categoria?` });
+    }
+  }
+
+  if (fechamento.saldoFinalExtrato !== null && fechamento.saidas > 0 && fechamento.saldoFinalExtrato < fechamento.saidas) {
+    decisoes.push({ prioridade: 500, texto: `Caixa está abaixo de 1 mês de despesa — segurar qualquer investimento/retirada até recompor a reserva?` });
+  }
+
+  return decisoes.sort((a, b) => b.prioridade - a.prioridade).slice(0, 3).map((d) => d.texto);
+}
+
+// Checklist de 15 etapas de fechamento (09/09/2026, mesmo inspirado no curso) — cada etapa usa dado
+// que já está na planilha/no fechamento calculado; "Sem dado" quando o Pocket não tem como saber
+// (ex.: depreciação/provisões não são rastreadas hoje) em vez de supor "Feito".
+function gerarChecklistFechamento(fechamento, contasAPagarMes, contasAReceberMes) {
+  const SEM_DADO = 'Sem dado';
+  const FEITO = 'Feito';
+  const PENDENTE = 'Pendente';
+
+  return [
+    { numero: 1, etapa: 'Extrato bancário do mês completo e conferido', status: fechamento.qtdTransacoesExtrato > 0 ? FEITO : SEM_DADO },
+    { numero: 2, etapa: 'Conciliação bancária fechada', status: fechamento.qtdTransacoesExtrato === 0 ? SEM_DADO : (fechamento.pctConciliado >= 95 ? FEITO : PENDENTE) },
+    { numero: 3, etapa: 'Pendências do extrato lançadas no razão', status: fechamento.somenteNoExtrato === 0 ? FEITO : PENDENTE },
+    { numero: 4, etapa: 'Contas a pagar do mês todas registradas', status: contasAPagarMes && contasAPagarMes.length > 0 ? FEITO : SEM_DADO },
+    { numero: 5, etapa: 'Contas a receber do mês todas registradas', status: contasAReceberMes && contasAReceberMes.length > 0 ? FEITO : SEM_DADO },
+    { numero: 6, etapa: 'Recebimentos sem baixa identificados', status: fechamento.pendentesComprovante.length === 0 ? FEITO : PENDENTE },
+    { numero: 7, etapa: 'Despesas classificadas por categoria', status: fechamento.qtdLancamentos > 0 ? FEITO : SEM_DADO },
+    { numero: 8, etapa: 'Folha e encargos lançados', status: fechamento.dre.despesasOperacionais.pessoal.total > 0 ? FEITO : SEM_DADO },
+    { numero: 9, etapa: 'Impostos do período apurados', status: fechamento.dre.deducoes.total > 0 ? FEITO : SEM_DADO },
+    { numero: 10, etapa: 'Depreciação e provisões', status: SEM_DADO }, // o Pocket não rastreia isso hoje
+    { numero: 11, etapa: 'DRE gerencial montada', status: FEITO },
+    { numero: 12, etapa: 'Fluxo de caixa do mês fechado', status: FEITO },
+    { numero: 13, etapa: 'Comparativo orçado vs realizado', status: fechamento.orcadoVsRealizado ? FEITO : SEM_DADO },
+    { numero: 14, etapa: 'Variações relevantes explicadas', status: fechamento.pontosDeAtencao && fechamento.pontosDeAtencao.length > 0 ? FEITO : (fechamento.pctConciliado >= 95 && fechamento.resultado >= 0 ? FEITO : PENDENTE) },
+    { numero: 15, etapa: 'Relatório para a diretoria emitido', status: PENDENTE }, // vira Feito quando o cliente pede o relatório executivo (ver item 06)
+  ];
+}
+
 // Fechamento mensal de UMA competência (02/09/2026) — dispara quando o cliente pede "fechar o
 // mês X" (ver server.js). Diferente do "resumo": olha só o mês-calendário da competência, casa
 // TUDO daquele mês com o extrato, e devolve os números que vão pro PDF (fechamento.js) e pras
@@ -699,9 +1120,11 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     };
   }
 
-  const { conciliados, somenteNoExtrato, somenteNosComprovantes } = reconciliar(lancamentosMes, extratoMes);
-  const totalConciliavel = conciliados.length + somenteNosComprovantes.length;
-  const pctConciliado = totalConciliavel > 0 ? Math.round((conciliados.length / totalConciliavel) * 100) : 0;
+  const { conciliados, somenteNoExtrato, somenteNosComprovantes, agrupamentosPorTransacao, agrupamentosPorComprovante } = reconciliar(lancamentosMes, extratoMes);
+  const qtdAgrupamentos = agrupamentosPorTransacao.length + agrupamentosPorComprovante.length;
+  const totalConciliavel = conciliados.length + qtdAgrupamentos + somenteNosComprovantes.length;
+  const pctConciliado = totalConciliavel > 0 ? Math.round(((conciliados.length + qtdAgrupamentos) / totalConciliavel) * 100) : 0;
+  const provaDosSaldos = calcularProvaDosSaldos(extratoMes);
 
   const pendentesComprovante = lancamentosMes.filter((l) => l.status_conciliacao === 'PENDENTE_COMPROVANTE');
   const pendentesDuvida = lancamentosMes.filter((l) => l.status_conciliacao === 'PENDENTE_DUVIDA');
@@ -714,7 +1137,18 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     ? extratoComSaldo.reduce((maisRecente, t) => (t.data >= maisRecente.data ? t : maisRecente)).saldo_apos
     : null;
 
-  return {
+  // contasAPagar/opcoes.contasAReceber (09/09/2026) — usados só pro checklist (etapas 4/5); o
+  // resto do fechamento não depende deles, então continuam opcionais (default []) sem quebrar quem
+  // já chamava gerarFechamento sem essa informação.
+  const contasAPagarMes = filtrarPorPeriodo(contasAPagar || [], 'vencimento', inicio, fim);
+  const contasAReceberMes = filtrarPorPeriodo(opcoes.contasAReceber || [], 'vencimento', inicio, fim);
+
+  // Orçado vs realizado (09/09/2026) — só existe se o cliente já cadastrou orçamento pra essa
+  // competência (opcoes.orcamento); senão fica null e o fechamento não muda em nada.
+  const orcamentoDaCompetencia = (opcoes.orcamento || []).filter((o) => o.competencia === competencia);
+  const orcadoVsRealizado = compararOrcadoRealizado(dre.totalPorChave, orcamentoDaCompetencia);
+
+  const fechamentoParcial = {
     competencia,
     inicio,
     fim,
@@ -725,16 +1159,27 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     qtdTransacoesExtrato: extratoMes.length,
     pctConciliado,
     conciliados: conciliados.length,
+    qtdAgrupamentos,
     naoConciliados: somenteNosComprovantes.length,
     somenteNoExtrato: somenteNoExtrato.length,
     pendentesComprovante,
     pendentesDuvida,
     transferencias,
     saldoFinalExtrato,
+    provaDosSaldos,
     topCategorias,
     comparacaoMesAnterior,
+    orcadoVsRealizado,
     dre,
   };
+
+  // Pontos de atenção e checklist (09/09/2026) usam o fechamento já quase pronto — calculados por
+  // último, anexados ao mesmo objeto (aditivo, nenhum campo existente muda).
+  fechamentoParcial.pontosDeAtencao = calcularPontosDeAtencao(fechamentoParcial, lancamentosMes);
+  fechamentoParcial.decisoesPendentes = calcularDecisoesPendentes(fechamentoParcial, lancamentosMes);
+  fechamentoParcial.checklist = gerarChecklistFechamento(fechamentoParcial, contasAPagarMes, contasAReceberMes);
+
+  return fechamentoParcial;
 }
 
 module.exports = {
@@ -753,4 +1198,13 @@ module.exports = {
   formatarProjecao,
   gerarDRE,
   formatarDRE,
+  compararOrcadoRealizado,
+  calcularPontosDeAtencao,
+  calcularDecisoesPendentes,
+  gerarChecklistFechamento,
+  calcularProvaDosSaldos,
+  detectarRecorrenciaAutomatica,
+  alertasSazonalidade,
+  projetarFluxoSemanal,
+  formatarProjecaoSemanal,
 };

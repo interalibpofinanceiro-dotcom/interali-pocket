@@ -75,8 +75,11 @@ const COLUNA_STATUS_CONCILIACAO = 'O'; // 15ª coluna — Status_Conciliacao
 const COLUNA_OBSERVACAO_CONCILIACAO = 'P'; // 16ª coluna — detalhe do Status_Conciliacao
 const RANGE_LANCAMENTOS = 'A:V';
 
-const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em', 'Competencia'];
-const RANGE_EXTRATO = 'A:G';
+// 'Conta_Bancaria' aditiva no fim (09/09/2026) — nome do banco/conta lido do cabeçalho do extrato
+// (ver PROMPT_EXTRATO/banco_conta em prompts.js), pra cliente com mais de uma conta saber de qual
+// extrato cada transação veio. Abas mensais já existentes migram sozinhas (garantirAbaMensal).
+const CABECALHO_EXTRATO = ['Data', 'Descricao', 'Valor', 'Tipo', 'Saldo_Apos', 'Registrado_Em', 'Competencia', 'Conta_Bancaria'];
+const RANGE_EXTRATO = 'A:H';
 
 const CABECALHO_CONTAS_A_PAGAR = [
   'Vencimento', 'Valor', 'Cartao', 'Beneficiario', 'Descricao', 'Categoria', 'Parcela_Atual', 'Parcela_Total', 'Registrado_Em',
@@ -102,6 +105,12 @@ const CABECALHO_DESPESAS_FIXAS = [
   'Descricao', 'Valor', 'Dia_Do_Mes', 'Tipo', 'Estabelecimento_Pessoa', 'Categoria', 'Subcategoria', 'Grupo_DRE',
   'Ativo', 'Registrado_Em', 'Ultima_Data_Lancamento', 'Dia_Da_Semana',
 ];
+
+// Orçamento por competência (09/09/2026, item DRE Orçado vs Realizado) — NÃO é aba mensal, é config:
+// cada linha é 1 (Competencia, Grupo_DRE), upsert (a mesma dupla nunca se repete). Comando "orçamento:
+// marketing 1000 esse mês" (ver prompts.js/server.js) grava uma linha por vez.
+const ABA_ORCAMENTO = 'Orcamento';
+const CABECALHO_ORCAMENTO = ['Competencia', 'Grupo_DRE', 'Valor_Orcado', 'Registrado_Em'];
 
 // Datas: guardadas na PLANILHA como data de verdade que o Sheets exibe "01/09/2026" (padrão BR,
 // 02/09/2026, pedido do Aroldo), mas o CÓDIGO trabalha sempre com ISO "2026-09-01" (ordenação,
@@ -549,6 +558,35 @@ async function buscarDespesasFixas(spreadsheetId) {
   }));
 }
 
+// -------------------------------------------------------------------------------------------
+// ORÇAMENTO (config, aba única — upsert por Competencia+Grupo_DRE)
+// -------------------------------------------------------------------------------------------
+
+async function salvarOrcamento(spreadsheetId, dados) {
+  const sheets = getSheetsClient();
+  await garantirAbaComCabecalho(sheets, spreadsheetId, ABA_ORCAMENTO, CABECALHO_ORCAMENTO);
+
+  const linhas = await buscarLinhas(spreadsheetId, ABA_ORCAMENTO, 'A2:D');
+  const semEssa = linhas.filter((l) => !((l[0] || '') === dados.competencia && (l[1] || '') === dados.grupo_dre));
+
+  const nova = [dados.competencia, dados.grupo_dre, dados.valor_orcado || 0, new Date().toISOString()];
+  const todas = [nova, ...semEssa].sort((a, b) => String(b[0]).localeCompare(String(a[0])));
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_ORCAMENTO}!A2:D${todas.length + 1}`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: todas },
+  });
+}
+
+async function buscarOrcamento(spreadsheetId) {
+  const linhas = await buscarLinhas(spreadsheetId, ABA_ORCAMENTO, 'A2:D');
+  return linhas
+    .filter((l) => l[0] && l[1])
+    .map((l) => ({ competencia: l[0], grupo_dre: l[1], valor_orcado: numeroBR(l[2]) }));
+}
+
 async function marcarDespesaFixaLancada(spreadsheetId, linha, dataISO) {
   const sheets = getSheetsClient();
   await sheets.spreadsheets.values.update({
@@ -587,6 +625,7 @@ async function salvarExtrato(spreadsheetId, transacoes) {
       transacao.saldo_apos ?? '',
       registradoEm,
       competencia,
+      transacao.conta_bancaria || '',
     ]);
     await sheets.spreadsheets.values.append({
       spreadsheetId,
@@ -599,7 +638,7 @@ async function salvarExtrato(spreadsheetId, transacoes) {
 }
 
 async function buscarExtrato(spreadsheetId) {
-  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.EXTRATO, 'A2:G');
+  const blocos = await lerAbasDoTipo(spreadsheetId, SUFIXO.EXTRATO, 'A2:H');
   const saida = [];
   for (const bloco of blocos) {
     for (const linha of bloco.valores) {
@@ -610,6 +649,7 @@ async function buscarExtrato(spreadsheetId) {
         tipo: linha[3] || '',
         saldo_apos: linha[4] ? numeroBR(linha[4]) : null,
         competencia: linha[6] || bloco.competencia || competenciaDe(linha[0]),
+        conta_bancaria: linha[7] || '',
       });
     }
   }
@@ -802,6 +842,8 @@ module.exports = {
   salvarDespesaFixa,
   buscarDespesasFixas,
   marcarDespesaFixaLancada,
+  salvarOrcamento,
+  buscarOrcamento,
   removerLinha,
   competenciaDe,
   normalizarDataISO,

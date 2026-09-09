@@ -13,6 +13,8 @@ const ABA_FECHAMENTO_CLIENTE = 'Fechamento';
 const CABECALHO_FECHAMENTO_CLIENTE = [
   'Competencia', 'Status', 'Data_Fechamento', 'Entradas', 'Saidas', 'Resultado',
   'Pct_Conciliado', 'Lancamentos', 'Transacoes_Extrato', 'Pendencias',
+  // 09/09/2026 — aditivas, sempre no FIM (garantirAbaComCabecalho migra sozinho quem já tinha as 10 de cima).
+  'Prova_Saldos',
 ];
 
 const ABA_FECHAMENTO_MESTRE = 'Fechamentos';
@@ -102,7 +104,7 @@ async function registrarFechamentoCliente(sheetId, fechamento, status) {
   const sheets = getSheetsClient();
   await garantirAbaComCabecalho(sheets, sheetId, ABA_FECHAMENTO_CLIENTE, CABECALHO_FECHAMENTO_CLIENTE);
 
-  const linhas = await buscarLinhas(sheetId, ABA_FECHAMENTO_CLIENTE, 'A2:J');
+  const linhas = await buscarLinhas(sheetId, ABA_FECHAMENTO_CLIENTE, 'A2:K');
   const semEssa = linhas.filter((l) => (l[0] || '') !== fechamento.competencia);
 
   const nova = [
@@ -116,13 +118,14 @@ async function registrarFechamentoCliente(sheetId, fechamento, status) {
     fechamento.qtdLancamentos,
     fechamento.qtdTransacoesExtrato,
     contarPendencias(fechamento),
+    fechamento.provaDosSaldos ? (fechamento.provaDosSaldos.fechou ? 'OK' : `DIVERGE ${formatarMoeda(fechamento.provaDosSaldos.diferenca)}`) : 'Sem dado',
   ];
 
   const todas = [nova, ...semEssa].sort((a, b) => String(b[0]).localeCompare(String(a[0])));
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: sheetId,
-    range: `${ABA_FECHAMENTO_CLIENTE}!A2:J${todas.length + 1}`,
+    range: `${ABA_FECHAMENTO_CLIENTE}!A2:K${todas.length + 1}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: todas },
   });
@@ -184,8 +187,12 @@ function formatarResumoFechamentoTexto(cliente, fechamento) {
     `🔴 Saídas: ${formatarMoeda(fechamento.saidas)}`,
     `📈 Resultado do mês: ${formatarMoeda(fechamento.resultado)}`,
     '',
-    `🔗 Conciliação: ${fechamento.pctConciliado}% (${fechamento.conciliados} de ${fechamento.conciliados + fechamento.naoConciliados})`,
+    `🔗 Conciliação: ${fechamento.pctConciliado}% (${fechamento.conciliados + (fechamento.qtdAgrupamentos || 0)} de ${fechamento.conciliados + (fechamento.qtdAgrupamentos || 0) + fechamento.naoConciliados})`,
+    fechamento.qtdAgrupamentos > 0 ? `🧩 ${fechamento.qtdAgrupamentos} conciliado(s) por agrupamento (soma de vários lançamentos batendo com 1 do extrato, ou o inverso)` : '',
     fechamento.saldoFinalExtrato !== null ? `💰 Saldo final no extrato: ${formatarMoeda(fechamento.saldoFinalExtrato)}` : '',
+    fechamento.provaDosSaldos ? (fechamento.provaDosSaldos.fechou
+      ? '✅ Prova dos saldos bateu — a leitura do extrato do mês está consistente.'
+      : `⚠️ Prova dos saldos NÃO fechou — diferença de ${formatarMoeda(Math.abs(fechamento.provaDosSaldos.diferenca))} entre o saldo calculado e o saldo real do extrato. Vale conferir a leitura do extrato desse mês.`) : '',
   ].filter(Boolean);
 
   if (fechamento.comparacaoMesAnterior) {
@@ -214,7 +221,22 @@ function formatarResumoFechamentoTexto(cliente, fechamento) {
     linhas.push('', `↔️ ${fechamento.transferencias.length} transferência(s) entre contas (${formatarMoeda(totalTransf)}) — não entram no resultado.`);
   }
 
-  linhas.push('', 'O PDF do fechamento vai em seguida. 📎');
+  // Pontos de atenção (09/09/2026) — só aparece no texto do WhatsApp se houver algum; o checklist
+  // completo e o orçado vs realizado ficam reservados pro PDF, pra não deixar a mensagem enorme.
+  if (fechamento.pontosDeAtencao && fechamento.pontosDeAtencao.length > 0) {
+    linhas.push('', '🚩 *Pontos de atenção:*');
+    fechamento.pontosDeAtencao.forEach((p) => linhas.push(`   • ${p}`));
+  }
+
+  if (fechamento.orcadoVsRealizado) {
+    linhas.push('', '📐 *Orçado vs Realizado (maiores variações):*');
+    fechamento.orcadoVsRealizado.maioresVariacoes.forEach((v) => {
+      const seta = v.status === 'Acima do orçado' ? '🔺' : v.status === 'Abaixo do orçado' ? '🔻' : '✅';
+      linhas.push(`   ${seta} ${v.rotulo}: orçado ${formatarMoeda(v.orcado)}, realizado ${formatarMoeda(v.realizado)} (${v.status}).`);
+    });
+  }
+
+  linhas.push('', 'O PDF do fechamento (com checklist completo) vai em seguida. 📎');
   return linhas.join('\n');
 }
 
@@ -249,8 +271,13 @@ function gerarPdfFechamento(cliente, fechamento) {
       doc.moveDown(0.5);
       linha('Lançamentos no mês', String(fechamento.qtdLancamentos));
       linha('Transações no extrato', String(fechamento.qtdTransacoesExtrato));
-      linha('Conciliação', `${fechamento.pctConciliado}%`);
+      linha('Conciliação', `${fechamento.pctConciliado}%${fechamento.qtdAgrupamentos ? ` (${fechamento.qtdAgrupamentos} por agrupamento)` : ''}`);
       if (fechamento.saldoFinalExtrato !== null) linha('Saldo final no extrato', formatarMoeda(fechamento.saldoFinalExtrato));
+      if (fechamento.provaDosSaldos) {
+        doc.fillColor(fechamento.provaDosSaldos.fechou ? '#15803D' : '#B91C1C');
+        linha('Prova dos saldos', fechamento.provaDosSaldos.fechou ? 'OK' : `Diverge ${formatarMoeda(fechamento.provaDosSaldos.diferenca)}`);
+        doc.fillColor('#000');
+      }
 
       if (fechamento.comparacaoMesAnterior) {
         const c = fechamento.comparacaoMesAnterior;
@@ -285,6 +312,30 @@ function gerarPdfFechamento(cliente, fechamento) {
         doc.moveDown(0.5).fillColor('#555').text(`Transferências entre contas do mesmo titular: ${fechamento.transferencias.length} (${formatarMoeda(totalTransf)}) — não afetam o resultado.`).fillColor('#000');
       }
 
+      if (fechamento.pontosDeAtencao && fechamento.pontosDeAtencao.length > 0) {
+        doc.moveDown(0.8).font('Helvetica-Bold').fontSize(13).text('Pontos de Atenção');
+        doc.font('Helvetica').fontSize(11);
+        fechamento.pontosDeAtencao.forEach((p) => doc.text(`• ${p}`));
+      }
+
+      if (fechamento.orcadoVsRealizado) {
+        doc.moveDown(0.8).font('Helvetica-Bold').fontSize(13).text('Orçado vs Realizado');
+        doc.font('Helvetica').fontSize(11);
+        fechamento.orcadoVsRealizado.linhas.forEach((v) => {
+          const pct = v.variacaoPercentual !== null ? ` (${v.variacaoPercentual >= 0 ? '+' : ''}${v.variacaoPercentual.toFixed(1)}%)` : '';
+          doc.text(`${v.rotulo}: orçado ${formatarMoeda(v.orcado)} | realizado ${formatarMoeda(v.realizado)} | ${v.status}${pct}`);
+        });
+      }
+
+      // Checklist de fechamento (09/09/2026) — página própria, uma linha por etapa.
+      doc.addPage();
+      doc.font('Helvetica-Bold').fontSize(14).text('Checklist de Fechamento (15 Etapas)');
+      doc.moveDown(0.5).font('Helvetica').fontSize(10);
+      (fechamento.checklist || []).forEach((e) => {
+        const marca = e.status === 'Feito' ? 'OK' : e.status === 'Pendente' ? '..' : '--';
+        doc.text(`[${marca}] ${e.numero}. ${e.etapa} — ${e.status}`);
+      });
+
       // DRE resumida (texto monoespaçado, o mesmo formato do WhatsApp)
       const dreTexto = formatarDRE(fechamento.dre, cliente && cliente.nome).replace(/```/g, '').trim();
       doc.addPage();
@@ -297,12 +348,63 @@ function gerarPdfFechamento(cliente, fechamento) {
   });
 }
 
+// Relatório Executivo / "para diretoria" (09/09/2026, inspirado no projeto Relatório para Diretoria
+// do curso "Seu financeiro no Claude") — formato narrativo de 1 tela, pra sócio/dono que tem 5
+// minutos: frase do mês com resultado+causa, números essenciais, pontos de atenção ordenados por
+// impacto (calcularPontosDeAtencao) e decisões pendentes como pergunta fechada
+// (calcularDecisoesPendentes). Reaproveita o MESMO fechamento já calculado por gerarFechamento —
+// não recalcula nada, só formata diferente. Não escreve nada na planilha nem gera PDF novo.
+function gerarFraseDoMes(fechamento) {
+  const positivo = fechamento.resultado >= 0;
+  let frase = `${rotuloCompetencia(fechamento.competencia)} fechou ${positivo ? 'positivo' : 'negativo'} em ${formatarMoeda(Math.abs(fechamento.resultado))}`;
+
+  if (fechamento.comparacaoMesAnterior) {
+    const c = fechamento.comparacaoMesAnterior;
+    if (Math.abs(c.diferenca) > 0.01) {
+      frase += `, ${c.diferenca >= 0 ? 'melhora' : 'piora'} de ${formatarMoeda(Math.abs(c.diferenca))} vs. ${rotuloCompetencia(c.competenciaAnterior)}`;
+    }
+  }
+
+  if (fechamento.pctConciliado < 80 && fechamento.qtdTransacoesExtrato > 0) {
+    frase += ` — conciliação ainda em ${fechamento.pctConciliado}%, vale revisar antes de fechar de vez`;
+  }
+
+  return `${frase}.`;
+}
+
+function gerarRelatorioExecutivo(cliente, fechamento) {
+  const linhas = [`📰 *Relatório Executivo — ${rotuloCompetencia(fechamento.competencia)}*`];
+  if (cliente && cliente.nome) linhas.push(cliente.nome);
+  linhas.push('', gerarFraseDoMes(fechamento), '');
+
+  const margem = fechamento.entradas ? (fechamento.resultado / fechamento.entradas) * 100 : null;
+  linhas.push(`Receita: ${formatarMoeda(fechamento.entradas)}  |  Despesa: ${formatarMoeda(fechamento.saidas)}  |  Resultado: ${formatarMoeda(fechamento.resultado)}`);
+  linhas.push(`Margem: ${margem !== null ? `${margem.toFixed(1)}%` : 'sem dado'}${fechamento.saldoFinalExtrato !== null ? `  |  Saldo em caixa: ${formatarMoeda(fechamento.saldoFinalExtrato)}` : ''}`);
+
+  linhas.push('', '*Pontos de atenção:*');
+  if (!fechamento.pontosDeAtencao || fechamento.pontosDeAtencao.length === 0) {
+    linhas.push('Nenhum ponto de atenção relevante neste mês.');
+  } else {
+    fechamento.pontosDeAtencao.forEach((p) => linhas.push(`• ${p}`));
+  }
+
+  linhas.push('', '*Decisões que dependem de você:*');
+  if (!fechamento.decisoesPendentes || fechamento.decisoesPendentes.length === 0) {
+    linhas.push('Nenhuma decisão pendente neste mês.');
+  } else {
+    fechamento.decisoesPendentes.forEach((d) => linhas.push(`• ${d}`));
+  }
+
+  return linhas.join('\n');
+}
+
 module.exports = {
   registrarFechamentoCliente,
   registrarFechamentoMestre,
   competenciaEstaFechada,
   gerarPdfFechamento,
   formatarResumoFechamentoTexto,
+  gerarRelatorioExecutivo,
   interpretarComandoFechamento,
   rotuloCompetencia,
   ABA_FECHAMENTO_CLIENTE,

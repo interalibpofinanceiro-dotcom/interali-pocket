@@ -133,7 +133,19 @@
       return '<tr class="border-b border-slate-700/50"><td class="py-2 pr-3">' + formatarDataCurta(c.vencimento) + '</td><td class="py-2 pr-3">' + (c.beneficiario || '-') + '</td><td class="py-2 text-right">' + formatarMoeda(c.valor) + '</td></tr>';
     }).join('') || '<tr><td colspan="3" class="py-3 text-sm text-slate-500">Nenhuma conta em aberto. 🎉</td></tr>';
 
+    // Linha de leitura + aviso de consistência (09/09/2026, inspirado no padrão visual do curso
+    // "Seu financeiro no Claude" — "faça a conta primeiro e confira"). O aviso só aparece se a
+    // checagem estrutural falhar (nunca deveria, é rede de segurança); a linha de leitura sempre
+    // aparece quando há dado suficiente.
+    var avisoConsistencia = (d.consistencia && d.consistencia.consistente === false)
+      ? '<div class="card border-amber-500/30 bg-amber-500/5 text-amber-200 text-sm mb-4">⚠️ Os números deste mês não bateram na checagem interna (diferença de ' + formatarMoeda(d.consistencia.diferenca) + '). Os valores acima ainda são exibidos, mas vale conferir com o suporte antes de usar pra decisão.</div>'
+      : '';
+    var linhaLeitura = d.linhaDeLeitura
+      ? '<p class="text-sm text-slate-400 italic mb-4">' + d.linhaDeLeitura + '</p>'
+      : '';
+
     document.getElementById('conteudo').innerHTML =
+      avisoConsistencia + linhaLeitura +
       '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
       secao('Fluxo de caixa — últimos 30 dias', '<div class="card"><canvas id="grafico-fluxo" height="90"></canvas></div>') +
       '<div class="grid md:grid-cols-2 gap-6">' +

@@ -120,6 +120,39 @@ function consumirTokenReset(token) {
 // mídia: "o Pocket identifica e adere à planilha conforme a necessidade de cada cliente").
 // ---------------------------------------------------------------------------------------------
 
+function formatarMoedaSimples(valor) {
+  return Number(valor || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+// "Linha de leitura" (09/09/2026, inspirado no padrão visual do Dashboard Gerencial do curso "Seu
+// financeiro no Claude") — uma frase curta de insight, calculada a partir dos mesmos números que já
+// vão pro dashboard, pra o dono ler antes de olhar os gráficos.
+function gerarLinhaDeLeitura(resumoMes, comparacaoMesAnterior) {
+  if (!resumoMes) return '';
+  const positivo = resumoMes.resultado >= 0;
+  let texto = `Resultado do mês ${positivo ? 'positivo' : 'negativo'} em ${formatarMoedaSimples(resumoMes.resultado)}`;
+
+  if (comparacaoMesAnterior && Math.abs(comparacaoMesAnterior.diferenca) > 0.01) {
+    const { diferenca, percentual } = comparacaoMesAnterior;
+    const pct = percentual !== null ? ` (${percentual >= 0 ? '+' : ''}${percentual.toFixed(0)}%)` : '';
+    texto += `, ${diferenca >= 0 ? 'acima' : 'abaixo'} do mês anterior em ${formatarMoedaSimples(Math.abs(diferenca))}${pct}`;
+  }
+
+  return `${texto}.`;
+}
+
+// Checagem de sanidade ANTES de mostrar os números (09/09/2026, mesmo princípio do padrão do
+// Dashboard Gerencial: "faça a conta primeiro e confira"). Aqui é uma checagem estrutural — entradas
+// menos saídas precisa bater com o resultado — que deveria ser sempre verdadeira por construção;
+// serve como rede de segurança caso um refactor futuro quebre essa invariante sem querer, não muda
+// nada no cálculo em si.
+function verificarConsistenciaDashboard(resumoMes) {
+  if (!resumoMes) return { consistente: true };
+  const esperado = resumoMes.entradas - resumoMes.saidas;
+  const diferenca = Math.abs(esperado - resumoMes.resultado);
+  return { consistente: diferenca <= 0.02, diferenca };
+}
+
 async function montarDadosDashboardPadrao(cliente) {
   const [lancamentos, extrato, contasAPagar] = await Promise.all([
     buscarTodosLancamentos(cliente.sheetId),
@@ -156,6 +189,8 @@ async function montarDadosDashboardPadrao(cliente) {
     topCategorias: resumoMes.topCategorias,
     contasEmAberto,
     serieDiaria,
+    linhaDeLeitura: gerarLinhaDeLeitura(resumoMes.totaisAtuais, resumoMes.comparacao),
+    consistencia: verificarConsistenciaDashboard(resumoMes.totaisAtuais),
   };
 }
 
