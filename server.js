@@ -2288,10 +2288,16 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // leitura genérica. Não precisa segurar resposta nenhuma pro webhook (já foi mandada no
         // topo do handler); o processamento de verdade roda quando o timer disparar OU quando o
         // texto chegar antes (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
+        console.log(`[DIAG] Buffer de espera armado pra ${remetente} — tamanho do buffer: ${buffer.length} bytes, mimeType: ${mimeType}`);
         const timer = setTimeout(() => {
+          console.log(`[DIAG] Timer do buffer disparou pra ${remetente}`);
           DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
           processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda: '' })
-            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {}));
+            .then(() => console.log(`[DIAG] processarMidiaRecebida (via timer) terminou OK pra ${remetente}`))
+            .catch((erro) => {
+              console.error(`[DIAG] processarMidiaRecebida (via timer) REJEITOU pra ${remetente}:`, erro && erro.stack ? erro.stack : erro);
+              tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {});
+            });
         }, JANELA_BUFFER_LEGENDA_MS);
 
         DOCUMENTOS_AGUARDANDO_LEGENDA.set(remetente, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, timer, criadoEm: Date.now() });
