@@ -216,6 +216,50 @@ async function reordenarAbas(sheets, spreadsheetId) {
   }
 }
 
+// Proteção de aba (09/09/2026, pedido do Aroldo) — o cliente passa a ter acesso Editor na própria
+// planilha (compartilhamento feito manualmente por ele, fora do código), mas só deve poder mexer na
+// coluna `Subcategoria` (quando ela existir no cabeçalho da aba) — o resto é gravado pelo Pocket/IA
+// ou revisado pelo consultor especialista no fechamento do mês, e não deve ser editável por
+// terceiros. Aba sem coluna Subcategoria (Extrato, ContasAReceber, Itens, Orcamento, Fechamento
+// etc.) fica protegida por inteiro. Só o service account (que grava programaticamente) consegue
+// editar as partes protegidas — se quiser dar acesso de edição total pra alguém além dele (o
+// próprio Aroldo, por exemplo), adicionar o e-mail em `editors.users` abaixo.
+async function protegerAbaExcetoSubcategoria(sheets, spreadsheetId, sheetIdNumerico, cabecalho) {
+  const emailServico = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
+  if (!emailServico || sheetIdNumerico === null || sheetIdNumerico === undefined) return;
+
+  const indiceLivre = cabecalho.indexOf('Subcategoria');
+  const requests = [];
+
+  const protegerFaixa = (startColumnIndex, endColumnIndex) => {
+    if (startColumnIndex >= endColumnIndex) return;
+    requests.push({
+      addProtectedRange: {
+        protectedRange: {
+          range: { sheetId: sheetIdNumerico, startColumnIndex, endColumnIndex },
+          description: 'Interali Pocket — editado só pelo sistema/consultor',
+          warningOnly: false,
+          editors: { users: [emailServico] },
+        },
+      },
+    });
+  };
+
+  if (indiceLivre === -1) {
+    protegerFaixa(0, cabecalho.length); // sem coluna livre nessa aba — protege tudo
+  } else {
+    protegerFaixa(0, indiceLivre);
+    protegerFaixa(indiceLivre + 1, cabecalho.length);
+  }
+
+  if (requests.length === 0) return;
+  await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } }).catch((erro) => {
+    // Nunca trava o fluxo principal por causa de proteção — só loga. Ex.: aba criada antes desta
+    // feature já pode ter proteção conflitante, ou o Sheets pode rejeitar range vazio em aba nova.
+    console.error('Falha ao proteger aba (não bloqueia o cadastro/gravação):', erro.message);
+  });
+}
+
 // Garante a aba mensal `<competencia> · <sufixo>` com o cabeçalho certo. Cria + reordena se for
 // nova. Migração leve de cabeçalho curto, igual garantirAbaComCabecalho fazia. Devolve o título.
 // `opts.pularReordenar` — a migração cria dezenas de abas em sequência e reordena uma vez só no
@@ -226,10 +270,12 @@ async function garantirAbaMensal(sheets, spreadsheetId, competencia, sufixo, cab
   const existe = planilha.data.sheets.some((s) => s.properties.title === titulo);
 
   if (!existe) {
-    await sheets.spreadsheets.batchUpdate({
+    const resp = await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: { requests: [{ addSheet: { properties: { title: titulo } } }] },
     });
+    const sheetIdNumerico = resp.data.replies && resp.data.replies[0] && resp.data.replies[0].addSheet.properties.sheetId;
+    await protegerAbaExcetoSubcategoria(sheets, spreadsheetId, sheetIdNumerico, cabecalho);
   }
 
   const ultima = colunaLetra(cabecalho.length);
@@ -258,10 +304,12 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId, nomeAba, cabecalho
   const abaExiste = planilha.data.sheets.some((aba) => aba.properties.title === nomeAba);
 
   if (!abaExiste) {
-    await sheets.spreadsheets.batchUpdate({
+    const resp = await sheets.spreadsheets.batchUpdate({
       spreadsheetId,
       requestBody: { requests: [{ addSheet: { properties: { title: nomeAba } } }] },
     });
+    const sheetIdNumerico = resp.data.replies && resp.data.replies[0] && resp.data.replies[0].addSheet.properties.sheetId;
+    await protegerAbaExcetoSubcategoria(sheets, spreadsheetId, sheetIdNumerico, cabecalho);
   }
 
   const ultimaColuna = colunaLetra(cabecalho.length);
@@ -852,6 +900,8 @@ module.exports = {
   garantirAbaComCabecalho,
   reordenarAbas,
   getSheetsClient,
+  obterSheetIdNumerico,
+  protegerAbaExcetoSubcategoria,
   buscarLinhas,
   SUFIXO,
   RE_ABA_MENSAL,
@@ -861,6 +911,10 @@ module.exports = {
   CABECALHO_CONTAS_A_PAGAR,
   CABECALHO_CONTAS_A_RECEBER,
   CABECALHO_ITENS,
+  CABECALHO_DESPESAS_FIXAS,
+  CABECALHO_ORCAMENTO,
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
+  ABA_DESPESAS_FIXAS,
+  ABA_ORCAMENTO,
 };
