@@ -46,7 +46,13 @@ const REGRAS_FLUXO_ENTRADA_SAIDA = `REGRAS CRÍTICAS DE FLUXO (ENTRADA vs SAÍDA
 3. TRANSFERÊNCIA ENTRE CONTAS DO MESMO TITULAR (02/09/2026 — pedido do Aroldo, caso real: cliente move dinheiro entre os próprios bancos):
    - Se o PAGADOR/REMETENTE e o RECEBEDOR/FAVORECIDO forem a MESMA pessoa ou empresa (mesmo CPF, mesmo CNPJ, ou claramente o mesmo nome/titular em bancos diferentes), OU se a descrição disser "transferência entre contas", "mesma titularidade", "aplicação"/"resgate" da própria conta -> NÃO é receita nem despesa de resultado, é só o dinheiro trocando de conta.
    - Preencha "tipo_movimentacao" com a direção da perna que o documento mostra (entrada se é o crédito, saída se é o débito), mas use SEMPRE "categoria": "Transferência entre Contas" e "grupo_dre": "transferencia_entre_contas".
-   - NUNCA classifique isso como venda, faturamento, retirada, pró-labore, nem nenhuma chave de RECEITA_BRUTA/CUSTOS/DESPESAS.`;
+   - NUNCA classifique isso como venda, faturamento, retirada, pró-labore, nem nenhuma chave de RECEITA_BRUTA/CUSTOS/DESPESAS.
+
+4. CUPOM FISCAL / RECIBO DE VENDA EMITIDO POR OUTRO ESTABELECIMENTO (09/09/2026 — caso real: cupom de venda de uma sorveteria, cliente final anônimo "Consumidor Final", foi lançado como ENTRADA quando deveria ser SAÍDA):
+   - Um cupom fiscal, recibo de venda ou nota fiscal de venda tem um EMITENTE (o estabelecimento que vendeu, normalmente no topo/cabeçalho — nome, CNPJ) e às vezes um "Cliente"/"Consumidor" (quem comprou, geralmente "Consumidor Final" ou um nome avulso — raramente é o titular da conta que está mandando o documento pro Pocket).
+   - Quem MANDA esse tipo de documento pro Pocket é, na esmagadora maioria dos casos, quem COMPROU (está guardando o comprovante do próprio gasto) — NÃO o dono do estabelecimento que vendeu. Portanto, por padrão: "tipo_movimentacao": "saida", "estabelecimento_ou_pessoa" = o EMITENTE (quem vendeu), "cnpj_fornecedor" = CNPJ do emitente.
+   - EXCEÇÃO: se o nome do TITULAR DA CONTA (informado no contexto desta conversa, quando disponível) bater com o nome do ESTABELECIMENTO EMITENTE do cupom (é o próprio negócio do titular vendendo pra um cliente dele) -> aí sim é "entrada" (venda/receita), "estabelecimento_ou_pessoa" = o cliente que comprou (ou "Consumidor Final" se anônimo).
+   - Na dúvida (nome do titular não informado, ou não dá pra saber se bate com o emitente) -> assuma "saida" (é o cenário mais comum e mais seguro: gasto do titular em outro estabelecimento).`;
 
 // 17/08/2026 (sugestão do analista financeiro do Aroldo, risco crítico real de escritório de
 // advocacia/contabilidade/consultoria) — dinheiro que passa pela conta do cliente mas não é dele:

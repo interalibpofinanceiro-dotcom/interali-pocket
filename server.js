@@ -1912,7 +1912,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     return;
   }
 
-  const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType);
+  const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType, cliente && cliente.nome);
 
   if (dadosExtraidos.tipo_documento === 'extrato_bancario') {
     // Nenhuma pista textual nem de conteúdo (conteudoPareceExtratoBancario, PDF pode ter stream

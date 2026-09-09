@@ -124,11 +124,16 @@ async function chamarExtracaoTexto(system, mensagemUsuario, maxTokens = 1024) {
   return extrairTextoResposta(response);
 }
 
-async function extrairComprovanteDeBuffer(imageBuffer, mediaType) {
-  const texto = await chamarExtracaoVisao(
-    PROMPT_EXTRACAO, imageBuffer, mediaType,
-    'Extraia os dados deste comprovante seguindo o formato JSON definido.'
-  );
+// `nomeCliente` (09/09/2026, caso real: cupom de venda de outro estabelecimento lançado como
+// entrada) — opcional, informativo, usado só pela regra 4 de REGRAS_FLUXO_ENTRADA_SAIDA (cupom
+// fiscal/recibo de venda) pra saber se o EMITENTE do documento é o próprio titular da conta (venda
+// dele) ou outro estabelecimento (gasto dele). Sem nome informado, a regra já assume o caso mais
+// comum e seguro (saída) sozinha — nunca trava o fluxo por falta desse dado.
+async function extrairComprovanteDeBuffer(imageBuffer, mediaType, nomeCliente) {
+  const instrucao = nomeCliente
+    ? `Extraia os dados deste comprovante seguindo o formato JSON definido. Titular da conta que está enviando este documento: "${nomeCliente}".`
+    : 'Extraia os dados deste comprovante seguindo o formato JSON definido.';
+  const texto = await chamarExtracaoVisao(PROMPT_EXTRACAO, imageBuffer, mediaType, instrucao);
   return extrairJSON(texto);
 }
 
