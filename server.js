@@ -469,6 +469,10 @@ async function responderSobreOrfaos(remetente, cliente, sheetId, texto) {
       categoria: esc.categoria || atual.categoria,
       subcategoria: esc.subcategoria || atual.subcategoria || '',
       grupo_dre: esc.grupo_dre || atual.grupo_dre,
+      // 09/09/2026 — só preenche se ainda tava vazio (nunca sobrescreve um valor já lido da imagem
+      // ou da legenda); caso real: cliente esclareceu "resgate de aplicação do BB" por texto, e o
+      // esclarecimento não tinha campo nenhum pra capturar isso antes.
+      conta_bancaria: atual.conta_bancaria || esc.banco_conta || '',
       status_conciliacao: 'CONCILIADO_OK',
       observacao_conciliacao: 'Recebimento do extrato esclarecido pelo cliente (sem comprovante).',
     }).catch((e) => console.error('Falha ao atualizar órfão esclarecido:', e.message));

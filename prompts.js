@@ -619,7 +619,8 @@ Sua tarefa: casar a explicação do cliente com os itens da lista e retornar SOM
       "estabelecimento_ou_pessoa": "nome de quem pagou / origem do dinheiro, se o cliente disse",
       "categoria": "categoria dinâmica por nicho",
       "subcategoria": "opcional ou null",
-      "grupo_dre": "uma chave da lista CLASSIFICAÇÃO PARA A DRE abaixo"
+      "grupo_dre": "uma chave da lista CLASSIFICAÇÃO PARA A DRE abaixo",
+      "banco_conta": "nome do banco/conta, SE o cliente mencionar (ex.: 'BB' -> 'Banco do Brasil', 'Itaú', 'conta do Nubank'), senão null"
     }
   ],
   "nao_reconhecido": false
@@ -630,6 +631,7 @@ REGRAS:
 - Se o cliente disser algo genérico que cobre todos ("todos foram vendas", "tudo isso foi pix de cliente"), gere um esclarecimento para CADA item da lista.
 - Se a mensagem claramente NÃO é uma resposta sobre esses recebimentos (é outra pergunta, outro assunto, um comando) -> retorne "esclarecimentos": [] e "nao_reconhecido": true.
 - Todos os itens são ENTRADA (recebimento). Nunca use chave de despesa/custo.
+- "banco_conta" (09/09/2026): só preencha se o cliente citar um banco/conta explicitamente na explicação (ex.: "resgate de aplicação do BB", "caiu na conta do Itaú") — nunca invente. Sigla comum de banco brasileiro pode ser expandida (BB -> Banco do Brasil, CEF/Caixa -> Caixa Econômica Federal).
 - Responda APENAS com o JSON.
 
 CLASSIFICAÇÃO PARA A DRE (grupo_dre) — só chaves de entrada:
