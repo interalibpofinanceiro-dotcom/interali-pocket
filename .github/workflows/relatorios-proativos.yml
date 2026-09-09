@@ -4,12 +4,14 @@ name: Tarefas Proativas - Interali Pocket
 # hospedagem não sustenta um cron interno confiável. Ver CLAUDE.MD/CONTEXTO.md e
 # HISTORICO-COMPLETO.md no repositório de documentação pro contexto completo.
 #
-# 2 tarefas, 2 jobs (cada um só roda no seu próprio agendamento, ou nos dois via disparo manual):
+# 3 tarefas, 3 jobs (cada um só roda no seu próprio agendamento, ou em todos via disparo manual):
 # - disparar-relatorio: resumo semanal (toda sexta) / mensal (dia 1) — manda só o "avisador"
 #   via template; o relatório de verdade (o que já foi pago/recebido na semana — dado REALIZADO,
 #   não previsão) sai quando o cliente responde.
 # - disparar-despesas-fixas: todo dia, lança sozinho toda despesa/receita fixa recorrente
 #   (comando "recorrente:") cujo dia bate com hoje.
+# - checar-saude: a cada 30min, confere se Anthropic/WhatsApp estão respondendo e avisa o WhatsApp
+#   do admin só quando o status MUDA (ver /tarefas/checar-saude em server.js).
 #
 # 17/08/2026 (pedido do Aroldo): resumo semanal movido de segunda pra SEXTA — faz mais sentido
 # fechar a semana com o que já aconteceu de verdade (entradas/saídas realizadas) do que abrir a
@@ -24,6 +26,11 @@ on:
     - cron: '0 11 1 * *'
     # Todo dia às 08:00 (horário de Brasília) — despesas/receitas fixas recorrentes
     - cron: '0 11 * * *'
+    # A cada 30 minutos, todo dia — checagem de saúde (Anthropic/WhatsApp). 09/09/2026, pedido do
+    # Aroldo: caso real, crédito da Anthropic esgotou e só foi percebido quando uma cliente
+    # reclamou. Só avisa o WhatsApp do admin quando o status MUDA (ver /tarefas/checar-saude em
+    # server.js) — não gera aviso repetido a cada 30min enquanto o problema persiste.
+    - cron: '*/30 * * * *'
   workflow_dispatch:
     inputs:
       periodo:
@@ -62,5 +69,15 @@ jobs:
       - name: Chama /tarefas/despesas-fixas
         run: |
           curl -sf -X POST "https://pocket.interali.com.br/tarefas/despesas-fixas?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n"
+          cat resposta.json
+
+  checar-saude:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/30 * * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chama /tarefas/checar-saude
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/checar-saude?chave=${{ secrets.RELATORIO_SECRET }}" \
             -o resposta.json -w "\nHTTP %{http_code}\n"
           cat resposta.json

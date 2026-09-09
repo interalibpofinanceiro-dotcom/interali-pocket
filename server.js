@@ -2989,6 +2989,65 @@ app.post('/webhook-asaas', async (req, res) => {
   }
 });
 
+// Alerta automático de saúde (09/09/2026, pedido do Aroldo — caso real: crédito da Anthropic
+// esgotou e ninguém percebeu até uma cliente reclamar que o comprovante dela não estava sendo
+// lido). Chamado por cron externo (GitHub Actions, mesmo padrão dos outros /tarefas/*) de tempos
+// em tempos. Só avisa o WhatsApp do admin quando o status MUDA (ficou indisponível, ou voltou a
+// funcionar) — nunca a cada checagem, senão vira spam enquanto o problema persiste. Estado em
+// memória (reseta a cada deploy/restart — mesmo padrão de cooldown já usado no resto do projeto);
+// no pior caso, uma checagem logo após reiniciar não dispara alerta na primeira vez que roda, só
+// estabelece a base, e passa a alertar a partir da PRÓXIMA mudança de verdade.
+// Limitação conhecida: se o WHATSAPP em si estiver fora do ar, não tem como avisar POR whatsapp —
+// só fica registrado no log do Railway (não existe outro canal de alerta configurado hoje).
+let ULTIMO_STATUS_SAUDE = { anthropic: null, whatsapp: null };
+
+app.all('/tarefas/checar-saude', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+
+  const status = {};
+
+  try {
+    await testarAnthropic();
+    status.anthropic = { ok: true };
+  } catch (error) {
+    status.anthropic = { ok: false, erro: error.message };
+  }
+
+  try {
+    await testarConexaoWhatsApp();
+    status.whatsapp = { ok: true };
+  } catch (error) {
+    status.whatsapp = { ok: false, erro: error.message };
+  }
+
+  const avisados = [];
+  const NOME_SERVICO = { anthropic: 'Anthropic (IA)', whatsapp: 'WhatsApp' };
+
+  for (const servico of ['anthropic', 'whatsapp']) {
+    const atual = status[servico].ok;
+    const anterior = ULTIMO_STATUS_SAUDE[servico];
+
+    if (anterior !== null && anterior !== atual) {
+      const dica = servico === 'anthropic' ? '\n\n👉 console.anthropic.com → Plans & Billing' : '';
+      const mensagem = atual
+        ? `✅ *${NOME_SERVICO[servico]} voltou a funcionar* — Interali Pocket normalizado.`
+        : `🔴 *${NOME_SERVICO[servico]} fora do ar* — Interali Pocket parou de responder.\n\n${status[servico].erro || ''}${dica}`;
+
+      console.log(`Alerta de saúde: ${servico} mudou de ${anterior} para ${atual}`);
+      if (ADMIN_WHATSAPP_NUMBER) {
+        await enviarMensagemWhatsApp(ADMIN_WHATSAPP_NUMBER, mensagem).catch((erro) => console.error(`Falha ao mandar alerta de saúde (${servico}) pro admin:`, erro.message));
+      }
+      avisados.push(servico);
+    }
+
+    ULTIMO_STATUS_SAUDE[servico] = atual;
+  }
+
+  res.json({ ok: true, status, avisados });
+});
+
 app.get('/health', async (_req, res) => {
   const envChecks = {
     whatsapp: {
