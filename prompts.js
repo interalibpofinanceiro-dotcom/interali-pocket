@@ -93,7 +93,7 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   "categoria": "categoria de despesa ou receita, definida dinamicamente (ver regras abaixo)",
   "subcategoria": "opcional, mais específica que a categoria, ou null",
   "grupo_dre": "uma das chaves fixas da lista em CLASSIFICAÇÃO PARA A DRE, abaixo",
-  "banco_conta": "nome do banco/conta de onde saiu ou pra onde entrou o dinheiro, se visível no comprovante (ex.: 'Itaú', 'Nubank'), senão null",
+  "banco_conta": "nome do banco/instituição de onde saiu ou pra onde entrou o dinheiro, se identificável pelo cabeçalho, logotipo ou nome do app no comprovante — ex.: 'Sicoob', 'Nubank', 'Itaú', 'Bradesco', 'Banco do Brasil', 'Santander', 'Banco Inter', 'C6 Bank', 'Caixa', 'Sicredi', 'PagBank', 'Mercado Pago', 'Cora', 'Stone', ou o nome que aparecer, mesmo que não esteja nesta lista. Use null só se genuinamente não der pra identificar — nunca invente.",
   "itens": [
     {
       "descricao": "nome do item ou serviço",

@@ -1155,6 +1155,10 @@ function formatarResumoComprovante(dados) {
     `🏷️ Categoria: ${dados.categoria || 'Não Classificado'}`,
   ];
 
+  if (dados.conta_bancaria) {
+    linhas.push(`🏦 Conta/Banco: ${dados.conta_bancaria}`);
+  }
+
   if (dados.subcategoria) {
     linhas.push(`   Subcategoria: ${dados.subcategoria}`);
   }
@@ -1642,6 +1646,10 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
       subcategoria: cartao || resumo.banco_emissor || null,
       grupo_dre: 'admin_fatura_cartao_consolidada',
       banco_conta: resumo.banco_emissor || null,
+      // 09/09/2026 — faltava esse campo: salvarComprovante (sheets.js) lê especificamente
+      // `conta_bancaria`, não `banco_conta` — sem isso a coluna ficava sempre vazia pra toda fatura
+      // consolidada, mesmo quando a IA identificava o banco certo.
+      conta_bancaria: cartao || resumo.banco_emissor || '',
       itens: [],
       observacoes: 'Lançamento consolidado (fatura extensa) — sem detalhamento item a item. Se precisar do detalhe, peça pra tentar ler os itens de novo.',
     };
@@ -2309,6 +2317,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // extrairComprovanteDeTexto (mesma categorização dinâmica por nicho, mesmo grupo_dre) e
         // depois entra no MESMO fluxo de checagem de duplicidade/salvamento que a foto usa.
         const dadosExtraidos = await extrairComprovanteDeTexto(comandoLancamento);
+        // 09/09/2026 — mesmo mapeamento já usado pro comprovante por foto (extrairNomeConta):
+        // "lançar: paguei 50 no mercado, conta Itaú" também deve preencher Conta_Bancaria. Antes
+        // esse campo nunca era copiado nesse fluxo, mesmo quando o cliente escrevia a conta.
+        dadosExtraidos.conta_bancaria = extrairNomeConta(comandoLancamento.toLowerCase()) || dadosExtraidos.banco_conta || '';
         console.log('Lançamento manual extraído do texto:', JSON.stringify(dadosExtraidos, null, 2));
         // Sem buffer (não veio de arquivo) — a memória de correção ainda permite "apaga o último",
         // só não permite reclassificar pra extrato/fatura/boleto (não tem documento pra reprocessar).
