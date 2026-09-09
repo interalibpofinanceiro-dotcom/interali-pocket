@@ -41,6 +41,19 @@ const REGRAS_CATEGORIZACAO_DINAMICA = `REGRAS DE CATEGORIZAÇÃO DINÂMICA:
   - Escritório/Serviços: "Despesas Administrativas", "Impostos e Taxas", "Receita - Honorários".
   - Autônomo/Prestador: "Material de Trabalho", "Combustível", "Receita - Prestação de Serviço".
 
+- Para EMPRESAS (PESSOA JURÍDICA) sem nicho de negócio mais específico já coberto acima (09/09/2026 — baseado no plano de contas real usado pela contabilidade da Interali, mesmo padrão profissional aplicado a qualquer cliente PJ) use esta estrutura de categoria, agrupada como um contador agruparia:
+  - Receitas Diretas: "Clientes - Serviços Prestados", "Clientes - Revenda de Mercadoria", "Clientes - Industrialização de Produtos", "Clientes - Serviços Extraordinário" -> "grupo_dre": "receita_prestacao_servicos" (serviço) ou "receita_venda_mercadorias" (mercadoria/produto).
+  - Receitas Indiretas: "Dividendos Recebidos", "Juros de Aplicações" -> "financeiro_rendimentos"; "Reembolso de Despesas", "Outras Receitas" -> "nao_classificado".
+  - Devoluções de Vendas: "Devolução de Vendas de Mercadoria/Serviços" -> "deducao_devolucoes".
+  - Custos Diretos ligados à operação (aluguel/água/luz/telefone/software DO SETOR OPERACIONAL, certificado digital, manutenção de software) -> "custo_diretos_servicos"; despesas com veículos/condução, associações e órgãos de classe, correios e malotes, assinatura digital -> "admin_veiculos" (veículos) ou "admin_servicos_tecnicos" (demais).
+  - Despesas com Pessoal: "Salários", "13º Salário", "Rescisões" -> "pessoal_salarios"; "Pró-labore" -> "pessoal_prolabore"; "INSS", "FGTS", "IRRF" -> "pessoal_encargos"; "Vale Refeição", "Vale Transporte", "Assistência Médica", "Seguro de Vida", "Outros Benefícios", "Treinamento", "Bonificações", "Uniformes" -> "pessoal_beneficios".
+  - Despesas de Vendas e Marketing: "Marketing", "Despesas de Viagens", "Prêmios/Brindes" -> "vendas_marketing"; "Comissões" -> "vendas_comissoes".
+  - Despesas Administrativas: "Limpeza e Copa", "Material de Escritório" -> "admin_material_escritorio"; "Água e Esgoto", "Energia Elétrica", "Telefonia e Internet" -> "admin_utilidades"; "Condomínio", "Seguros", "IPTU" -> "admin_ocupacao"; "Contabilidade", "Advogados", "Auditorias", "Segurança" -> "admin_servicos_tecnicos"; "Manutenção de Imobilizado", "Prestação de Serviço de Limpeza" -> "admin_manutencao".
+  - Despesas Financeiras: "Juros sobre Empréstimos" -> "financeiro_juros_emprestimos"; "Multas" -> "financeiro_multas_atraso"; "Tarifas Bancárias" -> "financeiro_tarifas".
+  - Impostos sobre a VENDA/faturamento (ICMS, IPI, PIS, COFINS, ISS, Simples Nacional/DAS, IOF) -> "deducao_impostos_vendas". IRPJ e Contribuição Social são imposto sobre o LUCRO, não sobre a venda — o sistema ainda não tem uma chave própria pra isso (backlog conhecido); por ora use "deducao_impostos_vendas" mesmo assim e registre em "observacoes" que é imposto sobre o lucro, pra não confundir com o DAS.
+  - Investimento (bem durável, NÃO é despesa do mês — máquinas, equipamentos, veículos, instalações, informática, móveis, compra de carteira de clientes) -> "grupo_dre": "investimento_imobilizado" (nunca soma na DRE, só fica marcado/consultável).
+  - "Aporte de Sócio", "Devolução de Aporte de Sócio", "Adiantamento de Clientes" -> dinheiro de capital entrando/saindo, NÃO é receita nem despesa de resultado — trate pela regra 3 de REGRAS_FLUXO_ENTRADA_SAIDA (mesma titularidade/movimentação de capital), "grupo_dre": "transferencia_entre_contas".
+
 - Se não houver contexto suficiente para identificar o nicho, use categorias financeiras genéricas e neutras (ex.: "Despesas Operacionais", "Receita Operacional", "Despesas Administrativas", "Impostos e Taxas", "Transferência entre Contas").
 - Nunca deixe o campo "categoria" vazio. Se realmente não for possível inferir nada, use "Não Classificado".`;
 
