@@ -1143,29 +1143,24 @@ async function avisarSeLimiteProximo(remetente, cliente, totalLancamentosNoMes) 
   }
 }
 
+// Formato de confirmação (09/09/2026, pedido do Aroldo — padronizar sucesso, sem justificativa
+// operacional nem pergunta desnecessária): confirma, mostra os dados principais, e diz que já tá
+// na planilha. Isso é só pro caminho de SUCESSO — erro/dado faltando/dúvida real continuam com a
+// mensagem própria de cada caso (ver tratarErroProcessamento), não mexi nesses.
 function formatarResumoComprovante(dados) {
+  const ehEntrada = dados.tipo_movimentacao === 'entrada';
   const linhas = [
-    '✅ Comprovante processado!',
-    '',
-    `📅 Data da compra: ${dados.data ? formatarDataBR(dados.data) : 'não identificada'}`,
-    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`,
-    `💰 Valor: ${formatarNumero(dados.valor)}`,
-    `↕️ Tipo: ${dados.tipo_movimentacao === 'entrada' ? 'Entrada' : 'Saída'}`,
-    `🏢 ${dados.estabelecimento_ou_pessoa || 'Não identificado'}`,
-    `🏷️ Categoria: ${dados.categoria || 'Não Classificado'}`,
+    `${ehEntrada ? '💰' : '✅'} *${ehEntrada ? 'Receita registrada' : 'Comprovante registrado'} com sucesso!*`,
+    `${ehEntrada ? '💰' : '💸'} *${ehEntrada ? 'Receita' : 'Despesa'}:* ${formatarNumero(dados.valor)}`,
+    `📍 *${ehEntrada ? 'Origem' : 'Favorecido'}:* ${dados.estabelecimento_ou_pessoa || 'Não identificado'}`,
   ];
 
   if (dados.conta_bancaria) {
-    linhas.push(`🏦 Conta/Banco: ${dados.conta_bancaria}`);
+    linhas.push(`🏦 *Conta/Banco:* ${dados.conta_bancaria}`);
   }
 
-  if (dados.subcategoria) {
-    linhas.push(`   Subcategoria: ${dados.subcategoria}`);
-  }
-
-  if (dados.descricao) {
-    linhas.push(`📝 ${dados.descricao}`);
-  }
+  linhas.push(`🏷️ *Categoria:* ${dados.categoria || 'Não Classificado'}${dados.subcategoria ? ` — ${dados.subcategoria}` : ''}`);
+  linhas.push('📊 Lançamento salvo na sua planilha!');
 
   return linhas.join('\n');
 }
@@ -1626,11 +1621,7 @@ function formatarResumoDespesaFixa(dados) {
 // enviando mais uma mensagem).
 async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
   const resumo = await extrairResumoFaturaDeBuffer(buffer, mimeType);
-  console.log('[DIAG] processarFaturaComoResumo — resumo extraído:', JSON.stringify(resumo));
   const cartao = extrairNomeCartao(legendaLower) || resumo.banco_emissor || '';
-  const dicaLegenda = opts.semLegenda
-    ? '\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉'
-    : '';
 
   if (resumo.status_pagamento === 'paga') {
     const dadosExtraidos = {
@@ -1657,7 +1648,6 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
     await processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, {
       buffer, mimeType, nomeArquivo: opts.nomeArquivo || null, resumoTipo: 'fatura_paga',
     });
-    if (dicaLegenda) await enviarMensagemWhatsApp(remetente, dicaLegenda.trim()).catch(() => {});
     return;
   }
 
@@ -1688,14 +1678,15 @@ async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mi
     });
   }
 
-  const aviso = contasNovas.length === 0 ? ' (já estava registrada, ignorei pra não duplicar)' : '';
-  await enviarMensagemWhatsApp(
-    remetente,
-    `✅ Registrei a fatura${cartao ? ` do cartão ${cartao}` : ''} como conta a pagar${aviso}: ${formatarNumero(conta.valor)}, vencimento ${conta.vencimento}.\n` +
-    `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}\n\n` +
-    'Ela veio consolidada (sem detalhar item a item) porque é um documento extenso — se quiser o detalhe por lançamento, me avisa que eu tento ler de novo.' +
-    dicaLegenda
-  );
+  // 09/09/2026 (pedido do Aroldo) — se já existia (mesma fatura reenviada), a mensagem precisa
+  // deixar isso claro logo de cara, não só como nota no fim — caso real: cliente reenviou a mesma
+  // fatura 3x achando que não tinha funcionado, porque a mensagem antiga sempre começava com
+  // "✅ Registrei..." mesmo quando não registrava nada novo.
+  const mensagem = contasNovas.length === 0
+    ? `ℹ️ *Essa fatura já estava registrada* — não lancei de novo, pra não duplicar.\n💳 *Cartão/Banco:* ${cartao || resumo.banco_emissor || 'não identificado'}\n💰 *Valor Total:* ${formatarNumero(conta.valor)}\n📅 *Vencimento:* ${formatarDataBR(conta.vencimento)}\n📊 Confira na sua planilha se já está tudo certo.`
+    : `✅ *Fatura processada com sucesso!*\n💳 *Cartão/Banco:* ${cartao || resumo.banco_emissor || 'não identificado'}\n💰 *Valor Total:* ${formatarNumero(conta.valor)}\n📅 *Vencimento:* ${formatarDataBR(conta.vencimento)}\n📊 Foi registrada como conta a pagar na sua planilha.`;
+
+  await enviarMensagemWhatsApp(remetente, mensagem);
 }
 
 // Rede de segurança de ÚLTIMO recurso pro extrato (19/08/2026) — só é chamada de dentro de
@@ -1746,18 +1737,17 @@ async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mim
   await enriquecerContasComCnae(contasAPagarNovas).catch((erro) => console.error('Falha no CNAE de contas a pagar:', erro.message));
 
   await salvarContasAPagar(sheetId, contasAPagarNovas);
-  const sufixoCartao = cartao ? ` no cartão ${cartao}` : '';
-  const avisoContasAPagarDuplicadas = contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
   // Total somado (não lista cada conta individualmente) — mesmo princípio do extrato: confirmação
   // geral pro cliente, detalhe completo por lançamento fica na planilha.
   const totalContasNovas = contasAPagarNovas.reduce((soma, c) => soma + (Number(c.valor) || 0), 0);
-  const lancadoEm = `🗓️ Lançado em: ${formatarDataHoraBR(new Date().toISOString())}`;
 
-  const prefixo = opts.semLegenda
-    ? `✅ Esse documento é uma fatura de cartão com ${contasAPagarNovas.length} lançamento(s) (${formatarNumero(totalContasNovas)}) — registrei${sufixoCartao} como contas a pagar, não como um gasto único${avisoContasAPagarDuplicadas}.\n${lancadoEm}\n\nDa próxima vez, pode escrever "fatura" ou "cartão <nome do banco>" na legenda pra eu já processar assim direto. 😉`
-    : `✅ Registrei ${contasAPagarNovas.length} conta(s) a pagar${sufixoCartao} (${formatarNumero(totalContasNovas)})${avisoContasAPagarDuplicadas}.\n${lancadoEm}`;
+  // 09/09/2026 (pedido do Aroldo) — mensagem clara logo de cara se era TUDO duplicata (não começa
+  // com "✅ Registrei" quando na verdade não registrou nada novo).
+  const mensagem = contasAPagarNovas.length === 0 && contasAPagarDuplicadas > 0
+    ? `ℹ️ *Essa fatura já estava registrada* (${contasAPagarDuplicadas} lançamento(s)) — não lancei de novo, pra não duplicar.\n📊 Confira na sua planilha se já está tudo certo.`
+    : `✅ *Fatura processada com sucesso!*\n💳 *Cartão/Banco:* ${cartao || 'não identificado'}\n💰 *Valor Total:* ${formatarNumero(totalContasNovas)}\n🔢 *Itens:* ${contasAPagarNovas.length}${contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorados)` : ''}\n📊 Todos os lançamentos foram registrados na sua planilha como contas a pagar.`;
 
-  await enviarMensagemWhatsApp(remetente, `${prefixo}\n\nPergunte "previsão" a qualquer momento para ver o fluxo de caixa projetado.`);
+  await enviarMensagemWhatsApp(remetente, mensagem);
 }
 
 // Roteia e processa uma mídia (foto ou documento) já baixada — extraído do handler do webhook em
@@ -1770,7 +1760,6 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
-  console.log(`[DIAG] processarMidiaRecebida — sinal:"${sinal}" extenso:${extenso} nomeArquivo:"${nomeArquivo || ''}" tamanho:${buffer.length}`);
 
   // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
@@ -1923,7 +1912,6 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   const dadosExtraidos = await extrairComprovanteDeBuffer(buffer, mimeType, cliente && cliente.nome);
-  console.log('[DIAG] Comprovante único extraído:', JSON.stringify(dadosExtraidos));
 
   if (dadosExtraidos.tipo_documento === 'extrato_bancario') {
     // Nenhuma pista textual nem de conteúdo (conteudoPareceExtratoBancario, PDF pode ter stream
@@ -2291,16 +2279,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // leitura genérica. Não precisa segurar resposta nenhuma pro webhook (já foi mandada no
         // topo do handler); o processamento de verdade roda quando o timer disparar OU quando o
         // texto chegar antes (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
-        console.log(`[DIAG] Buffer de espera armado pra ${remetente} — tamanho do buffer: ${buffer.length} bytes, mimeType: ${mimeType}`);
         const timer = setTimeout(() => {
-          console.log(`[DIAG] Timer do buffer disparou pra ${remetente}`);
           DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
           processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda: '' })
-            .then(() => console.log(`[DIAG] processarMidiaRecebida (via timer) terminou OK pra ${remetente}`))
-            .catch((erro) => {
-              console.error(`[DIAG] processarMidiaRecebida (via timer) REJEITOU pra ${remetente}:`, erro && erro.stack ? erro.stack : erro);
-              tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {});
-            });
+            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {}));
         }, JANELA_BUFFER_LEGENDA_MS);
 
         DOCUMENTOS_AGUARDANDO_LEGENDA.set(remetente, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, timer, criadoEm: Date.now() });

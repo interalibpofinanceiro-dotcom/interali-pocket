@@ -772,6 +772,7 @@ async function buscarContasAPagar(spreadsheetId) {
         categoria: linha[5] || '',
         parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
         parcela_total: linha[7] ? numeroBR(linha[7]) : null,
+        registrado_em: linha[8] || '',
         grupo_dre: linha[9] || '',
         competencia: linha[10] || bloco.competencia || competenciaDe(linha[0]),
         subcategoria: linha[11] || '',
@@ -835,6 +836,7 @@ async function buscarContasAReceber(spreadsheetId) {
         documento: linha[5] || '',
         parcela_atual: linha[6] ? numeroBR(linha[6]) : null,
         parcela_total: linha[7] ? numeroBR(linha[7]) : null,
+        registrado_em: linha[8] || '',
         grupo_dre: linha[9] || '',
         competencia: linha[10] || bloco.competencia || competenciaDe(linha[0]),
       });
