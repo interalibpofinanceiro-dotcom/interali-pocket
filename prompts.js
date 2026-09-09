@@ -19,6 +19,22 @@ const REGRAS_CATEGORIZACAO_DINAMICA = `REGRAS DE CATEGORIZAÇÃO DINÂMICA:
   - Saídas Fixas: "Ocupação" (aluguel, condomínio, luz, água), "Sistemas de Agendamento/Prontuário", "Marketing/Anúncios".
   - grupo_dre: Consultas/Vacinas/Cirurgias/Internações/Banho & Tosa/Exames -> "receita_prestacao_servicos"; venda avulsa de ração/produtos -> "receita_venda_mercadorias"; medicamentos e insumos usados nos procedimentos -> "custo_diretos_servicos" ou "custo_cmv" se for revenda de produto.
 
+- Para PESSOA FÍSICA (controle de gastos pessoais/familiares — cliente não é uma empresa, ou o documento claramente não tem relação com nicho de negócio nenhum, ex.: supermercado de casa, escola dos filhos, salão de beleza pessoal, conta de luz residencial) use exatamente esta estrutura de categoria/subcategoria (09/09/2026, baseada no controle financeiro familiar padrão do Aroldo):
+  - RENDA (entrada): "Salário", "13º Salário", "Férias", "Comissões", "Renda com Aluguéis", "Resgate de Investimentos", "Outros".
+  - HABITAÇÃO: "Aluguel / Prestação", "Condomínio", "Manutenção", "Seguros", "Luz", "Empregados", "Telefones", "TV / Internet", "Impostos", "Outros".
+  - ALIMENTAÇÃO: "Supermercado", "Padaria", "Sacolão", "Açougue", "Lanche", "Almoço no Trabalho", "Outros".
+  - TRANSPORTE: "Combustível", "Estacionamento", "Manutenção", "IPVA", "Seguro Obrigatório", "Taxa de Licenciamento", "Uber", "Ônibus", "Lavagem", "Outros".
+  - COMPRAS: "Roupas", "Calçados", "Presentes", "Eletrônicos", "Materiais", "Outros".
+  - CUIDADOS PESSOAIS: "Salão de Beleza", "Atividades Físicas", "Depilação", "Xampu / Cremes", "Barba / Cabelo", "Outros".
+  - EDUCAÇÃO: "Faculdade / Colégio", "Uniforme", "Material Escolar", "Cursos", "Livros", "Jornais e Revistas", "Mesada / Merenda", "Outros".
+  - SAÚDE: "Seguro Saúde", "Seguro de Vida", "Plano de Saúde", "Psicólogo", "Dentista", "Fisioterapia", "Exames", "Farmácia", "Previdência".
+  - ENTRETENIMENTO: "Restaurante", "TV a Cabo / Streaming", "Viagens", "Cinema", "Shows / Eventos / Teatro", "Clube", "Outros".
+  - DESPESAS FINANCEIRAS: "Imposto de Renda a Pagar", "INSS", "Sindicato", "Anuidade Cartão de Crédito", "Tarifas Bancárias", "Imprevistos".
+  - POUPANÇA / CONTRIBUIÇÃO: "Poupança", "Dízimo", "Oferta", "Doação" — dízimo/oferta/doação seguem SEMPRE a regra 2 de REGRAS_FLUXO_ENTRADA_SAIDA acima (saída, grupo_dre "admin_doacoes_contribuicoes"), mesmo dentro do contexto de pessoa física.
+  - INVESTIMENTOS / RESERVAS: "Reservas Financeiras", "Consórcio de Imóvel", "Consórcio de Carro" — dinheiro que o titular está guardando/investindo pra si mesmo, NÃO é despesa perdida: use "grupo_dre": "investimento_imobilizado" pra consórcio de bem físico (carro/imóvel), ou "nao_classificado" pra poupança/reserva financeira genérica — nunca uma chave de despesa de resultado.
+  - Categorias como "Empregados" (empregada doméstica, diarista) mapeiam pra "grupo_dre": "pessoal_salarios" mesmo sem CLT formal — é custo de mão de obra da residência.
+  - Demais gastos de HABITAÇÃO/ALIMENTAÇÃO/TRANSPORTE/COMPRAS/CUIDADOS PESSOAIS/EDUCAÇÃO/SAÚDE/ENTRETENIMENTO/DESPESAS FINANCEIRAS não têm chave própria no DRE — use a chave existente mais parecida (ex.: "admin_ocupacao", "admin_utilidades", "admin_insumos_internos", "nao_classificado") em vez de inventar uma nova.
+
 - Para outros nichos, adapte dinamicamente seguindo a mesma lógica (categoria operacional específica do segmento, não genérica). Exemplos:
   - Restaurante/Pizzaria: "Insumos - Hortifruti", "Insumos - Carnes", "Insumos - Embalagens", "Delivery - Taxas de App", "Receita - Vendas Balcão".
   - Loja de Roupas: "Estoque - Compra de Mercadoria", "Receita - Vendas", "Marketing - Tráfego Pago".
