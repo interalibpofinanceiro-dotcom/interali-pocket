@@ -533,6 +533,21 @@ const TIMEOUT_PENDENCIA_ESCOLHA_FATURA_MS = 15 * 60 * 1000;
 const DOCUMENTOS_AGUARDANDO_LEGENDA = new Map();
 const JANELA_BUFFER_LEGENDA_MS = 7000;
 
+// Legenda mandada como mensagem de TEXTO separada, em vez de anexada na própria mídia (09/09/2026,
+// caso real: cliente Sirlene manda "Fatura cartão de crédito Porto Seguro..." como texto e o PDF
+// logo em seguida, dois envios do WhatsApp — não uma legenda de verdade). O buffer acima
+// (DOCUMENTOS_AGUARDANDO_LEGENDA) só cobre texto chegando DEPOIS da mídia; quando os dois chegam
+// quase juntos, a Meta entrega como duas chamadas de webhook concorrentes e existe uma corrida real:
+// se o texto for processado antes de a mídia terminar de registrar o buffer de espera, o texto nunca
+// é reconhecido como legenda (verificado ao vivo com log de diagnóstico — a fatura sempre caía no
+// modo resumo, nunca item a item, mesmo com o cliente escrevendo "fatura" toda vez). Guarda por até
+// 15s qualquer texto com palavra-chave de documento financeiro (mesmo vocabulário de
+// montarSinalRoteamento) — não guarda texto qualquer, pra não vazar pergunta livre como se fosse
+// legenda de um documento não relacionado que chegue por coincidência logo depois.
+const LEGENDAS_RECENTES_SEM_MIDIA = new Map();
+const JANELA_LEGENDA_RECENTE_MS = 15000;
+const REGEX_PALAVRA_CHAVE_DOCUMENTO = /\b(extrato|fatura|cart[ãa]o|boleto|pagar|vend|sistema|pdv|receber|cobran[çc]a)\b/i;
+
 // Memória de correção de curto prazo (23/08/2026, pedido do Aroldo) — guarda o ÚLTIMO documento
 // processado que virou EXATAMENTE UMA linha nova (comprovante único, lançamento por texto, ou
 // fatura registrada como resumo — paga ou pendente), por remetente, por até 10 minutos. Permite o
@@ -1425,7 +1440,9 @@ function inferirPistaPorNomeArquivo(nomeArquivo) {
   // statement" é o termo em inglês pra FATURA de cartão, não extrato bancário — se checasse
   // "statement" primeiro, "credit-card-mp-statement.pdf" (caso real reportado, 17/08/2026) cairia
   // errado em "extrato" só por causa da palavra "statement" solta no nome.
-  if (/\b(credit\s?card|cartao|card|fatura)\b/.test(nome)) return 'fatura cartao';
+  // "invoice" (09/09/2026, caso real: cliente Sirlene, arquivo salvo pelo app do banco como
+  // "invoice.pdf") é o termo em inglês genérico pra fatura — mesmo grupo do credit card acima.
+  if (/\b(credit\s?card|cartao|card|fatura|invoice)\b/.test(nome)) return 'fatura cartao';
   if (/\b(statement|extrato|bank)\b/.test(nome)) return 'extrato';
   if (/\b(boleto|dae|darf|guia)\b/.test(nome)) return 'boleto';
   if (/\b(vendas?|relatorio|fechamento|pdv|ifood|rappi)\b/.test(nome)) return 'vendas sistema';
@@ -2098,6 +2115,15 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
   console.log(`Mensagem recebida de ${remetente} | mídia: ${interpretado.tipoMidia || 'nenhuma'} | texto: ${interpretado.texto || interpretado.legenda || ''}`);
 
+  // Guarda como possível "legenda separada" (ver LEGENDAS_RECENTES_SEM_MIDIA acima) — só texto puro
+  // com palavra-chave de documento financeiro, pra a mídia que chegar em seguida (ou que já chegou
+  // um instante antes, numa corrida) conseguir reconhecer o tipo mesmo com a legenda vindo como
+  // mensagem separada. Roda incondicionalmente aqui, ANTES de qualquer pendência consumir a
+  // mensagem — não interfere em nada, só guarda uma cópia pro caso a mídia precisar dela.
+  if (!interpretado.tipoMidia && interpretado.texto && REGEX_PALAVRA_CHAVE_DOCUMENTO.test(interpretado.texto)) {
+    LEGENDAS_RECENTES_SEM_MIDIA.set(remetente, { texto: interpretado.texto, criadoEm: Date.now() });
+  }
+
   // Comando de admin (só funciona vindo do número configurado em ADMIN_WHATSAPP_NUMBER) —
   // checado antes de tudo, porque o admin não precisa (nem deve) estar cadastrado como cliente.
   if (ADMIN_WHATSAPP_NUMBER && remetente === ADMIN_WHATSAPP_NUMBER && !interpretado.tipoMidia) {
@@ -2212,6 +2238,9 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const pendente = DOCUMENTOS_AGUARDANDO_LEGENDA.get(remetente);
       clearTimeout(pendente.timer);
       DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
+      // Esse texto já está sendo usado como legenda AGORA — não deixar uma cópia velha em
+      // LEGENDAS_RECENTES_SEM_MIDIA pra não grudar por engano numa mídia futura não relacionada.
+      LEGENDAS_RECENTES_SEM_MIDIA.delete(remetente);
       await processarMidiaRecebida(remetente, cliente, sheetId, {
         buffer: pendente.buffer,
         mimeType: pendente.mimeType,
@@ -2271,7 +2300,21 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       const { buffer, mimeType } = await buscarMidiaBase64(interpretado.mediaId);
       bufferMidiaAtual = buffer;
       mimeTypeMidiaAtual = mimeType;
-      const legenda = interpretado.legenda || '';
+      let legenda = interpretado.legenda || '';
+
+      // Legenda mandada como mensagem de texto SEPARADA, chegando um instante ANTES da mídia (ver
+      // LEGENDAS_RECENTES_SEM_MIDIA acima) — cobre a corrida que o buffer de espera abaixo (pensado
+      // só pra texto chegando DEPOIS) não cobria. Legenda anexada na própria mídia sempre tem
+      // prioridade; isso só entra quando a mídia chega sem legenda nenhuma.
+      if (!legenda.trim()) {
+        const legendaSeparada = LEGENDAS_RECENTES_SEM_MIDIA.get(remetente);
+        if (legendaSeparada && Date.now() - legendaSeparada.criadoEm <= JANELA_LEGENDA_RECENTE_MS) {
+          LEGENDAS_RECENTES_SEM_MIDIA.delete(remetente);
+          legenda = legendaSeparada.texto.toLowerCase();
+          console.log(`[DIAG] ${remetente}: legenda recuperada de mensagem de texto separada ("${legendaSeparada.texto}").`);
+        }
+      }
+
       // Pista pelo nome do arquivo OU pelo nome de um banco digital no nome do arquivo (23/08/2026,
       // ver pistaPorNomeBanco) — qualquer uma das duas já é sinal suficiente pra pular o buffer de
       // espera de legenda abaixo.
