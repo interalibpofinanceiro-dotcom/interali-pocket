@@ -16,6 +16,35 @@ const TOLERANCIA_VALOR = 0.01;
 const TOLERANCIA_DIVERGENCIA_PERCENTUAL = 0.15;
 const TOLERANCIA_DIVERGENCIA_MINIMA = 5;
 
+// Guarda contra falso positivo na passada de DIVERGÊNCIA (09/09/2026, caso real: cliente Sirlene,
+// "Pagto Energia Elétrica COPEL" R$155,45 em 02/09 foi casado por engano com "Auto Posto Jacaranda
+// Ltda" R$145,93 em 04/09 — só porque ficou dentro de 15%/3 dias, sem nenhuma checagem de quem é o
+// estabelecimento. Isso escondeu a COPEL como se já tivesse comprovante (nunca virou órfã) e marcou
+// um posto de gasolina como "conciliado" com uma conta de luz. A passada EXATA (1 centavo) não
+// precisa disso — valor praticamente idêntico já é prova forte por si só; só a passada de tolerância
+// (mais frouxa) ganha essa checagem extra. Compara palavras significativas (4+ letras) em comum
+// entre o nome do lançamento e a descrição do extrato — normalizado (sem acento, minúsculo, sem
+// sufixo de razão social). Quando não dá pra comparar nada (descrição vazia de um dos lados),
+// permanece permissivo (mesmo comportamento de antes) — só bloqueia quando há palavras dos dois
+// lados e elas não têm nada em comum.
+function normalizarTexto(texto) {
+  return (texto || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '') // remove acento
+    .replace(/\b(ltda|me|eireli|sa|s\/a|s\.a|epp|cia|comercio|comercial)\b/g, ' ')
+    .replace(/[^a-z0-9\s]/g, ' ');
+}
+
+function textoPossivelmenteRelacionado(descricaoLancamento, descricaoTransacao) {
+  const palavrasA = new Set(normalizarTexto(descricaoLancamento).split(/\s+/).filter((p) => p.length >= 4));
+  const palavrasB = new Set(normalizarTexto(descricaoTransacao).split(/\s+/).filter((p) => p.length >= 4));
+  if (palavrasA.size === 0 || palavrasB.size === 0) return true; // nada pra comparar — não bloqueia
+  for (const palavra of palavrasA) {
+    if (palavrasB.has(palavra)) return true;
+  }
+  return false;
+}
+
 function paraData(strData) {
   if (!strData) return null;
   const data = new Date(`${strData}T00:00:00`);
@@ -67,6 +96,10 @@ function reconciliar(lancamentos, extrato) {
         ? Math.max(TOLERANCIA_DIVERGENCIA_MINIMA, lancamento.valor * TOLERANCIA_DIVERGENCIA_PERCENTUAL)
         : TOLERANCIA_VALOR;
       if (diferencaValor > toleranciaValor) return;
+
+      // Só na passada de DIVERGÊNCIA (valor exato já é prova forte o bastante sozinho) — ver
+      // textoPossivelmenteRelacionado acima, caso real COPEL x Auto Posto.
+      if (comDivergencia && !textoPossivelmenteRelacionado(lancamento.estabelecimento_ou_pessoa || lancamento.descricao, transacao.descricao)) return;
 
       const dataTransacao = paraData(transacao.data);
       if (!dataLancamento || !dataTransacao) return;
