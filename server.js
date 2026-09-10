@@ -1620,7 +1620,9 @@ function formatarResumoDespesaFixa(dados) {
 // extra só pra isso (o problema original era "mensagens demais" — não faz sentido resolver isso
 // enviando mais uma mensagem).
 async function processarFaturaComoResumo(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
+  console.log(`[DIAG] processarFaturaComoResumo ENTROU | remetente=${remetente} | bytes=${buffer.length}`);
   const resumo = await extrairResumoFaturaDeBuffer(buffer, mimeType);
+  console.log('[DIAG] processarFaturaComoResumo resumo extraído:', JSON.stringify(resumo));
   const cartao = extrairNomeCartao(legendaLower) || resumo.banco_emissor || '';
 
   if (resumo.status_pagamento === 'paga') {
@@ -1722,6 +1724,7 @@ async function processarExtratoComoResumo(sheetId, buffer, mimeType) {
 // documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
 // escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
 async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
+  console.log(`[DIAG] processarFaturaItemizada ENTROU | remetente=${remetente} | bytes=${buffer.length}`);
   const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
   const cartao = extrairNomeCartao(legendaLower);
   if (cartao) contas.forEach((conta) => { conta.cartao = cartao; });
@@ -1760,6 +1763,8 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
+  // [DIAG 09/09/2026] Remover assim que a causa do "PDF sem lançamento" da Sirlene for encontrada.
+  console.log(`[DIAG] processarMidiaRecebida | remetente=${remetente} | mimeType=${mimeType} | bytes=${buffer.length} | legendaLower="${legendaLower}" | nomeArquivo="${nomeArquivo || ''}" | sinal="${sinal}" | extenso=${extenso}`);
 
   // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
@@ -2272,6 +2277,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       // espera de legenda abaixo.
       const pistaArquivo = inferirPistaPorNomeArquivo(interpretado.nomeArquivo) || pistaPorNomeBanco((interpretado.nomeArquivo || '').toLowerCase());
 
+      // [DIAG 09/09/2026] Remover assim que a causa do "PDF sem lançamento" da Sirlene for
+      // encontrada. Objetivo: ver exatamente onde um documento sem legenda para de deixar rastro.
+      console.log(`[DIAG] mídia recebida de ${remetente} | mimeType=${mimeType} | bytes=${buffer.length} | legenda="${legenda}" | nomeArquivo="${interpretado.nomeArquivo || ''}" | pistaArquivo="${pistaArquivo || ''}"`);
+
       if (!legenda.trim() && !pistaArquivo) {
         // BUFFER DE ESPERA (17/08/2026): nem legenda nem nome do arquivo deram pista nenhuma —
         // espera alguns segundos pra ver se o cliente manda um texto explicando logo em seguida
@@ -2279,17 +2288,25 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         // leitura genérica. Não precisa segurar resposta nenhuma pro webhook (já foi mandada no
         // topo do handler); o processamento de verdade roda quando o timer disparar OU quando o
         // texto chegar antes (ver checagem de DOCUMENTOS_AGUARDANDO_LEGENDA logo acima).
+        console.log(`[DIAG] ${remetente}: sem legenda e sem pista de arquivo — entrando no buffer de espera de 7s.`);
         const timer = setTimeout(() => {
           DOCUMENTOS_AGUARDANDO_LEGENDA.delete(remetente);
+          console.log(`[DIAG] ${remetente}: timer de 7s disparou, chamando processarMidiaRecebida agora.`);
           processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda: '' })
-            .catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {}));
+            .then(() => console.log(`[DIAG] ${remetente}: processarMidiaRecebida (via timer) terminou sem lançar erro.`))
+            .catch((erro) => {
+              console.error(`[DIAG] ${remetente}: processarMidiaRecebida (via timer) lançou erro:`, erro && erro.stack || erro);
+              return tratarErroProcessamento(remetente, cliente, { tipoMidia: interpretado.tipoMidia, legenda: '', buffer, mimeType }, erro).catch(() => {});
+            });
         }, JANELA_BUFFER_LEGENDA_MS);
 
         DOCUMENTOS_AGUARDANDO_LEGENDA.set(remetente, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, timer, criadoEm: Date.now() });
         return;
       }
 
+      console.log(`[DIAG] ${remetente}: processando imediatamente (tinha legenda ou pista de arquivo), chamando processarMidiaRecebida agora.`);
       await processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo: interpretado.nomeArquivo, legenda });
+      console.log(`[DIAG] ${remetente}: processarMidiaRecebida (imediato) terminou sem lançar erro.`);
     } else {
       const corpoLower = (interpretado.texto || '').toLowerCase();
       const comandoLancamento = interpretarComandoLancamento(interpretado.texto);
