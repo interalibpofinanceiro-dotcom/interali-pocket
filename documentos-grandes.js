@@ -1,7 +1,11 @@
 require('dotenv').config();
 const { Readable } = require('stream');
 const { PDFDocument } = require('pdf-lib');
-const { getDriveClient, definirPastaDriveClientePorSheetId } = require('./clientes');
+// getDriveClientPessoal (16/09/2026) — autenticado com a conta PESSOAL do Aroldo via OAuth (ver
+// clientes.js), não a conta de serviço: é ela que tem cota de armazenamento de verdade pra criar
+// pasta/arquivo novo no Drive. Só funciona depois de autorizado uma vez em
+// /admin/google-oauth/iniciar (ver server.js) — antes disso, toda função aqui lança erro claro.
+const { getDriveClientPessoal, definirPastaDriveClientePorSheetId } = require('./clientes');
 
 // Módulo novo (16/09/2026, pedido do Aroldo: extrato/fatura de cartão grande travando na leitura
 // de uma vez só). Duas responsabilidades que não existiam antes:
@@ -41,7 +45,7 @@ async function garantirPastaCliente(cliente) {
     throw new Error('Cliente sem Sheet_ID — não dá pra saber se já existe uma pasta pra ele.');
   }
 
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
 
   const existentes = await drive.files.list({
     q: `'${raiz}' in parents and mimeType = 'application/vnd.google-apps.folder' and appProperties has { key='sheetId' and value='${cliente.sheetId}' } and trashed = false`,
@@ -85,7 +89,7 @@ async function garantirPastaCliente(cliente) {
 }
 
 async function garantirPastaMes(pastaClienteId, competencia) {
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
 
   const existentes = await drive.files.list({
     q: `'${pastaClienteId}' in parents and name = '${competencia}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
@@ -112,7 +116,7 @@ async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOri
   const competencia = new Date().toISOString().slice(0, 7); // "AAAA-MM"
   const pastaMes = await garantirPastaMes(pastaCliente, competencia);
 
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
   const nome = nomeArquivoOriginal || `documento-${Date.now()}.${mimeType === 'application/pdf' ? 'pdf' : 'bin'}`;
 
   const resposta = await drive.files.create({
@@ -135,7 +139,7 @@ async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOri
 // Busca GLOBAL por appProperties (status=aguardando + o número do cliente) — dispensa varrer
 // pasta por pasta ou mês por mês; funciona mesmo se o job de processamento ficar dias sem rodar.
 async function listarDocumentosPendentes(cliente) {
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
   const numeroEscapado = cliente.numeroWhatsapp.replace(/'/g, "\\'");
 
   const resposta = await drive.files.list({
@@ -148,7 +152,7 @@ async function listarDocumentosPendentes(cliente) {
 }
 
 async function baixarArquivo(fileId) {
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
   const resposta = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
   return Buffer.from(resposta.data);
 }
@@ -156,7 +160,7 @@ async function baixarArquivo(fileId) {
 // appProperties é mesclado pelo Drive (não substitui o mapa inteiro) — só o "status" muda,
 // tipoAlvo/numeroWhatsapp continuam lá pra quem quiser auditar depois.
 async function marcarStatusArquivo(fileId, status) {
-  const drive = getDriveClient();
+  const drive = getDriveClientPessoal();
   await drive.files.update({ fileId, requestBody: { appProperties: { status } } });
 }
 

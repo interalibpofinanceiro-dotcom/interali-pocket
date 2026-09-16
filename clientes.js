@@ -41,6 +41,55 @@ function getDriveClient() {
   return google.drive({ version: 'v3', auth: getAuthClient() });
 }
 
+// -------------------------------------------------------------------------------------------
+// OAuth com a conta PESSOAL do Aroldo (16/09/2026) — a conta de SERVIÇO acima tem cota ZERO
+// pra criar conteúdo novo no Drive fora do Google Workspace ("Service Accounts do not have
+// storage quota", erro real visto em produção ao tentar guardar documento pesado). Autorizando
+// uma vez com uma conta pessoal de verdade (que já tem cota própria — no caso, 5TB), o Pocket
+// sobe arquivo usando ESSA cota. Rotas de autorização em server.js (/admin/google-oauth/*).
+// -------------------------------------------------------------------------------------------
+
+const OAUTH_REDIRECT_URI = 'https://pocket.interali.com.br/admin/google-oauth/callback';
+
+function getOAuthClient() {
+  return new google.auth.OAuth2(
+    process.env.GOOGLE_OAUTH_CLIENT_ID,
+    process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+    OAUTH_REDIRECT_URI
+  );
+}
+
+// access_type: 'offline' pra ganhar um refresh_token (não só o access_token de curta duração).
+// prompt: 'consent' força o Google a emitir um refresh_token NOVO mesmo que essa conta já tenha
+// autorizado antes — sem isso, uma 2ª autorização pode devolver só o access_token e nada mais.
+function gerarUrlAutorizacaoDrive() {
+  return getOAuthClient().generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',
+    scope: ['https://www.googleapis.com/auth/drive'],
+  });
+}
+
+async function trocarCodigoPorTokens(code) {
+  const { tokens } = await getOAuthClient().getToken(code);
+  return tokens; // { access_token, refresh_token, expiry_date, ... }
+}
+
+// Cliente Drive autenticado como a conta pessoal (via refresh_token, ver rota de callback em
+// server.js) — usar SÓ pra operação que precisa gastar cota de armazenamento de verdade (criar
+// pasta/atalho não precisa, mas usar o mesmo cliente pra tudo evita misturar duas identidades
+// diferentes na mesma árvore de pastas). Lança erro claro se ainda não foi autorizado, pra não
+// confundir com "Drive não configurado" (erro genérico de getDriveClient acima).
+function getDriveClientPessoal() {
+  const refreshToken = process.env.GOOGLE_OAUTH_REFRESH_TOKEN;
+  if (!refreshToken) {
+    throw new Error('GOOGLE_OAUTH_REFRESH_TOKEN não configurado — falta autorizar visitando /admin/google-oauth/iniciar (ver .env).');
+  }
+  const oauth2Client = getOAuthClient();
+  oauth2Client.setCredentials({ refresh_token: refreshToken });
+  return google.drive({ version: 'v3', auth: oauth2Client });
+}
+
 async function garantirAbaComCabecalho(sheets, spreadsheetId) {
   const planilha = await sheets.spreadsheets.get({ spreadsheetId });
   const abaExiste = planilha.data.sheets.some((aba) => aba.properties.title === ABA_CLIENTES);
@@ -334,4 +383,7 @@ module.exports = {
   definirSenhaDashboard,
   definirPastaDriveClientePorSheetId,
   getDriveClient,
+  gerarUrlAutorizacaoDrive,
+  trocarCodigoPorTokens,
+  getDriveClientPessoal,
 };

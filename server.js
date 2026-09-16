@@ -95,6 +95,8 @@ const {
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
   definirSenhaDashboard,
+  gerarUrlAutorizacaoDrive,
+  trocarCodigoPorTokens,
 } = require('./clientes');
 const {
   garantirPastaCliente,
@@ -2933,6 +2935,57 @@ app.all('/tarefas/processar-documentos-pendentes', async (req, res) => {
   } catch (error) {
     console.error('Erro no job de documentos pendentes:', error.message);
     res.status(500).json({ erro: error.message });
+  }
+});
+
+// Autorização OAuth do Drive com a conta PESSOAL do Aroldo (16/09/2026) — passo único de
+// configuração, não faz parte do fluxo normal de nenhum cliente. Protegido pelo mesmo
+// RELATORIO_SECRET dos endpoints /tarefas/* (não é público, mas também não precisa de nada mais
+// forte — é só pra evitar que alguém aleatório dispare o fluxo de autorização à toa).
+app.get('/admin/google-oauth/iniciar', (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).send('Acesso negado.');
+  }
+  res.redirect(gerarUrlAutorizacaoDrive());
+});
+
+// O Google redireciona pra AQUI depois do login/consentimento, com ?code=... (ou ?error=... se
+// o usuário cancelar). Troca o code por um refresh_token (dura pra sempre até ser revogado
+// manualmente) e mostra na tela pra copiar — não tem onde persistir sozinho com segurança sem
+// acesso à API do Railway, então o passo final (colar em GOOGLE_OAUTH_REFRESH_TOKEN) é manual,
+// mas só precisa acontecer esta vez.
+app.get('/admin/google-oauth/callback', async (req, res) => {
+  const { code, error } = req.query;
+
+  if (error) {
+    return res.status(400).send(`<p>Autorização cancelada ou negada: ${error}</p>`);
+  }
+  if (!code) {
+    return res.status(400).send('<p>Código de autorização ausente na URL.</p>');
+  }
+
+  try {
+    const tokens = await trocarCodigoPorTokens(code);
+
+    if (!tokens.refresh_token) {
+      return res.send(
+        '<p>Autorizado, mas o Google não devolveu um refresh_token novo — provavelmente essa conta ' +
+        'já tinha autorizado este app antes. Revogue o acesso em ' +
+        '<a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a> ' +
+        '(procure "Interali Pocket") e visite /admin/google-oauth/iniciar de novo.</p>'
+      );
+    }
+
+    console.log('OAuth Drive (conta pessoal) autorizado com sucesso — refresh_token gerado.');
+    res.send(`
+      <h2>Autorizado com sucesso!</h2>
+      <p>Copie o valor abaixo e guarde como <code>GOOGLE_OAUTH_REFRESH_TOKEN</code> (Railway + .env local):</p>
+      <textarea readonly style="width:100%;max-width:600px;height:70px;font-family:monospace;">${tokens.refresh_token}</textarea>
+      <p>Depois de configurado, pode fechar esta página — não precisa repetir esse passo de novo.</p>
+    `);
+  } catch (erro) {
+    console.error('Falha ao trocar código OAuth por tokens:', erro.message);
+    res.status(500).send(`<p>Erro ao autorizar: ${erro.message}</p>`);
   }
 });
 
