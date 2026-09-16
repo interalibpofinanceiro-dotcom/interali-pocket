@@ -2,6 +2,7 @@ require('dotenv').config();
 const { adicionarCliente } = require('./clientes');
 const { enviarMensagemWhatsApp } = require('./whatsapp');
 const { estilizarPlanilhaCliente } = require('./sheets-styler');
+const { garantirPastaCliente } = require('./documentos-grandes');
 
 const [, , numero, nome, sheetId] = process.argv;
 
@@ -13,6 +14,12 @@ if (!numero || !nome || !sheetId) {
 async function main() {
   await adicionarCliente(numero, nome, sheetId);
   console.log(`Cliente "${nome}" (${numero}) cadastrado com sucesso.`);
+
+  // Pasta do cliente no Drive (16/09/2026) — já deixa pronta no cadastro, não só na primeira vez
+  // que ele mandar um documento pesado (ver garantirPastaCliente em documentos-grandes.js).
+  await garantirPastaCliente({ numeroWhatsapp: numero, nome, sheetId, pastaDriveId: '' })
+    .then((pastaId) => console.log(`Pasta no Drive criada/reaproveitada (ID: ${pastaId}).`))
+    .catch((erro) => console.error('Aviso: cliente cadastrado, mas a criação da pasta no Drive falhou:', erro.message));
 
   await estilizarPlanilhaCliente(sheetId)
     .then((r) => console.log(`Planilha estilizada (${r.abasEstilizadas} aba(s)).`))

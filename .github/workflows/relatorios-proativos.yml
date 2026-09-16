@@ -4,7 +4,7 @@ name: Tarefas Proativas - Interali Pocket
 # hospedagem não sustenta um cron interno confiável. Ver CLAUDE.MD/CONTEXTO.md e
 # HISTORICO-COMPLETO.md no repositório de documentação pro contexto completo.
 #
-# 3 tarefas, 3 jobs (cada um só roda no seu próprio agendamento, ou em todos via disparo manual):
+# 4 tarefas, 4 jobs (cada um só roda no seu próprio agendamento, ou em todos via disparo manual):
 # - disparar-relatorio: resumo semanal (toda sexta) / mensal (dia 1) — manda só o "avisador"
 #   via template; o relatório de verdade (o que já foi pago/recebido na semana — dado REALIZADO,
 #   não previsão) sai quando o cliente responde.
@@ -12,6 +12,9 @@ name: Tarefas Proativas - Interali Pocket
 #   (comando "recorrente:") cujo dia bate com hoje.
 # - checar-saude: a cada 30min, confere se Anthropic/WhatsApp estão respondendo e avisa o WhatsApp
 #   do admin só quando o status MUDA (ver /tarefas/checar-saude em server.js).
+# - processar-documentos-pendentes: a cada 15min, lê extrato/fatura grande demais que ficou
+#   esperando no Drive (16/09/2026, ver salvarDocumentoPesadoEProcessarDepois em server.js) e lança
+#   na planilha do cliente em blocos de página, sem pressa de responder rápido.
 #
 # 17/08/2026 (pedido do Aroldo): resumo semanal movido de segunda pra SEXTA — faz mais sentido
 # fechar a semana com o que já aconteceu de verdade (entradas/saídas realizadas) do que abrir a
@@ -31,6 +34,10 @@ on:
     # reclamou. Só avisa o WhatsApp do admin quando o status MUDA (ver /tarefas/checar-saude em
     # server.js) — não gera aviso repetido a cada 30min enquanto o problema persiste.
     - cron: '*/30 * * * *'
+    # A cada 15 minutos, todo dia — processa extrato/fatura grande demais que ficou esperando no
+    # Drive (16/09/2026). Roda mais frequente que os outros de propósito: é a etapa que o cliente
+    # está esperando ("te aviso quando estiver tudo lançado"), não faz sentido demorar horas.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       periodo:
@@ -79,5 +86,15 @@ jobs:
       - name: Chama /tarefas/checar-saude
         run: |
           curl -sf -X POST "https://pocket.interali.com.br/tarefas/checar-saude?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n"
+          cat resposta.json
+
+  processar-documentos-pendentes:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/15 * * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chama /tarefas/processar-documentos-pendentes
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/processar-documentos-pendentes?chave=${{ secrets.RELATORIO_SECRET }}" \
             -o resposta.json -w "\nHTTP %{http_code}\n"
           cat resposta.json

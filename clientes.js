@@ -11,7 +11,11 @@ const ABA_CLIENTES = 'Clientes';
 // do cliente (ver dashboard.js), guardada como "saltHex:hashHex" (scrypt, nunca texto puro).
 // Cliente sem senha definida (célula vazia) simplesmente não consegue logar no dashboard ainda —
 // não afeta em nada o funcionamento por WhatsApp.
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash'];
+// 'Pasta_Drive_ID' adicionada no FIM em 16/09/2026 (mesmo padrão — aditiva): ID da pasta do
+// cliente dentro de GOOGLE_DRIVE_FOLDER_ID (ver documentos-grandes.js), criada sozinha na primeira
+// vez que ele manda um extrato/fatura grande demais pra ler de uma vez. Célula vazia = pasta ainda
+// não criada; garantirPastaCliente cria e preenche aqui pra nunca precisar recriar/duplicar.
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash', 'Pasta_Drive_ID'];
 const LIMITE_PADRAO = 300; // usado se um cliente antigo não tiver limite salvo (ex.: cadastro manual anterior a essa coluna existir)
 const TIPO_PADRAO = 'PADRAO';
 
@@ -50,13 +54,13 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:H1`,
+    range: `${ABA_CLIENTES}!A1:I1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:H1`,
+      range: `${ABA_CLIENTES}!A1:I1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
     });
@@ -80,7 +84,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:H`,
+    range: `${ABA_CLIENTES}!A2:I`,
   });
 
   const linhas = resposta.data.values || [];
@@ -97,6 +101,8 @@ async function carregarTodosClientes() {
     tipo: (linha[6] || '').toString().trim().toUpperCase() || TIPO_PADRAO,
     // Vazio = ainda não tem senha de dashboard definida (ver definirSenhaDashboard).
     senhaHash: linha[7] || '',
+    // Vazio = pasta ainda não criada no Drive (ver garantirPastaCliente em documentos-grandes.js).
+    pastaDriveId: linha[8] || '',
   }));
 }
 
@@ -279,6 +285,36 @@ async function definirSenhaDashboard(numeroWhatsapp, senhaHash) {
   return true;
 }
 
+// Grava o ID da pasta do cliente no Drive (16/09/2026, ver garantirPastaCliente em
+// documentos-grandes.js) — mesmo padrão de definirSenhaDashboard (acha a linha pelo número, escreve
+// só a célula certa). Chamada uma vez só, na primeira vez que a pasta é criada; nas próximas, o
+// cliente já vem com pastaDriveId preenchido e a criação é pulada.
+async function definirPastaDriveCliente(numeroWhatsapp, pastaDriveId) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:A` });
+  const linhas = resposta.data.values || [];
+  const alvo = (numeroWhatsapp || '').trim();
+  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
+
+  if (indice === -1) return false;
+
+  const numeroLinha = indice + 2;
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${ABA_CLIENTES}!I${numeroLinha}`,
+    valueInputOption: 'RAW',
+    requestBody: { values: [[pastaDriveId]] },
+  });
+
+  cache = null;
+  return true;
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
@@ -287,4 +323,6 @@ module.exports = {
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
   definirSenhaDashboard,
+  definirPastaDriveCliente,
+  getDriveClient,
 };

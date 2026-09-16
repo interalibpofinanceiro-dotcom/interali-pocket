@@ -97,6 +97,18 @@ const {
   definirSenhaDashboard,
 } = require('./clientes');
 const {
+  garantirPastaCliente,
+  salvarDocumentoPendente,
+  listarDocumentosPendentes,
+  baixarArquivo,
+  marcarStatusArquivo,
+  dividirPdfEmBlocos,
+  parseOFX,
+  parseCSV,
+  tipoDoArquivo,
+  CsvNaoReconhecidoError,
+} = require('./documentos-grandes');
+const {
   jidParaFormatoPlanilha,
   enviarMensagemWhatsApp,
   enviarTemplateWhatsApp,
@@ -1735,15 +1747,13 @@ async function processarExtratoComoResumo(sheetId, buffer, mimeType) {
   return resumo;
 }
 
-// Registra uma fatura/boleto item a item (fluxo que já existia antes de 17/08/2026) — usado pra
-// documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
-// escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
-async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
-  const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
-  const cartao = extrairNomeCartao(legendaLower);
+// Parte comum de "recebi uma lista de contas a pagar, agora grava e avisa o cliente" — extraído
+// em 16/09/2026 pra ser reaproveitado tanto pela leitura de uma chamada só (processarFaturaItemizada,
+// abaixo) quanto pelo processamento em blocos de página de fatura extensa (ver
+// processarDocumentoPesadoPendente) — os dois terminam do mesmo jeito, só muda de onde vêm as
+// `contas`.
+async function registrarContasAPagarProcessadas(remetente, sheetId, contas, cartao) {
   if (cartao) contas.forEach((conta) => { conta.cartao = cartao; });
-
-  console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
 
   const contasAPagarExistentes = await buscarContasAPagar(sheetId);
   const contasAPagarNovas = filtrarContasAPagarNovas(contas, contasAPagarExistentes);
@@ -1765,6 +1775,102 @@ async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mim
     : `✅ *Fatura processada com sucesso!*\n💳 *Cartão/Banco:* ${cartao || 'não identificado'}\n💰 *Valor Total:* ${formatarNumero(totalContasNovas)}\n🔢 *Itens:* ${contasAPagarNovas.length}${contasAPagarDuplicadas > 0 ? ` (${contasAPagarDuplicadas} já estava(m) registrada(s), ignorados)` : ''}\n📊 Todos os lançamentos foram registrados na sua planilha como contas a pagar.`;
 
   await enviarMensagemWhatsApp(remetente, mensagem);
+  return { novas: contasAPagarNovas.length, duplicadas: contasAPagarDuplicadas };
+}
+
+// Registra uma fatura/boleto item a item (fluxo que já existia antes de 17/08/2026) — usado pra
+// documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
+// escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
+async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
+  const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
+  const cartao = extrairNomeCartao(legendaLower);
+
+  console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
+
+  await registrarContasAPagarProcessadas(remetente, sheetId, contas, cartao);
+}
+
+// Parte comum de "recebi uma lista de transações de extrato, agora grava e avisa o cliente" —
+// extraído em 16/09/2026 do que era o corpo inline do "if (sinal.includes('extrato'))" (nenhuma
+// linha mudou de comportamento, só de lugar), pra ser reaproveitado também pelo OFX/CSV (leitura
+// direta, sem IA) e pelo processamento em blocos de página do extrato extenso (ver
+// processarDocumentoPesadoPendente) — os três terminam exatamente do mesmo jeito, só muda de onde
+// vêm as `transacoesBrutas` (já com conta_bancaria preenchida por quem chama).
+async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas) {
+  const transacoes = removerLinhasDeSaldo(transacoesBrutas);
+  const linhasSaldoIgnoradas = transacoesBrutas.length - transacoes.length;
+  if (linhasSaldoIgnoradas > 0) console.log(`Extrato: ${linhasSaldoIgnoradas} linha(s) de saldo ignorada(s) (não são transação).`);
+  const extratoExistente = await buscarExtrato(sheetId);
+  const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
+  const duplicadas = transacoes.length - transacoesNovas.length;
+
+  console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)`);
+
+  const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
+  const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
+  const extratoTotal = [...extratoExistente, ...transacoesNovas];
+
+  await salvarExtrato(sheetId, transacoesNovas);
+
+  // Registra automaticamente na planilha toda transação do extrato sem lançamento
+  // correspondente (entrada OU saída — mais amplo que o aviso "recebimento sem nota" logo
+  // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
+  // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
+  // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
+  const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
+    console.error('Falha ao registrar órfãos do extrato:', erro.message);
+    return [];
+  });
+
+  // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
+  // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
+  await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
+
+  // Recebimentos sem comprovante que AINDA precisam de esclarecimento (os que não foram
+  // auto-classificados como tarifa/rendimento). Casa cada um com a linha registrada (ref) pra
+  // poder atualizar depois quando o cliente responder (ver PENDENCIAS_ORFAOS / responderSobreOrfaos).
+  const orfasPendentes = registrados
+    .filter((r) => !r.auto && r.ref && r.transacao.tipo === 'entrada')
+    .map((r) => ({ valor: r.transacao.valor, data: r.transacao.data, descricao: r.transacao.descricao || '', aba: r.ref.aba, linha: r.ref.linha }));
+
+  const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
+  const avisoRegistrados = registrados.length > 0 ? `\n📌 ${registrados.length} lançamento(s) sem comprovante foram registrados automaticamente.` : '';
+
+  let avisoOrfas = '';
+  if (orfasPendentes.length > 0) {
+    registrarPendenciaOrfaos(remetente, sheetId, orfasPendentes);
+    const mostrar = orfasPendentes.slice(0, 5);
+    const linhas = mostrar.map((o) => `🔎 ${formatarNumero(o.valor)} em ${formatarDataBR(o.data)}${o.descricao ? ` — "${o.descricao}"` : ''}`);
+    const resto = orfasPendentes.length - mostrar.length;
+    avisoOrfas = `\n\n*${orfasPendentes.length} recebimento(s) sem comprovante* — já registrei todos, só me diga o que foi cada um pra eu categorizar:\n${linhas.join('\n')}${resto > 0 ? `\n…e mais ${resto}` : ''}\n\nPode responder tudo numa mensagem só, ex.: _"o de 2.000 do dia 14 foi venda pra Maria, o de 300 foi aluguel recebido"_.`;
+  }
+
+  await enviarMensagemWhatsApp(remetente, formatarResumoExtrato(transacoesNovas, avisoDuplicadas) + avisoRegistrados + avisoOrfas);
+  return { novas: transacoesNovas.length, duplicadas };
+}
+
+// Documento pesado demais pra ler agora (16/09/2026) — avisa o cliente na hora, guarda o arquivo
+// original no Drive (pasta do cliente, organizada por mês) e devolve. A leitura de verdade some
+// desta função de propósito: acontece depois, em blocos de página, via
+// /tarefas/processar-documentos-pendentes (ver processarDocumentoPesadoPendente) — sem pressa de
+// responder rápido, sem risco de cortar a resposta da IA no meio.
+const MENSAGEM_DOCUMENTO_PESADO_RECEBIDO = '📄 Recebi! Como é um documento grande, vou processar com calma pra não perder nenhum detalhe — te aviso por aqui assim que estiver tudo lançado e conciliado na sua planilha. Não precisa fazer nada.';
+
+async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, tipoAlvo) {
+  await enviarMensagemWhatsApp(remetente, MENSAGEM_DOCUMENTO_PESADO_RECEBIDO).catch(() => {});
+
+  try {
+    await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
+    console.log(`Documento pesado (${tipoAlvo}) guardado no Drive pra processar depois — ${cliente ? cliente.nome : remetente}.`);
+  } catch (erro) {
+    console.error(`Falha ao guardar documento pesado (${tipoAlvo}) no Drive:`, erro.message);
+    await avisarAdmin(
+      remetente,
+      TEMPLATE_AVISO_ADMIN,
+      ['Falha ao guardar documento grande no Drive', `${cliente ? cliente.nome : remetente} (${remetente}) — ${erro.message}`],
+      `🔴 Falha ao guardar documento grande (${tipoAlvo}) no Drive pra ${cliente ? cliente.nome : remetente} (${remetente}): ${erro.message}\n\nO cliente já recebeu a confirmação de recebimento, mas o arquivo pode não ter sido salvo — considerar pedir reenvio.`
+    );
+  }
 }
 
 // Roteia e processa uma mídia (foto ou documento) já baixada — extraído do handler do webhook em
@@ -1777,6 +1883,58 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType);
   const semLegendaExplicita = !legendaLower.trim();
+
+  // OFX/CSV (16/09/2026, pedido do Aroldo) — extrato/fatura em formato estruturado, não em
+  // imagem/PDF escaneado. Lido DIRETO, sem passar pela IA — não tem limite de token pra "cortar"
+  // porque não é uma leitura de visão, é parsing de texto exato. Checado ANTES de qualquer outra
+  // coisa (inclusive COMERCIO_MATRIZ) porque a extensão do arquivo já é 100% inequívoca — não faz
+  // sentido nenhuma outra regra de roteamento por legenda competir com isso.
+  const formatoArquivo = tipoDoArquivo(nomeArquivo, mimeType);
+  if (formatoArquivo === 'ofx' || formatoArquivo === 'csv') {
+    let resultado;
+    try {
+      resultado = formatoArquivo === 'ofx' ? parseOFX(buffer) : parseCSV(buffer);
+    } catch (erro) {
+      if (erro instanceof CsvNaoReconhecidoError) {
+        console.log(`CSV não reconhecido (${nomeArquivo}): ${erro.message}`);
+        await enviarMensagemWhatsApp(
+          remetente,
+          'Recebi seu arquivo CSV, mas não consegui reconhecer as colunas de data/valor nele — cada banco exporta de um jeito diferente. Pode mandar o extrato em PDF ou print/foto que eu leio certo?'
+        ).catch(() => {});
+        return;
+      }
+      throw erro;
+    }
+
+    if (resultado.transacoes.length === 0) {
+      await enviarMensagemWhatsApp(remetente, `Recebi seu arquivo (${formatoArquivo.toUpperCase()}), mas não encontrei nenhuma transação nele.`).catch(() => {});
+      return;
+    }
+
+    console.log(`${formatoArquivo.toUpperCase()} processado direto (sem IA): ${resultado.transacoes.length} transação(ões).`);
+    const contaBancaria = extrairNomeConta(legendaLower) || resultado.contaBancaria || '';
+    const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: contaBancaria }));
+    await registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas);
+    return;
+  }
+
+  // Documento pesado (PDF de várias páginas) que é claramente extrato ou fatura/boleto/cartão —
+  // 16/09/2026 (pedido do Aroldo, caso real: fatura da PortoBank da Sirlene virando só o total
+  // consolidado por cortar na leitura de uma vez só). Em vez de tentar ler agora (com risco de
+  // cortar) ou perguntar "total ou itens?", guarda o arquivo original no Drive (pasta do cliente,
+  // organizada por mês) e devolve pro cliente na hora — a leitura de verdade, em blocos de página,
+  // sem pressa de responder rápido, acontece depois via /tarefas/processar-documentos-pendentes
+  // (ver processarDocumentoPesadoPendente). Só entra aqui quando JÁ HÁ sinal de extrato/fatura —
+  // documento extenso SEM nenhuma pista (nem legenda, nem nome de arquivo, nem conteúdo) continua
+  // caindo no resumo automático mais abaixo, comportamento que já existia antes disso.
+  if (extenso && mimeType === 'application/pdf') {
+    const ehExtrato = sinal.includes('extrato');
+    const ehFatura = sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart');
+    if (ehExtrato || ehFatura) {
+      await salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, ehExtrato ? 'extrato' : 'fatura');
+      return;
+    }
+  }
 
   // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
@@ -1822,55 +1980,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     // virar lançamento órfão sem comprovante (registrarOrfaosDoExtrato, abaixo), pra Lancamentos também.
     const contaBancariaExtrato = extrairNomeConta(legendaLower) || resultadoExtrato.banco_conta || '';
     const transacoesBrutas = resultadoExtrato.transacoes.map((t) => ({ ...t, conta_bancaria: contaBancariaExtrato }));
-    const transacoes = removerLinhasDeSaldo(transacoesBrutas);
-    const linhasSaldoIgnoradas = transacoesBrutas.length - transacoes.length;
-    if (linhasSaldoIgnoradas > 0) console.log(`Extrato: ${linhasSaldoIgnoradas} linha(s) de saldo ignorada(s) (não são transação).`);
-    const extratoExistente = await buscarExtrato(sheetId);
-    const transacoesNovas = filtrarTransacoesNovas(transacoes, extratoExistente);
-    const duplicadas = transacoes.length - transacoesNovas.length;
-
-    console.log(`Extrato processado: ${transacoes.length} transação(ões), ${duplicadas} já existente(s)${contaBancariaExtrato ? ` — conta: ${contaBancariaExtrato}` : ''}`);
-
-    const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
-    const orfas = encontrarTransacoesOrfas(transacoesNovas, lancamentosExistentes);
-    const extratoTotal = [...extratoExistente, ...transacoesNovas];
-
-    await salvarExtrato(sheetId, transacoesNovas);
-
-    // Registra automaticamente na planilha toda transação do extrato sem lançamento
-    // correspondente (entrada OU saída — mais amplo que o aviso "recebimento sem nota" logo
-    // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
-    // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
-    // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
-    const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
-      console.error('Falha ao registrar órfãos do extrato:', erro.message);
-      return [];
-    });
-
-    // Recalcula o Status_Conciliacao de tudo agora que o extrato (e os órfãos recém-registrados)
-    // mudaram — sem argumentos, busca tudo de novo do zero, senão as linhas novas ficariam de fora.
-    await sincronizarConciliacaoNaPlanilha(sheetId).catch((erro) => console.error('Falha ao sincronizar conciliação:', erro.message));
-
-    // Recebimentos sem comprovante que AINDA precisam de esclarecimento (os que não foram
-    // auto-classificados como tarifa/rendimento). Casa cada um com a linha registrada (ref) pra
-    // poder atualizar depois quando o cliente responder (ver PENDENCIAS_ORFAOS / responderSobreOrfaos).
-    const orfasPendentes = registrados
-      .filter((r) => !r.auto && r.ref && r.transacao.tipo === 'entrada')
-      .map((r) => ({ valor: r.transacao.valor, data: r.transacao.data, descricao: r.transacao.descricao || '', aba: r.ref.aba, linha: r.ref.linha }));
-
-    const avisoDuplicadas = duplicadas > 0 ? ` (${duplicadas} já estava(m) registrada(s), ignorei pra não duplicar)` : '';
-    const avisoRegistrados = registrados.length > 0 ? `\n📌 ${registrados.length} lançamento(s) sem comprovante foram registrados automaticamente.` : '';
-
-    let avisoOrfas = '';
-    if (orfasPendentes.length > 0) {
-      registrarPendenciaOrfaos(remetente, sheetId, orfasPendentes);
-      const mostrar = orfasPendentes.slice(0, 5);
-      const linhas = mostrar.map((o) => `🔎 ${formatarNumero(o.valor)} em ${formatarDataBR(o.data)}${o.descricao ? ` — "${o.descricao}"` : ''}`);
-      const resto = orfasPendentes.length - mostrar.length;
-      avisoOrfas = `\n\n*${orfasPendentes.length} recebimento(s) sem comprovante* — já registrei todos, só me diga o que foi cada um pra eu categorizar:\n${linhas.join('\n')}${resto > 0 ? `\n…e mais ${resto}` : ''}\n\nPode responder tudo numa mensagem só, ex.: _"o de 2.000 do dia 14 foi venda pra Maria, o de 300 foi aluguel recebido"_.`;
-    }
-
-    await enviarMensagemWhatsApp(remetente, formatarResumoExtrato(transacoesNovas, avisoDuplicadas) + avisoRegistrados + avisoOrfas);
+    await registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas);
     return;
   }
 
@@ -1887,14 +1997,13 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   }
 
   if (sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart')) {
-    // 02/09/2026: quando o cliente DIZ que é fatura/boleto/cartão, sempre tenta a extração item a
-    // item primeiro — mesmo com muitas páginas. `extrairContasAPagarDeBuffer` já roda com
-    // max_tokens 32000 e thinking desabilitado (cobre fatura de 10-15 páginas tranquilo). Se
-    // MESMO ASSIM a resposta cortar (RespostaCortadaError), o catch geral cai no fluxo
-    // "total"/"itens" (PENDENCIAS_ESCOLHA_FATURA) — o cliente escolhe, sem perder o arquivo.
-    // O atalho antigo "extenso -> só resumo" era de quando max_tokens era 4096; hoje é blunt
-    // demais e escondia os itens de faturas grandes (pedido do Aroldo: "teremos clientes com
-    // fatura de 10 páginas"). O resumo continua sendo o caminho pra documento SEM legenda (abaixo).
+    // 02/09/2026: quando o cliente DIZ que é fatura/boleto/cartão, tenta a extração item a item
+    // numa chamada só — `extrairContasAPagarDeBuffer` já roda com max_tokens 32000 e thinking
+    // desabilitado (cobre fatura de 10-15 páginas tranquilo). Fatura EXTENSA (muitas páginas/
+    // arquivo grande) nem chega aqui — já foi desviada pro Drive + processamento em blocos mais
+    // acima (16/09/2026, ver salvarDocumentoPesadoEProcessarDepois), então o único jeito de essa
+    // extração ainda cortar (RespostaCortadaError) é uma fatura CURTA com MUITOS lançamentos por
+    // página — caso raro, cai no fluxo "total"/"itens" (PENDENCIAS_ESCOLHA_FATURA) de qualquer jeito.
     await processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower);
     return;
   }
@@ -2688,6 +2797,93 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
   }
 });
 
+// Processa UM documento pesado que estava esperando no Drive (16/09/2026, ver
+// salvarDocumentoPesadoEProcessarDepois) — divide o PDF em blocos de página e faz uma chamada de
+// extração POR BLOCO, juntando tudo no final. Chamado só pelo cron (nunca pelo webhook), então
+// pode demorar o tempo que precisar sem risco de a Meta reenviar o webhook por timeout.
+// `vencimento` (fatura) e `banco_conta` (extrato) normalmente só aparecem no cabeçalho do
+// documento, ou seja, só no 1º bloco — itens dos blocos seguintes que vierem sem esse campo
+// herdam do 1º bloco que tiver o valor.
+async function processarDocumentoPesadoPendente(cliente, arquivo) {
+  const buffer = await baixarArquivo(arquivo.id);
+  const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'fatura';
+  const blocos = await dividirPdfEmBlocos(buffer);
+
+  console.log(`Processando documento pesado pendente "${arquivo.name}" (${tipoAlvo}, ${blocos.length} bloco(s) de página) — ${cliente.nome}.`);
+
+  if (tipoAlvo === 'extrato') {
+    let contaBancaria = '';
+    let acumulado = [];
+    for (const bloco of blocos) {
+      const resultado = await extrairExtratoDeBuffer(bloco, 'application/pdf');
+      if (!contaBancaria && resultado.banco_conta) contaBancaria = resultado.banco_conta;
+      acumulado = acumulado.concat(resultado.transacoes);
+    }
+    const transacoesBrutas = acumulado.map((t) => ({ ...t, conta_bancaria: contaBancaria }));
+    await registrarTransacoesDeExtrato(cliente.numeroWhatsapp, cliente.sheetId, transacoesBrutas);
+    return;
+  }
+
+  let vencimentoPadrao = null;
+  let acumulado = [];
+  for (const bloco of blocos) {
+    const contas = await extrairContasAPagarDeBuffer(bloco, 'application/pdf');
+    if (!vencimentoPadrao) {
+      const primeiroComVencimento = contas.find((c) => c.vencimento);
+      if (primeiroComVencimento) vencimentoPadrao = primeiroComVencimento.vencimento;
+    }
+    acumulado = acumulado.concat(contas);
+  }
+  if (vencimentoPadrao) acumulado.forEach((c) => { if (!c.vencimento) c.vencimento = vencimentoPadrao; });
+
+  await registrarContasAPagarProcessadas(cliente.numeroWhatsapp, cliente.sheetId, acumulado, null);
+}
+
+// Varre a pasta de todos os clientes ativos procurando documento pesado ainda não lido (ver
+// salvarDocumentoPesadoEProcessarDepois) e processa cada um. Cliente sem Pasta_Drive_ID nunca
+// mandou nenhum documento pesado — nem vale a pena consultar o Drive por ele. Documento que falhar
+// fica marcado "falhou" (não fica tentando de novo sozinho toda vez que o cron rodar) e avisa o
+// admin — precisa de atenção manual, ver HISTORICO-COMPLETO.md.
+app.all('/tarefas/processar-documentos-pendentes', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+
+  try {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const processados = [];
+    const falhas = [];
+
+    for (const cliente of clientes) {
+      if (!cliente.pastaDriveId) continue;
+
+      const pendentes = await listarDocumentosPendentes(cliente);
+      for (const arquivo of pendentes) {
+        try {
+          await processarDocumentoPesadoPendente(cliente, arquivo);
+          await marcarStatusArquivo(arquivo.id, 'processado');
+          processados.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name });
+        } catch (erro) {
+          console.error(`Falha ao processar documento pesado pendente "${arquivo.name}" de ${cliente.numeroWhatsapp}:`, erro.message);
+          await marcarStatusArquivo(arquivo.id, 'falhou').catch(() => {});
+          falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: erro.message });
+          await avisarAdmin(
+            cliente.numeroWhatsapp,
+            TEMPLATE_AVISO_ADMIN,
+            ['Falha ao processar documento pesado pendente', `${cliente.nome} (${cliente.numeroWhatsapp}) — "${arquivo.name}" — ${erro.message}`],
+            `🔴 Falha ao processar documento pesado pendente\n\n👤 ${cliente.nome}\n📱 ${cliente.numeroWhatsapp}\n📎 ${arquivo.name}\n❌ ${erro.message}\n\nO arquivo ficou marcado como "falhou" no Drive — não tenta de novo sozinho, precisa de atenção manual (baixar do Drive e conferir o que travou).`
+          );
+        }
+      }
+    }
+
+    res.json({ ok: true, processados, falhas });
+  } catch (error) {
+    console.error('Erro no job de documentos pendentes:', error.message);
+    res.status(500).json({ erro: error.message });
+  }
+});
+
 app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
@@ -2972,6 +3168,13 @@ app.post('/webhook-asaas', async (req, res) => {
       await adicionarCliente(assinatura.whatsappAtivacao2, assinatura.nome, sheetIdNovo, assinatura.planoEspecialista, assinatura.limiteLancamentos);
     }
     await ativarAssinatura(assinatura.numeroLinha, sheetIdNovo);
+
+    // Pasta do cliente no Drive (16/09/2026) — criada já na ativação, não só na primeira vez que
+    // ele mandar um documento pesado (ver garantirPastaCliente). Best-effort: se falhar, o cliente
+    // continua ativado normalmente (a pasta é criada na hora do primeiro documento grande mesmo
+    // assim, ver salvarDocumentoPesadoEProcessarDepois).
+    await garantirPastaCliente({ numeroWhatsapp: numeroAtivacao, nome: assinatura.nome, sheetId: sheetIdNovo, pastaDriveId: '' })
+      .catch((erro) => console.error('Falha ao criar pasta do cliente no Drive na ativação (não crítico):', erro.message));
 
     if (assinatura.voucher) {
       await queimarVoucher(assinatura.voucher, `${assinatura.nome} (${numeroAtivacao})`);
