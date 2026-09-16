@@ -2945,11 +2945,24 @@ app.all('/tarefas/processar-documentos-pendentes', async (req, res) => {
           console.error(`Falha ao processar documento pesado pendente "${arquivo.name}" de ${cliente.numeroWhatsapp}:`, erro.message);
           await marcarStatusArquivo(arquivo.id, 'falhou').catch(() => {});
           falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: erro.message });
+
+          // 16/09/2026 (pedido do Aroldo: "se não conseguir, precisa avisar o cliente que houve
+          // erro") — antes só o admin era avisado aqui, o cliente ficava sem resposta nenhuma
+          // (só recebia a confirmação de recebimento e nunca mais nada, se a leitura de verdade
+          // falhasse depois). Mensagem sem detalhe técnico, só o essencial pro cliente saber que
+          // precisa de atenção/reenvio.
+          const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'documento';
+          const rotuloTipo = tipoAlvo === 'extrato' ? 'extrato' : tipoAlvo === 'fatura' ? 'fatura' : 'documento';
+          await enviarMensagemWhatsApp(
+            cliente.numeroWhatsapp,
+            `⚠️ Não consegui terminar de processar o ${rotuloTipo} que você mandou (${arquivo.name}) — pode reenviar? Se continuar dando errado, me avisa que a equipe verifica.`
+          ).catch((erroEnvio) => console.error(`Falha ao avisar cliente ${cliente.numeroWhatsapp} sobre erro no documento:`, erroEnvio.message));
+
           await avisarAdmin(
             cliente.numeroWhatsapp,
             TEMPLATE_AVISO_ADMIN,
             ['Falha ao processar documento pesado pendente', `${cliente.nome} (${cliente.numeroWhatsapp}) — "${arquivo.name}" — ${erro.message}`],
-            `🔴 Falha ao processar documento pesado pendente\n\n👤 ${cliente.nome}\n📱 ${cliente.numeroWhatsapp}\n📎 ${arquivo.name}\n❌ ${erro.message}\n\nO arquivo ficou marcado como "falhou" no Drive — não tenta de novo sozinho, precisa de atenção manual (baixar do Drive e conferir o que travou).`
+            `🔴 Falha ao processar documento pesado pendente\n\n👤 ${cliente.nome}\n📱 ${cliente.numeroWhatsapp}\n📎 ${arquivo.name}\n❌ ${erro.message}\n\nO arquivo ficou marcado como "falhou" no Drive — não tenta de novo sozinho. Cliente já foi avisado por WhatsApp pra reenviar.`
           );
         }
       }
