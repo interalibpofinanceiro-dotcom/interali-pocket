@@ -1247,22 +1247,45 @@ function formatarResumoExtrato(transacoes, avisoDuplicadas) {
 // ou um extrato novo — os dois lados que afetam o resultado da conciliação. Falha aqui não deve
 // derrubar o fluxo principal (a mensagem pro cliente já foi decidida antes), então quem chama
 // sempre engole erro com .catch().
+// Retry com backoff exponencial pra erro TRANSIENTE do Google Sheets (quota de leitura/escrita por
+// minuto, 429/500-504, conexão caindo) — mesmo padrão já usado em scripts/proteger-planilhas-clientes.js.
+// 16/09/2026 (pedido do Aroldo, achado ao testar em produção): "Falha ao sincronizar conciliação:
+// Quota exceeded for quota metric 'Read requests'..." — fragilidade já conhecida (ver pendência em
+// CONTEXTO.md), mas ficou mais fácil de disparar agora que o documento pesado é processado na hora
+// (várias leituras/escritas em sequência rápida) em vez de espalhado pelo cron. Sem isso, a falha só
+// era logada e a conciliação ficava desatualizada até o PRÓXIMO extrato/comprovante chegar.
+async function comRetryTransiente(fn, tentativas = 4) {
+  for (let i = 0; i < tentativas; i += 1) {
+    try {
+      return await fn();
+    } catch (erro) {
+      const transiente = /429|500|502|503|504|ECONNRESET|ETIMEDOUT|socket hang up|quota/i.test(erro.message || '');
+      if (!transiente || i === tentativas - 1) throw erro;
+      const espera = 2000 * (2 ** i);
+      console.log(`Retry após erro transiente do Sheets (${erro.message.slice(0, 80)}) -> aguardando ${espera}ms`);
+      await new Promise((resolve) => setTimeout(resolve, espera));
+    }
+  }
+}
+
 async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, extratoAtual) {
-  const [lancamentos, extrato] = await Promise.all([
-    lancamentosExistentes || buscarTodosLancamentos(sheetId),
-    extratoAtual || buscarExtrato(sheetId),
-  ]);
+  await comRetryTransiente(async () => {
+    const [lancamentos, extrato] = await Promise.all([
+      lancamentosExistentes || buscarTodosLancamentos(sheetId),
+      extratoAtual || buscarExtrato(sheetId),
+    ]);
 
-  const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
-  const atualizacoes = lancamentos
-    .map((lancamento) => {
-      const novo = statusPorLinha.get(lancamento.chave || lancamento.linha) || { status: 'Pendente', observacao: '' };
-      return { aba: lancamento.aba, linha: lancamento.linha, status: novo.status, observacao: novo.observacao, statusAnterior: lancamento.status_conciliacao };
-    })
-    .filter(({ status, statusAnterior }) => status !== statusAnterior)
-    .map(({ aba, linha, status, observacao }) => ({ aba, linha, status, observacao }));
+    const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
+    const atualizacoes = lancamentos
+      .map((lancamento) => {
+        const novo = statusPorLinha.get(lancamento.chave || lancamento.linha) || { status: 'Pendente', observacao: '' };
+        return { aba: lancamento.aba, linha: lancamento.linha, status: novo.status, observacao: novo.observacao, statusAnterior: lancamento.status_conciliacao };
+      })
+      .filter(({ status, statusAnterior }) => status !== statusAnterior)
+      .map(({ aba, linha, status, observacao }) => ({ aba, linha, status, observacao }));
 
-  await atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
+    await atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
+  });
 }
 
 // Registra automaticamente na aba Lancamentos toda transação do EXTRATO que não tem nenhum
@@ -1324,7 +1347,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
   for (const transacao of orfasUnicas) {
     const auto = classificarTransacaoBancaria(transacao);
 
-    const ref = await salvarComprovanteComItens(sheetId, {
+    const ref = await comRetryTransiente(() => salvarComprovanteComItens(sheetId, {
       data: transacao.data,
       hora: '',
       valor: transacao.valor,
@@ -1341,7 +1364,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
       observacao_conciliacao: auto
         ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
         : 'Lançado via extrato/fatura. Comprovante original pendente.',
-    });
+    }));
     registrados.push({ transacao, ref, auto: !!auto });
   }
 
