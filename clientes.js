@@ -315,6 +315,40 @@ async function definirPastaDriveCliente(numeroWhatsapp, pastaDriveId) {
   return true;
 }
 
+// Igual definirPastaDriveCliente, mas escreve em TODAS as linhas que apontam pro mesmo Sheet_ID
+// (16/09/2026, achado ao criar as pastas: mais de um número/linha pode levar à MESMA planilha —
+// ex.: Valmir Tomé + o número comercial "Valmir Tomé (Sirlene)", ou os vários números de teste do
+// Aroldo — nesse caso a pasta no Drive também deve ser UMA SÓ, não uma por linha/número). Usada
+// por garantirPastaCliente (documentos-grandes.js) pra manter todas as linhas de um mesmo cliente
+// sempre apontando pra pasta certa, mesmo que a busca tenha sido disparada por só uma delas.
+async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:C` });
+  const linhas = resposta.data.values || [];
+  const indices = linhas
+    .map((linha, indice) => ((linha[2] || '').trim() === sheetId ? indice : -1))
+    .filter((indice) => indice !== -1);
+
+  if (indices.length === 0) return 0;
+
+  const dados = indices.map((indice) => ({
+    range: `${ABA_CLIENTES}!I${indice + 2}`,
+    values: [[pastaDriveId]],
+  }));
+
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId,
+    requestBody: { valueInputOption: 'RAW', data: dados },
+  });
+
+  cache = null;
+  return indices.length;
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
@@ -324,5 +358,6 @@ module.exports = {
   ativarPlanoEspecialista,
   definirSenhaDashboard,
   definirPastaDriveCliente,
+  definirPastaDriveClientePorSheetId,
   getDriveClient,
 };

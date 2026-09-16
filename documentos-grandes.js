@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { Readable } = require('stream');
 const { PDFDocument } = require('pdf-lib');
-const { getDriveClient, definirPastaDriveCliente } = require('./clientes');
+const { getDriveClient, definirPastaDriveClientePorSheetId } = require('./clientes');
 
 // Módulo novo (16/09/2026, pedido do Aroldo: extrato/fatura de cartão grande travando na leitura
 // de uma vez só). Duas responsabilidades que não existiam antes:
@@ -20,7 +20,16 @@ const { getDriveClient, definirPastaDriveCliente } = require('./clientes');
 // Cria (ou reaproveita) a pasta do cliente dentro de GOOGLE_DRIVE_FOLDER_ID (a mesma pasta
 // "CLIENTES" já usada pro estoque de planilhas em branco — não precisa de outra variável de
 // ambiente nova). Uma vez criada, o ID fica salvo na planilha mestre (Pasta_Drive_ID) pra nunca
-// mais precisar procurar/recriar — ver definirPastaDriveCliente em clientes.js.
+// mais precisar procurar/recriar.
+//
+// A pasta é UMA POR PLANILHA (Sheet_ID), não uma por número/linha — 16/09/2026, achado ao criar
+// as pastas dos clientes já existentes: mais de um número de WhatsApp pode apontar pra MESMA
+// planilha de propósito (ex.: Valmir Tomé + o número comercial da empresa dele que a esposa
+// Sirlene também usa; ou os vários números de teste do Aroldo) — se a busca fosse por NOME (como
+// era antes), cada número virava uma pasta diferente pro mesmo cliente, espalhando os documentos
+// dele em Drive-folders diferentes por acidente. Por isso a busca/marcação usa appProperties.sheetId
+// (nunca o nome, que pode mudar ou se repetir) e, ao criar/achar, grava o Pasta_Drive_ID em TODA
+// linha da planilha mestre que aponta pro mesmo Sheet_ID (ver definirPastaDriveClientePorSheetId).
 async function garantirPastaCliente(cliente) {
   if (cliente.pastaDriveId) return cliente.pastaDriveId;
 
@@ -28,13 +37,14 @@ async function garantirPastaCliente(cliente) {
   if (!raiz) {
     throw new Error('GOOGLE_DRIVE_FOLDER_ID não configurado — sem isso não dá pra criar a pasta do cliente no Drive.');
   }
+  if (!cliente.sheetId) {
+    throw new Error('Cliente sem Sheet_ID — não dá pra saber se já existe uma pasta pra ele.');
+  }
 
   const drive = getDriveClient();
-  const nomePasta = cliente.nome || cliente.numeroWhatsapp;
-  const nomeEscapado = nomePasta.replace(/'/g, "\\'");
 
   const existentes = await drive.files.list({
-    q: `'${raiz}' in parents and name = '${nomeEscapado}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    q: `'${raiz}' in parents and mimeType = 'application/vnd.google-apps.folder' and appProperties has { key='sheetId' and value='${cliente.sheetId}' } and trashed = false`,
     fields: 'files(id)',
     pageSize: 1,
   });
@@ -42,8 +52,14 @@ async function garantirPastaCliente(cliente) {
   let pastaId = existentes.data.files && existentes.data.files[0] && existentes.data.files[0].id;
 
   if (!pastaId) {
+    const nomePasta = cliente.nome || cliente.numeroWhatsapp;
     const criada = await drive.files.create({
-      requestBody: { name: nomePasta, mimeType: 'application/vnd.google-apps.folder', parents: [raiz] },
+      requestBody: {
+        name: nomePasta,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: [raiz],
+        appProperties: { sheetId: cliente.sheetId },
+      },
       fields: 'id',
     });
     pastaId = criada.data.id;
@@ -51,20 +67,18 @@ async function garantirPastaCliente(cliente) {
     // Atalho pra planilha do cliente dentro da própria pasta — só organização visual (o sistema
     // continua lendo a planilha pelo Sheet_ID de sempre, este atalho é só pra quem abre o Drive
     // manualmente achar tudo junto). Melhor esforço: se falhar, não impede o resto do fluxo.
-    if (cliente.sheetId) {
-      await drive.files.create({
-        requestBody: {
-          name: `Planilha — ${nomePasta}`,
-          mimeType: 'application/vnd.google-apps.shortcut',
-          parents: [pastaId],
-          shortcutDetails: { targetId: cliente.sheetId },
-        },
-      }).catch((erro) => console.error('Falha ao criar atalho da planilha na pasta do cliente (não crítico):', erro.message));
-    }
+    await drive.files.create({
+      requestBody: {
+        name: `Planilha — ${nomePasta}`,
+        mimeType: 'application/vnd.google-apps.shortcut',
+        parents: [pastaId],
+        shortcutDetails: { targetId: cliente.sheetId },
+      },
+    }).catch((erro) => console.error('Falha ao criar atalho da planilha na pasta do cliente (não crítico):', erro.message));
   }
 
-  await definirPastaDriveCliente(cliente.numeroWhatsapp, pastaId).catch((erro) => {
-    console.error('Falha ao salvar Pasta_Drive_ID na planilha mestre (pasta já foi criada, só não ficou registrada — próxima vez cria de novo):', erro.message);
+  await definirPastaDriveClientePorSheetId(cliente.sheetId, pastaId).catch((erro) => {
+    console.error('Falha ao salvar Pasta_Drive_ID na planilha mestre (pasta já foi criada, só não ficou registrada — próxima vez recupera pelo appProperties):', erro.message);
   });
 
   return pastaId;
