@@ -1874,44 +1874,54 @@ async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas
   return { novas: transacoesNovas.length, duplicadas };
 }
 
-// Documento pesado demais pra ler numa chamada só (16/09/2026) — avisa o cliente na hora e
-// processa em blocos de página logo em seguida (ver processarDocumentoPesadoBuffer), sem esperar
-// o cron: o webhook já respondeu 200 pra Meta antes disso (ack imediato de sempre), então não tem
-// prazo nenhum correndo — só ganha em demorar menos pro cliente receber a resposta.
+// Documento pesado demais pra ler numa chamada só (16/09/2026, pedido explícito do Aroldo:
+// "recebe o arquivo, sobe no drive e deixa na pasta do cliente. depois faz a leitura... sem
+// pressa"). Avisa o cliente na hora e SALVA no Drive — a leitura de verdade, em blocos de página,
+// acontece DEPOIS, sem pressa, quando o cron (/tarefas/processar-documentos-pendentes, a cada
+// 15min) retomar o arquivo (ver processarDocumentoPesadoPendente). Isso só é seguro desde que o
+// upload no Drive passou a usar a conta PESSOAL do Aroldo via OAuth (getDriveClientPessoal, ver
+// clientes.js) — a conta de serviço tinha cota zero pra isso ("Service Accounts do not have
+// storage quota", erro real visto em produção antes da autorização OAuth).
 //
-// Guardar o arquivo original no Drive é BEST-EFFORT, não bloqueia o processamento: contas de
-// serviço fora do Google Workspace não têm cota própria de armazenamento pra CRIAR arquivo novo
-// (erro real visto em produção: "Service Accounts do not have storage quota") — só funciona hoje
-// pra pasta/atalho (não ocupam espaço de verdade). Enquanto isso não for resolvido (Shared Drive
-// do Workspace, ou delegação OAuth com uma conta real), a falha de guardar é só logada — o que
-// importa de verdade (ler certo e lançar na planilha) roda de qualquer jeito.
+// Rede de segurança: se o Drive falhar MESMO ASSIM (rede caiu, token revogado etc.), processa na
+// hora em vez de simplesmente perder o documento — o cliente não pode nunca ficar sem resposta
+// nenhuma só porque o armazenamento teve um problema pontual.
 const MENSAGEM_DOCUMENTO_PESADO_RECEBIDO = '📄 Recebi! Como é um documento grande, vou processar com calma pra não perder nenhum detalhe — te aviso por aqui assim que estiver tudo lançado e conciliado na sua planilha. Não precisa fazer nada.';
 
 async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, tipoAlvo) {
   await enviarMensagemWhatsApp(remetente, MENSAGEM_DOCUMENTO_PESADO_RECEBIDO).catch(() => {});
 
-  let arquivoNoDrive = null;
   try {
-    arquivoNoDrive = await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
-    console.log(`Documento pesado (${tipoAlvo}) guardado no Drive — ${cliente ? cliente.nome : remetente}.`);
+    await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
+    console.log(`Documento pesado (${tipoAlvo}) guardado no Drive pra processar depois — ${cliente ? cliente.nome : remetente}.`);
+    return; // sucesso: a leitura de verdade fica pro cron, sem pressa.
   } catch (erro) {
-    console.error(`Aviso: não guardei o documento pesado (${tipoAlvo}) no Drive (${cliente ? cliente.nome : remetente}) — seguindo pro processamento mesmo assim:`, erro.message);
+    console.error(`Falha ao guardar documento pesado (${tipoAlvo}) no Drive — processando na hora como rede de segurança:`, erro.message);
   }
 
+  // Só chega aqui se o Drive falhou — processa imediatamente pra não perder o documento, e avisa
+  // o admin que o Drive está com problema (isso não deveria acontecer no dia a dia depois da
+  // autorização OAuth; se acontecer, é sinal de token revogado ou instabilidade de rede real).
   try {
     await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
-    if (arquivoNoDrive) await marcarStatusArquivo(arquivoNoDrive.id, 'processado').catch(() => {});
   } catch (erro) {
     console.error(`Falha ao processar documento pesado (${tipoAlvo}):`, erro.message);
-    if (arquivoNoDrive) await marcarStatusArquivo(arquivoNoDrive.id, 'falhou').catch(() => {});
     await enviarMensagemWhatsApp(remetente, `Ops, tive um problema pra terminar de processar seu ${tipoAlvo === 'extrato' ? 'extrato' : 'documento'}. Já estou olhando isso, te aviso assim que resolver.`).catch(() => {});
     await avisarAdmin(
       remetente,
       TEMPLATE_AVISO_ADMIN,
-      ['Falha ao processar documento grande', `${cliente ? cliente.nome : remetente} (${remetente}) — ${erro.message}`],
-      `🔴 Falha ao processar documento grande (${tipoAlvo}) de ${cliente ? cliente.nome : remetente} (${remetente}): ${erro.message}\n\nO cliente já recebeu a confirmação de recebimento, mas nada foi lançado na planilha ainda${arquivoNoDrive ? ' — o arquivo original está no Drive, marcado "falhou"' : ' — e o arquivo original NÃO foi guardado no Drive (ver log de erro de armazenamento), então pode ter sido perdido'}.`
+      ['Falha ao guardar E processar documento grande', `${cliente ? cliente.nome : remetente} (${remetente}) — ${erro.message}`],
+      `🔴 Falha ao guardar E processar documento grande (${tipoAlvo}) de ${cliente ? cliente.nome : remetente} (${remetente}): ${erro.message}\n\nO cliente já recebeu a confirmação de recebimento, mas nada foi lançado na planilha e o arquivo NÃO foi guardado no Drive — conferir se o token OAuth ainda está válido (/admin/google-oauth/iniciar pra reautorizar se precisar).`
     );
+    return;
   }
+
+  await avisarAdmin(
+    remetente,
+    TEMPLATE_AVISO_ADMIN,
+    ['Drive falhou nesta mensagem (processado na hora como rede de segurança)', `${cliente ? cliente.nome : remetente} (${remetente})`],
+    `⚠️ O Drive falhou ao guardar um documento grande de ${cliente ? cliente.nome : remetente} (${remetente}) — processei na hora como rede de segurança, o lançamento foi feito normalmente, mas vale conferir se o token OAuth do Drive ainda está válido.`
+  );
 }
 
 // Roteia e processa uma mídia (foto ou documento) já baixada — extraído do handler do webhook em
