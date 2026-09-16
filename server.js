@@ -1849,26 +1849,42 @@ async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas
   return { novas: transacoesNovas.length, duplicadas };
 }
 
-// Documento pesado demais pra ler agora (16/09/2026) — avisa o cliente na hora, guarda o arquivo
-// original no Drive (pasta do cliente, organizada por mês) e devolve. A leitura de verdade some
-// desta função de propósito: acontece depois, em blocos de página, via
-// /tarefas/processar-documentos-pendentes (ver processarDocumentoPesadoPendente) — sem pressa de
-// responder rápido, sem risco de cortar a resposta da IA no meio.
+// Documento pesado demais pra ler numa chamada só (16/09/2026) — avisa o cliente na hora e
+// processa em blocos de página logo em seguida (ver processarDocumentoPesadoBuffer), sem esperar
+// o cron: o webhook já respondeu 200 pra Meta antes disso (ack imediato de sempre), então não tem
+// prazo nenhum correndo — só ganha em demorar menos pro cliente receber a resposta.
+//
+// Guardar o arquivo original no Drive é BEST-EFFORT, não bloqueia o processamento: contas de
+// serviço fora do Google Workspace não têm cota própria de armazenamento pra CRIAR arquivo novo
+// (erro real visto em produção: "Service Accounts do not have storage quota") — só funciona hoje
+// pra pasta/atalho (não ocupam espaço de verdade). Enquanto isso não for resolvido (Shared Drive
+// do Workspace, ou delegação OAuth com uma conta real), a falha de guardar é só logada — o que
+// importa de verdade (ler certo e lançar na planilha) roda de qualquer jeito.
 const MENSAGEM_DOCUMENTO_PESADO_RECEBIDO = '📄 Recebi! Como é um documento grande, vou processar com calma pra não perder nenhum detalhe — te aviso por aqui assim que estiver tudo lançado e conciliado na sua planilha. Não precisa fazer nada.';
 
 async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, tipoAlvo) {
   await enviarMensagemWhatsApp(remetente, MENSAGEM_DOCUMENTO_PESADO_RECEBIDO).catch(() => {});
 
+  let arquivoNoDrive = null;
   try {
-    await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
-    console.log(`Documento pesado (${tipoAlvo}) guardado no Drive pra processar depois — ${cliente ? cliente.nome : remetente}.`);
+    arquivoNoDrive = await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
+    console.log(`Documento pesado (${tipoAlvo}) guardado no Drive — ${cliente ? cliente.nome : remetente}.`);
   } catch (erro) {
-    console.error(`Falha ao guardar documento pesado (${tipoAlvo}) no Drive:`, erro.message);
+    console.error(`Aviso: não guardei o documento pesado (${tipoAlvo}) no Drive (${cliente ? cliente.nome : remetente}) — seguindo pro processamento mesmo assim:`, erro.message);
+  }
+
+  try {
+    await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
+    if (arquivoNoDrive) await marcarStatusArquivo(arquivoNoDrive.id, 'processado').catch(() => {});
+  } catch (erro) {
+    console.error(`Falha ao processar documento pesado (${tipoAlvo}):`, erro.message);
+    if (arquivoNoDrive) await marcarStatusArquivo(arquivoNoDrive.id, 'falhou').catch(() => {});
+    await enviarMensagemWhatsApp(remetente, `Ops, tive um problema pra terminar de processar seu ${tipoAlvo === 'extrato' ? 'extrato' : 'documento'}. Já estou olhando isso, te aviso assim que resolver.`).catch(() => {});
     await avisarAdmin(
       remetente,
       TEMPLATE_AVISO_ADMIN,
-      ['Falha ao guardar documento grande no Drive', `${cliente ? cliente.nome : remetente} (${remetente}) — ${erro.message}`],
-      `🔴 Falha ao guardar documento grande (${tipoAlvo}) no Drive pra ${cliente ? cliente.nome : remetente} (${remetente}): ${erro.message}\n\nO cliente já recebeu a confirmação de recebimento, mas o arquivo pode não ter sido salvo — considerar pedir reenvio.`
+      ['Falha ao processar documento grande', `${cliente ? cliente.nome : remetente} (${remetente}) — ${erro.message}`],
+      `🔴 Falha ao processar documento grande (${tipoAlvo}) de ${cliente ? cliente.nome : remetente} (${remetente}): ${erro.message}\n\nO cliente já recebeu a confirmação de recebimento, mas nada foi lançado na planilha ainda${arquivoNoDrive ? ' — o arquivo original está no Drive, marcado "falhou"' : ' — e o arquivo original NÃO foi guardado no Drive (ver log de erro de armazenamento), então pode ter sido perdido'}.`
     );
   }
 }
@@ -2799,19 +2815,19 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
   }
 });
 
-// Processa UM documento pesado que estava esperando no Drive (16/09/2026, ver
-// salvarDocumentoPesadoEProcessarDepois) — divide o PDF em blocos de página e faz uma chamada de
-// extração POR BLOCO, juntando tudo no final. Chamado só pelo cron (nunca pelo webhook), então
-// pode demorar o tempo que precisar sem risco de a Meta reenviar o webhook por timeout.
-// `vencimento` (fatura) e `banco_conta` (extrato) normalmente só aparecem no cabeçalho do
-// documento, ou seja, só no 1º bloco — itens dos blocos seguintes que vierem sem esse campo
-// herdam do 1º bloco que tiver o valor.
-async function processarDocumentoPesadoPendente(cliente, arquivo) {
-  const buffer = await baixarArquivo(arquivo.id);
-  const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'fatura';
+// Divide o PDF em blocos de página e faz uma chamada de extração POR BLOCO, juntando tudo no
+// final, e grava o resultado na planilha do cliente (16/09/2026). Não depende do Drive — recebe o
+// buffer já em mãos, então serve tanto pro processamento imediato (ver
+// salvarDocumentoPesadoEProcessarDepois, chamado logo que o documento chega) quanto pro que ficou
+// pendente no Drive e foi retomado pelo cron (ver processarDocumentoPesadoPendente, mais abaixo).
+// Como quem chama já respondeu o webhook da Meta antes disso (ack imediato), pode demorar o tempo
+// que precisar sem risco de reenvio por timeout. `vencimento` (fatura) e `banco_conta` (extrato)
+// normalmente só aparecem no cabeçalho do documento, ou seja, só no 1º bloco — itens dos blocos
+// seguintes que vierem sem esse campo herdam do 1º bloco que tiver o valor.
+async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo) {
   const blocos = await dividirPdfEmBlocos(buffer);
 
-  console.log(`Processando documento pesado pendente "${arquivo.name}" (${tipoAlvo}, ${blocos.length} bloco(s) de página) — ${cliente.nome}.`);
+  console.log(`Processando documento pesado (${tipoAlvo}, ${blocos.length} bloco(s) de página) — ${cliente.nome}.`);
 
   if (tipoAlvo === 'extrato') {
     let contaBancaria = '';
@@ -2839,6 +2855,17 @@ async function processarDocumentoPesadoPendente(cliente, arquivo) {
   if (vencimentoPadrao) acumulado.forEach((c) => { if (!c.vencimento) c.vencimento = vencimentoPadrao; });
 
   await registrarContasAPagarProcessadas(cliente.numeroWhatsapp, cliente.sheetId, acumulado, null);
+}
+
+// Retoma UM documento pesado que ficou esperando no Drive (ex.: processamento imediato falhou por
+// algum motivo transiente, ou o servidor reiniciou no meio) — baixa o arquivo e delega pra
+// processarDocumentoPesadoBuffer. Usado só pelo cron (/tarefas/processar-documentos-pendentes),
+// como REDE DE SEGURANÇA — o caminho normal (16/09/2026) processa na hora, ver
+// salvarDocumentoPesadoEProcessarDepois.
+async function processarDocumentoPesadoPendente(cliente, arquivo) {
+  const buffer = await baixarArquivo(arquivo.id);
+  const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'fatura';
+  await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
 }
 
 // Varre a pasta de todos os clientes ativos procurando documento pesado ainda não lido (ver
