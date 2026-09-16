@@ -165,6 +165,71 @@ async function marcarStatusArquivo(fileId, status) {
 }
 
 // -------------------------------------------------------------------------------------------
+// VARREDURA DIÁRIA — arquivo que o cliente jogou DIRETO na pasta do Drive, sem passar pelo
+// WhatsApp (16/09/2026, pedido do Aroldo: "se o cliente subir direto, o Pocket também precisa
+// entender que precisa lançar"). Roda 1x por dia (ver /tarefas/varrer-drive-clientes em
+// server.js) — bem mais devagar que o job de 15/30min porque aqui SIM precisa varrer pasta por
+// pasta (mês por mês) de cada cliente, não dá pra usar a busca global por appProperties (esse
+// arquivo ainda não tem appProperties nenhum, é exatamente isso que o torna "não visto ainda").
+// -------------------------------------------------------------------------------------------
+
+// Sem legenda nem cliente digitando nada, a única pista possível é o NOME do arquivo — mesma
+// ideia de pistaPorNomeBanco/inferirPistaPorNomeArquivo em server.js, só que replicada aqui (não
+// vale importar de server.js pra dentro de um módulo de baixo nível). Fica com 'fatura' como
+// padrão quando não reconhece nada — é o mesmo default já usado em processarDocumentoPesadoPendente.
+function inferirTipoAlvoPorNomeArquivo(nomeArquivo) {
+  const nome = (nomeArquivo || '').toLowerCase();
+  if (/\bextrato\b|\bbanco\b|conta\s*corrente|\b(itau|ita[uú]|bradesco|santander|nubank|sicoob|sicredi|caixa|banco\s*inter|banco\s+do\s+brasil|cora)\b/.test(nome)) {
+    return 'extrato';
+  }
+  return 'fatura';
+}
+
+// Varre TODAS as pastas de mês do cliente procurando arquivo sem appProperties nenhum (= nunca
+// visto pelo Pocket antes — se tivesse passado pelo WhatsApp, já teria status). Não baixa nem lê
+// o conteúdo aqui, só lista — barato, só metadado.
+async function listarArquivosNaoMarcados(cliente) {
+  if (!cliente.pastaDriveId) return [];
+  const drive = getDriveClientPessoal();
+
+  const pastasMes = await drive.files.list({
+    q: `'${cliente.pastaDriveId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id,name)',
+    pageSize: 50,
+  });
+
+  const encontrados = [];
+  for (const pastaMes of pastasMes.data.files || []) {
+    const resposta = await drive.files.list({
+      q: `'${pastaMes.id}' in parents and trashed = false`,
+      fields: 'files(id,name,mimeType,appProperties)',
+      pageSize: 100,
+    });
+    for (const arquivo of resposta.data.files || []) {
+      if (arquivo.mimeType === 'application/vnd.google-apps.folder') continue;
+      if (arquivo.mimeType === 'application/vnd.google-apps.shortcut') continue;
+      if (arquivo.appProperties && arquivo.appProperties.status) continue; // já conhecido, pula
+      encontrados.push(arquivo);
+    }
+  }
+  return encontrados;
+}
+
+// Marca o arquivo recém-descoberto com o MESMO appProperties que o fluxo normal (WhatsApp) já
+// usa — a partir daqui ele é indistinguível de um documento pesado enviado pelo bot, e o job de
+// 15/30min (listarDocumentosPendentes/processarDocumentoPesadoPendente) pega ele sozinho na
+// próxima passada, sem precisar de nenhum código novo pra "processar".
+async function marcarArquivoComoPendente(arquivo, cliente) {
+  const drive = getDriveClientPessoal();
+  const tipoAlvo = inferirTipoAlvoPorNomeArquivo(arquivo.name);
+  await drive.files.update({
+    fileId: arquivo.id,
+    requestBody: { appProperties: { status: 'aguardando', tipoAlvo, numeroWhatsapp: cliente.numeroWhatsapp } },
+  });
+  return tipoAlvo;
+}
+
+// -------------------------------------------------------------------------------------------
 // DIVISÃO DE PDF GRANDE EM BLOCOS DE PÁGINA
 // -------------------------------------------------------------------------------------------
 
@@ -346,6 +411,8 @@ module.exports = {
   listarDocumentosPendentes,
   baixarArquivo,
   marcarStatusArquivo,
+  listarArquivosNaoMarcados,
+  marcarArquivoComoPendente,
   dividirPdfEmBlocos,
   parseOFX,
   parseCSV,

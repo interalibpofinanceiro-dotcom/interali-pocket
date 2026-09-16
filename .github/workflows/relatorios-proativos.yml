@@ -4,7 +4,7 @@ name: Tarefas Proativas - Interali Pocket
 # hospedagem não sustenta um cron interno confiável. Ver CLAUDE.MD/CONTEXTO.md e
 # HISTORICO-COMPLETO.md no repositório de documentação pro contexto completo.
 #
-# 4 tarefas, 4 jobs (cada um só roda no seu próprio agendamento, ou em todos via disparo manual):
+# 5 tarefas, 5 jobs (cada um só roda no seu próprio agendamento, ou em todos via disparo manual):
 # - disparar-relatorio: resumo semanal (toda sexta) / mensal (dia 1) — manda só o "avisador"
 #   via template; o relatório de verdade (o que já foi pago/recebido na semana — dado REALIZADO,
 #   não previsão) sai quando o cliente responde.
@@ -12,9 +12,12 @@ name: Tarefas Proativas - Interali Pocket
 #   (comando "recorrente:") cujo dia bate com hoje.
 # - checar-saude: a cada 30min, confere se Anthropic/WhatsApp estão respondendo e avisa o WhatsApp
 #   do admin só quando o status MUDA (ver /tarefas/checar-saude em server.js).
-# - processar-documentos-pendentes: a cada 15min, lê extrato/fatura grande demais que ficou
+# - processar-documentos-pendentes: a cada 30min, lê extrato/fatura grande demais que ficou
 #   esperando no Drive (16/09/2026, ver salvarDocumentoPesadoEProcessarDepois em server.js) e lança
 #   na planilha do cliente em blocos de página, sem pressa de responder rápido.
+# - varrer-drive-clientes: todo dia às 7h, procura arquivo que o cliente jogou DIRETO na pasta do
+#   Drive (sem passar pelo WhatsApp) e marca como pendente — quem lê de verdade é o job acima, na
+#   passada seguinte (até 30min depois).
 #
 # 17/08/2026 (pedido do Aroldo): resumo semanal movido de segunda pra SEXTA — faz mais sentido
 # fechar a semana com o que já aconteceu de verdade (entradas/saídas realizadas) do que abrir a
@@ -29,15 +32,18 @@ on:
     - cron: '0 11 1 * *'
     # Todo dia às 08:00 (horário de Brasília) — despesas/receitas fixas recorrentes
     - cron: '0 11 * * *'
-    # A cada 30 minutos, todo dia — checagem de saúde (Anthropic/WhatsApp). 09/09/2026, pedido do
-    # Aroldo: caso real, crédito da Anthropic esgotou e só foi percebido quando uma cliente
-    # reclamou. Só avisa o WhatsApp do admin quando o status MUDA (ver /tarefas/checar-saude em
-    # server.js) — não gera aviso repetido a cada 30min enquanto o problema persiste.
+    # A cada 30 minutos, todo dia — checagem de saúde (Anthropic/WhatsApp) E processamento de
+    # documento pesado pendente no Drive (mesmo horário, dois jobs diferentes). 09/09/2026, pedido
+    # do Aroldo: caso real, crédito da Anthropic esgotou e só foi percebido quando uma cliente
+    # reclamou — checar-saude só avisa o WhatsApp do admin quando o status MUDA (ver
+    # /tarefas/checar-saude em server.js), não repete a cada 30min enquanto o problema persiste.
+    # 16/09/2026: processar-documentos-pendentes começou em 15min, o Aroldo pediu pra aumentar
+    # pra 30min (folga maior, o cliente já foi avisado na hora mesmo assim).
     - cron: '*/30 * * * *'
-    # A cada 15 minutos, todo dia — processa extrato/fatura grande demais que ficou esperando no
-    # Drive (16/09/2026). Roda mais frequente que os outros de propósito: é a etapa que o cliente
-    # está esperando ("te aviso quando estiver tudo lançado"), não faz sentido demorar horas.
-    - cron: '*/15 * * * *'
+    # Todo dia às 07:00 (horário de Brasília) — varredura da pasta de cada cliente no Drive
+    # procurando arquivo que ele jogou lá DIRETO, sem passar pelo WhatsApp (16/09/2026, pedido do
+    # Aroldo). Só marca como pendente; quem lê de verdade é o job de 30min de sempre.
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       periodo:
@@ -90,11 +96,21 @@ jobs:
           cat resposta.json
 
   processar-documentos-pendentes:
-    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/15 * * * *'
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '*/30 * * * *'
     runs-on: ubuntu-latest
     steps:
       - name: Chama /tarefas/processar-documentos-pendentes
         run: |
           curl -sf -X POST "https://pocket.interali.com.br/tarefas/processar-documentos-pendentes?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n"
+          cat resposta.json
+
+  varrer-drive-clientes:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chama /tarefas/varrer-drive-clientes
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/varrer-drive-clientes?chave=${{ secrets.RELATORIO_SECRET }}" \
             -o resposta.json -w "\nHTTP %{http_code}\n"
           cat resposta.json

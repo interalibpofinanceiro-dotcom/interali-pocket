@@ -104,6 +104,8 @@ const {
   listarDocumentosPendentes,
   baixarArquivo,
   marcarStatusArquivo,
+  listarArquivosNaoMarcados,
+  marcarArquivoComoPendente,
   dividirPdfEmBlocos,
   parseOFX,
   parseCSV,
@@ -2900,6 +2902,18 @@ async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo) {
 async function processarDocumentoPesadoPendente(cliente, arquivo) {
   const buffer = await baixarArquivo(arquivo.id);
   const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'fatura';
+
+  // OFX/CSV (16/09/2026) — pode acontecer de um arquivo assim chegar aqui pela varredura diária
+  // (cliente jogou direto no Drive, sem passar pelo WhatsApp onde OFX/CSV já é lido na hora, ver
+  // processarMidiaRecebida). Mesmo tratamento: leitura direta, sem IA, sem risco de cortar.
+  const formato = tipoDoArquivo(arquivo.name, arquivo.mimeType);
+  if (formato === 'ofx' || formato === 'csv') {
+    const resultado = formato === 'ofx' ? parseOFX(buffer) : parseCSV(buffer);
+    const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: resultado.contaBancaria || '' }));
+    await registrarTransacoesDeExtrato(cliente.numeroWhatsapp, cliente.sheetId, transacoesBrutas);
+    return;
+  }
+
   await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
 }
 
@@ -2944,6 +2958,49 @@ app.all('/tarefas/processar-documentos-pendentes', async (req, res) => {
     res.json({ ok: true, processados, falhas });
   } catch (error) {
     console.error('Erro no job de documentos pendentes:', error.message);
+    res.status(500).json({ erro: error.message });
+  }
+});
+
+// Varredura diária (16/09/2026, pedido do Aroldo: "se o cliente tiver algum problema e subir
+// direto no Drive, o Pocket também precisa entender que precisa lançar") — roda 1x por dia
+// (07h, ver .github/workflows/relatorios-proativos.yml), bem mais devagar que o job de 15/30min
+// porque varre pasta por pasta de cada cliente (não dá pra usar a busca global por
+// appProperties — o arquivo direto do Drive ainda não tem nenhum). Só MARCA o arquivo novo como
+// pendente (mesmo appProperties que o fluxo do WhatsApp usa) — não processa aqui, quem processa
+// de verdade é o job de 15/30min de sempre, na passada seguinte (mesma leitura com calma, sem
+// pressa, reaproveitando o código que já existe em vez de duplicar).
+app.all('/tarefas/varrer-drive-clientes', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+
+  try {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const marcados = [];
+
+    for (const cliente of clientes) {
+      if (!cliente.pastaDriveId) continue;
+
+      const novos = await listarArquivosNaoMarcados(cliente).catch((erro) => {
+        console.error(`Falha ao varrer pasta do Drive de ${cliente.numeroWhatsapp}:`, erro.message);
+        return [];
+      });
+
+      for (const arquivo of novos) {
+        try {
+          const tipoAlvo = await marcarArquivoComoPendente(arquivo, cliente);
+          console.log(`Arquivo novo achado direto no Drive: "${arquivo.name}" (${cliente.nome}) — marcado como ${tipoAlvo}, pendente pro próximo ciclo.`);
+          marcados.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, tipoAlvo });
+        } catch (erro) {
+          console.error(`Falha ao marcar arquivo "${arquivo.name}" de ${cliente.numeroWhatsapp} como pendente:`, erro.message);
+        }
+      }
+    }
+
+    res.json({ ok: true, marcados });
+  } catch (error) {
+    console.error('Erro na varredura diária do Drive:', error.message);
     res.status(500).json({ erro: error.message });
   }
 });
