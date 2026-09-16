@@ -255,73 +255,13 @@ async function ativarPlanoEspecialista(numeroWhatsapp) {
   return true;
 }
 
-// Define (ou troca) a senha do dashboard web de um cliente (23/08/2026) — mesmo padrão de
-// desativarCliente/ativarPlanoEspecialista acima (acha a linha, escreve só a célula certa).
-// Recebe o HASH já pronto (ver dashboard.js hashSenhaDashboard) — este módulo não sabe gerar hash
-// sozinho, só grava/lê, pra não duplicar a lógica de criptografia em dois arquivos.
-async function definirSenhaDashboard(numeroWhatsapp, senhaHash) {
-  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
-  const sheets = getSheetsClient();
-
-  await garantirAbaComCabecalho(sheets, spreadsheetId);
-
-  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:A` });
-  const linhas = resposta.data.values || [];
-  const alvo = (numeroWhatsapp || '').trim();
-  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
-
-  if (indice === -1) return false;
-
-  const numeroLinha = indice + 2;
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${ABA_CLIENTES}!H${numeroLinha}`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [[senhaHash]] },
-  });
-
-  cache = null;
-  return true;
-}
-
-// Grava o ID da pasta do cliente no Drive (16/09/2026, ver garantirPastaCliente em
-// documentos-grandes.js) — mesmo padrão de definirSenhaDashboard (acha a linha pelo número, escreve
-// só a célula certa). Chamada uma vez só, na primeira vez que a pasta é criada; nas próximas, o
-// cliente já vem com pastaDriveId preenchido e a criação é pulada.
-async function definirPastaDriveCliente(numeroWhatsapp, pastaDriveId) {
-  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
-  const sheets = getSheetsClient();
-
-  await garantirAbaComCabecalho(sheets, spreadsheetId);
-
-  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:A` });
-  const linhas = resposta.data.values || [];
-  const alvo = (numeroWhatsapp || '').trim();
-  const indice = linhas.findIndex((linha) => (linha[0] || '').trim() === alvo);
-
-  if (indice === -1) return false;
-
-  const numeroLinha = indice + 2;
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId,
-    range: `${ABA_CLIENTES}!I${numeroLinha}`,
-    valueInputOption: 'RAW',
-    requestBody: { values: [[pastaDriveId]] },
-  });
-
-  cache = null;
-  return true;
-}
-
-// Igual definirPastaDriveCliente, mas escreve em TODAS as linhas que apontam pro mesmo Sheet_ID
-// (16/09/2026, achado ao criar as pastas: mais de um número/linha pode levar à MESMA planilha —
-// ex.: Valmir Tomé + o número comercial "Valmir Tomé (Sirlene)", ou os vários números de teste do
-// Aroldo — nesse caso a pasta no Drive também deve ser UMA SÓ, não uma por linha/número). Usada
-// por garantirPastaCliente (documentos-grandes.js) pra manter todas as linhas de um mesmo cliente
-// sempre apontando pra pasta certa, mesmo que a busca tenha sido disparada por só uma delas.
-async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
+// Escreve `valor` na coluna `coluna` de TODA linha da planilha mestre que aponta pro mesmo
+// Sheet_ID (16/09/2026, generalizado a partir de definirPastaDriveClientePorSheetId) — usado
+// sempre que um dado é "do cliente" (a planilha), não "do número" (a linha): mais de um número de
+// WhatsApp pode apontar pra mesma planilha de propósito (número comercial que a esposa/sócio
+// também usa, números de teste), e nesse caso o dado precisa ser o MESMO pra qualquer um dos
+// números, senão login/pasta/etc. funciona só por um número e falha nos outros por acaso.
+async function atualizarColunaPorSheetId(coluna, sheetId, valor) {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
 
@@ -336,8 +276,8 @@ async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
   if (indices.length === 0) return 0;
 
   const dados = indices.map((indice) => ({
-    range: `${ABA_CLIENTES}!I${indice + 2}`,
-    values: [[pastaDriveId]],
+    range: `${ABA_CLIENTES}!${coluna}${indice + 2}`,
+    values: [[valor]],
   }));
 
   await sheets.spreadsheets.values.batchUpdate({
@@ -349,6 +289,41 @@ async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
   return indices.length;
 }
 
+// Define (ou troca) a senha do dashboard web de um cliente (23/08/2026, propagação por Sheet_ID
+// adicionada em 16/09/2026 — achado real: Aroldo definiu senha por um número, tentou logar por
+// OUTRO número que aponta pra mesma planilha de teste, e falhou porque a senha só tinha sido
+// gravada na linha do primeiro número). Recebe o HASH já pronto (ver dashboard.js
+// hashSenhaDashboard) — este módulo não sabe gerar hash sozinho, só grava/lê, pra não duplicar a
+// lógica de criptografia em dois arquivos.
+async function definirSenhaDashboard(numeroWhatsapp, senhaHash) {
+  const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
+  const sheets = getSheetsClient();
+
+  await garantirAbaComCabecalho(sheets, spreadsheetId);
+
+  const resposta = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${ABA_CLIENTES}!A2:C` });
+  const linhas = resposta.data.values || [];
+  const alvo = (numeroWhatsapp || '').trim();
+  const linha = linhas.find((l) => (l[0] || '').trim() === alvo);
+
+  if (!linha) return false;
+
+  const sheetId = (linha[2] || '').trim();
+  if (!sheetId) return false;
+
+  await atualizarColunaPorSheetId('H', sheetId, senhaHash);
+  return true;
+}
+
+// Grava o ID da pasta do cliente no Drive em TODAS as linhas que apontam pro mesmo Sheet_ID
+// (16/09/2026, ver garantirPastaCliente em documentos-grandes.js) — mais de um número/linha pode
+// levar à MESMA planilha (ex.: Valmir Tomé + o número comercial "Valmir Tomé (Sirlene)", ou os
+// vários números de teste do Aroldo), então a pasta no Drive também deve ser UMA SÓ, não uma por
+// linha/número, mesmo que a busca tenha sido disparada por só uma delas.
+async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
+  return atualizarColunaPorSheetId('I', sheetId, pastaDriveId);
+}
+
 module.exports = {
   listarClientesAtivos,
   buscarClientePorNumero,
@@ -357,7 +332,6 @@ module.exports = {
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
   definirSenhaDashboard,
-  definirPastaDriveCliente,
   definirPastaDriveClientePorSheetId,
   getDriveClient,
 };
