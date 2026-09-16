@@ -11,6 +11,23 @@ const sheets = require('../sheets');
 const { reconciliar, sincronizarConciliacao } = require('../reconciliacao');
 const { listarClientesAtivos } = require('../clientes');
 
+// Retry com backoff (16/09/2026) — mesmo padrão de scripts/proteger-planilhas-clientes.js e do
+// comRetryTransiente novo em server.js. Esse script faz várias leituras/escritas em sequência por
+// planilha (registrarOrfaos escreve 1 por órfão, sincronizarConciliacaoNaPlanilha lê tudo de novo)
+// — sem isso, cliente com histórico grande pode bater na cota "Read requests per minute per user"
+// do Google Sheets no meio da correção (achado real ao rodar pra todos os clientes).
+async function comRetry(fn, tentativas = 5) {
+  for (let i = 0; i < tentativas; i += 1) {
+    try { return await fn(); } catch (e) {
+      const transiente = /429|500|502|503|504|ECONNRESET|ETIMEDOUT|socket hang up|quota/i.test(e.message || '');
+      if (!transiente || i === tentativas - 1) throw e;
+      const espera = 3000 * (2 ** i);
+      console.log(`  retry após erro transiente (${e.message.slice(0, 70)}) -> aguardando ${espera}ms`);
+      await new Promise((r) => setTimeout(r, espera));
+    }
+  }
+}
+
 const RE_TARIFA = /\btarifa|cesta\s+de\s+servi[çc]|pacote\s+de\s+servi[çc]|manuten[çc][ãa]o\s+de\s+conta|tar\s+(ted|doc|pix|pacote)|\biof\b|anuidade|taxa\s+de\s+manuten|c\/c\s+tarifa/i;
 const RE_RENDIMENTO = /rendimento|rend\s+pago|remunera[çc][ãa]o|juros\s+s\/?\s*saldo|juros\s+sobre\s+saldo|aplica[çc][ãa]o\s+autom.*rendiment|resgate.*rendiment/i;
 const RE_TRANSF_MESMO_TITULAR = /transf(er[êe]ncia)?\s+entre\s+contas|mesma\s+titularidade|entre\s+contas\s+propri|aplica[çc][ãa]o\s+autom(?!.*rendiment)|resgate\s+autom(?!.*rendiment)|aplica[çc][ãa]o\s+financeira|resgate\s+de\s+aplica/i;
@@ -49,7 +66,7 @@ async function registrarOrfaos(sheetId, lancamentos, extratoTotal) {
   const registrados = [];
   for (const transacao of orfasUnicas) {
     const auto = classificarTransacaoBancaria(transacao);
-    const ref = await sheets.salvarComprovante(sheetId, {
+    const ref = await comRetry(() => sheets.salvarComprovante(sheetId, {
       data: transacao.data,
       hora: '',
       valor: transacao.valor,
@@ -64,7 +81,7 @@ async function registrarOrfaos(sheetId, lancamentos, extratoTotal) {
       observacao_conciliacao: auto
         ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
         : 'Lançado via extrato/fatura. Comprovante original pendente.',
-    });
+    }));
     registrados.push({ transacao, ref, auto: !!auto });
   }
   return registrados;
@@ -72,8 +89,8 @@ async function registrarOrfaos(sheetId, lancamentos, extratoTotal) {
 
 async function sincronizarConciliacaoNaPlanilha(sheetId) {
   const [lancamentos, extrato] = await Promise.all([
-    sheets.buscarTodosLancamentos(sheetId),
-    sheets.buscarExtrato(sheetId),
+    comRetry(() => sheets.buscarTodosLancamentos(sheetId)),
+    comRetry(() => sheets.buscarExtrato(sheetId)),
   ]);
   const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
   const atualizacoes = lancamentos
@@ -84,15 +101,15 @@ async function sincronizarConciliacaoNaPlanilha(sheetId) {
     .filter(({ status, statusAnterior }) => status !== statusAnterior)
     .map(({ aba, linha, status, observacao }) => ({ aba, linha, status, observacao }));
 
-  await sheets.atualizarStatusConciliacaoEmLote(sheetId, atualizacoes);
+  await comRetry(() => sheets.atualizarStatusConciliacaoEmLote(sheetId, atualizacoes));
   return atualizacoes;
 }
 
 async function corrigirPlanilha(sheetId, rotulo) {
   console.log(`\n=== ${rotulo} (${sheetId}) ===`);
   const [lancamentosAntes, extrato] = await Promise.all([
-    sheets.buscarTodosLancamentos(sheetId),
-    sheets.buscarExtrato(sheetId),
+    comRetry(() => sheets.buscarTodosLancamentos(sheetId)),
+    comRetry(() => sheets.buscarExtrato(sheetId)),
   ]);
   console.log(`Antes: ${lancamentosAntes.length} lançamentos, ${extrato.length} transações no extrato.`);
 

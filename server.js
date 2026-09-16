@@ -3244,13 +3244,22 @@ app.post('/webhook-asaas', async (req, res) => {
       await enviarTemplateWhatsApp(numero, TEMPLATE_BOAS_VINDAS.nome, TEMPLATE_BOAS_VINDAS.idioma, [assinatura.nome || 'cliente'])
         .catch((erro) => console.error('Falha ao mandar template de boas-vindas pro cliente novo:', erro.message));
 
+      // Link pra criar a senha do painel web JÁ na ativação (16/09/2026, pedido do Aroldo) — em vez
+      // de senha padrão (previsível, risco de segurança), reaproveita o MESMO mecanismo de
+      // "esqueci minha senha" (criarTokenReset, ver dashboard.js) como primeiro acesso: o cliente
+      // define a própria senha direto pelo link, ninguém mais fica sabendo qual é. Token de 30min
+      // (mesmo TTL do fluxo de esquecimento) — se expirar antes de clicar, "esqueci minha senha" na
+      // tela de login gera um novo a qualquer momento, por isso a mensagem já avisa disso.
+      const tokenSenha = criarTokenReset(numero);
+      const linkSenha = `https://pocket.interali.com.br/dashboard/redefinir-senha?token=${tokenSenha}`;
+
       // Detalhe do plano/upsell Especialista — best-effort, texto livre. Só chega de fato se já
       // existir uma janela de 24h aberta com esse número (ex.: cliente mandou mensagem antes de
       // pagar); caso contrário falha silenciosamente, sem prejuízo — o essencial (ativação + como
       // usar o bot) já foi garantido pelo template acima.
       await enviarMensagemWhatsApp(
         numero,
-        `🎉 Pagamento confirmado! Seu plano: ${assinatura.plano}.${linhaReuniao}`
+        `🎉 Pagamento confirmado! Seu plano: ${assinatura.plano}.${linhaReuniao}\n\n🔐 Crie a senha do seu Painel Interali Pocket — consulte relatórios, DRE e evolução financeira pelo navegador, quando quiser:\n${linkSenha}\n\n(Link válido por 30 minutos. Se expirar, é só clicar em "Esqueci minha senha" na tela de login.)`
       ).catch(() => {});
     }
 
