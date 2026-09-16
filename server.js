@@ -1918,24 +1918,6 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     return;
   }
 
-  // Documento pesado (PDF de várias páginas) que é claramente extrato ou fatura/boleto/cartão —
-  // 16/09/2026 (pedido do Aroldo, caso real: fatura da PortoBank da Sirlene virando só o total
-  // consolidado por cortar na leitura de uma vez só). Em vez de tentar ler agora (com risco de
-  // cortar) ou perguntar "total ou itens?", guarda o arquivo original no Drive (pasta do cliente,
-  // organizada por mês) e devolve pro cliente na hora — a leitura de verdade, em blocos de página,
-  // sem pressa de responder rápido, acontece depois via /tarefas/processar-documentos-pendentes
-  // (ver processarDocumentoPesadoPendente). Só entra aqui quando JÁ HÁ sinal de extrato/fatura —
-  // documento extenso SEM nenhuma pista (nem legenda, nem nome de arquivo, nem conteúdo) continua
-  // caindo no resumo automático mais abaixo, comportamento que já existia antes disso.
-  if (extenso && mimeType === 'application/pdf') {
-    const ehExtrato = sinal.includes('extrato');
-    const ehFatura = sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart');
-    if (ehExtrato || ehFatura) {
-      await salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, ehExtrato ? 'extrato' : 'fatura');
-      return;
-    }
-  }
-
   // Módulo "Comércio com Cupom Térmico e Matriz de Fornecedores" (23/08/2026) — SÓ pra
   // cliente.tipo === 'COMERCIO_MATRIZ' (cliente-piloto: Mysael), isolado de propósito, zero
   // impacto nos clientes do plano padrão. Checado ANTES do fallback genérico de comprovante único,
@@ -1970,6 +1952,26 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   if (!/\b(extrato|fatura|cart[ãa]o|boleto|pagar|vend|sistema|pdv|receber|cobran[çc]a)\b/.test(sinal) && conteudoPareceExtratoBancario(buffer, mimeType)) {
     console.log('Conteúdo do PDF reconhecido como extrato bancário (sem pista textual) — roteando pra extrato.');
     sinal = `${sinal} extrato`.trim();
+  }
+
+  // Documento pesado (PDF de várias páginas) que é claramente extrato ou fatura/boleto/cartão —
+  // 16/09/2026 (pedido do Aroldo, caso real: fatura da PortoBank da Sirlene virando só o total
+  // consolidado por cortar na leitura de uma vez só). Em vez de tentar ler agora (com risco de
+  // cortar) ou perguntar "total ou itens?", guarda o arquivo original no Drive (pasta do cliente,
+  // organizada por mês) e devolve pro cliente na hora — a leitura de verdade, em blocos de página,
+  // sem pressa de responder rápido, acontece depois via /tarefas/processar-documentos-pendentes
+  // (ver processarDocumentoPesadoPendente). Checado só AQUI (depois do sniff de conteúdo acima,
+  // não antes) — precisa ser DEPOIS pra pegar também o extrato sem legenda nenhuma que só é
+  // reconhecido pelo conteúdo do PDF; documento extenso que MESMO ASSIM não bate com nenhum sinal
+  // (nem legenda, nem nome de arquivo, nem conteúdo — provavelmente nem é extrato/fatura) continua
+  // caindo no resumo automático mais abaixo, comportamento que já existia antes disso.
+  if (extenso && mimeType === 'application/pdf') {
+    const ehExtrato = sinal.includes('extrato');
+    const ehFatura = sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart');
+    if (ehExtrato || ehFatura) {
+      await salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, ehExtrato ? 'extrato' : 'fatura');
+      return;
+    }
   }
 
   if (sinal.includes('extrato')) {
