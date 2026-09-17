@@ -223,7 +223,10 @@ async function extrairContasAPagarDeBuffer(fileBuffer, mediaType) {
     'Extraia as contas a pagar deste boleto/fatura seguindo o formato JSON definido.'
   );
   const resultado = extrairJSON(texto);
-  return resultado.contas || [];
+  // 17/09/2026 (caso real: fatura do Bradesco sem "cartão + banco" na legenda) — banco_emissor
+  // devolvido junto das contas, não só descartado, pra processarFaturaItemizada (server.js) poder
+  // usar como fallback quando a legenda do cliente não disser o nome do banco.
+  return { contas: resultado.contas || [], banco_emissor: resultado.banco_emissor || null };
 }
 
 // Conta a RECEBER a partir de foto/PDF (nota fiscal emitida, contrato, venda parcelada) — ver

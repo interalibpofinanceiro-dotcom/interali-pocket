@@ -286,6 +286,7 @@ const PROMPT_CONTA_A_PAGAR = `Você é um especialista em leitura de boletos e f
 Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (sem texto adicional, sem markdown, sem explicações), seguindo exatamente esta estrutura:
 
 {
+  "banco_emissor": "nome do banco/emissor do cartão, lido do cabeçalho, logotipo ou nome do arquivo/documento (ex.: 'Nubank', 'Itaú', 'Bradesco') — SE for fatura de cartão de crédito. Use null se for um boleto comum (sem emissor de cartão) ou se genuinamente não der pra identificar — nunca invente.",
   "contas": [
     {
       "vencimento": "YYYY-MM-DD",
@@ -310,6 +311,7 @@ ${listaParaPrompt()}
 ${REGRAS_CATEGORIZACAO_DINAMICA}
 
 REGRAS:
+- "banco_emissor" (17/09/2026, caso real: fatura curta do Bradesco, 1 página, sem "cartão + banco" na legenda — o cliente só escreveu "Fatura" — e o nome do arquivo também não ajudava; a mensagem de confirmação saiu com "Cartão/Banco: não identificado" mesmo a fatura sendo claramente do Bradesco no cabeçalho): preencha lendo o documento, é a fonte mais confiável, não dependa só da legenda do cliente.
 - Se for um BOLETO único: retorne um único item em "contas".
 - Se for uma FATURA DE CARTÃO DE CRÉDITO com vários lançamentos: retorne um item por lançamento da fatura atual, todos com o mesmo "vencimento" (a data de vencimento desta fatura). Classifique CADA UM individualmente pelo nome do estabelecimento.
 - Se algum lançamento da fatura indicar parcelamento (ex.: "3/12"), preencha "parcela_atual" e "parcela_total" com esses números; caso contrário, use null nos dois.

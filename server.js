@@ -1809,8 +1809,11 @@ async function registrarContasAPagarProcessadas(remetente, sheetId, contas, cart
 // documento curto (não extenso) ou quando o cliente pede explicitamente o detalhe depois da
 // escolha "total"/"itens" (ver PENDENCIAS_ESCOLHA_FATURA).
 async function processarFaturaItemizada(remetente, cliente, sheetId, buffer, mimeType, legendaLower, opts = {}) {
-  const contas = await extrairContasAPagarDeBuffer(buffer, mimeType);
-  const cartao = extrairNomeCartao(legendaLower);
+  const { contas, banco_emissor: bancoEmissor } = await extrairContasAPagarDeBuffer(buffer, mimeType);
+  // 17/09/2026 (caso real: fatura do Bradesco sem "cartão + banco" na legenda, cliente só escreveu
+  // "Fatura") — legenda continua tendo prioridade quando o cliente se dá o trabalho de escrever,
+  // mas agora cai pro que a IA leu no cabeçalho/logo do documento em vez de virar "não identificado".
+  const cartao = extrairNomeCartao(legendaLower) || bancoEmissor;
 
   console.log(`Contas a pagar processadas: ${contas.length} conta(s)${cartao ? ` | cartão: ${cartao}` : ''}`);
 
@@ -2880,18 +2883,22 @@ async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo) {
   }
 
   let vencimentoPadrao = null;
+  let bancoEmissor = null;
   let acumulado = [];
   for (const bloco of blocos) {
-    const contas = await extrairContasAPagarDeBuffer(bloco, 'application/pdf');
+    const { contas, banco_emissor: bancoDoBloco } = await extrairContasAPagarDeBuffer(bloco, 'application/pdf');
     if (!vencimentoPadrao) {
       const primeiroComVencimento = contas.find((c) => c.vencimento);
       if (primeiroComVencimento) vencimentoPadrao = primeiroComVencimento.vencimento;
     }
+    // Banco normalmente só aparece no cabeçalho, ou seja, só no 1º bloco — mesmo padrão de
+    // contaBancaria pro extrato, alguns parágrafos acima (17/09/2026).
+    if (!bancoEmissor && bancoDoBloco) bancoEmissor = bancoDoBloco;
     acumulado = acumulado.concat(contas);
   }
   if (vencimentoPadrao) acumulado.forEach((c) => { if (!c.vencimento) c.vencimento = vencimentoPadrao; });
 
-  await registrarContasAPagarProcessadas(cliente.numeroWhatsapp, cliente.sheetId, acumulado, null);
+  await registrarContasAPagarProcessadas(cliente.numeroWhatsapp, cliente.sheetId, acumulado, bancoEmissor);
 }
 
 // Retoma UM documento pesado que ficou esperando no Drive (ex.: processamento imediato falhou por
