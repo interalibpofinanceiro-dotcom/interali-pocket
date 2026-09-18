@@ -1530,6 +1530,20 @@ function documentoPareceExtenso(buffer, mimeType) {
   return false;
 }
 
+// Imagem "extensa" (18/09/2026, pedido do Aroldo: "tem fatura que tem senha [no PDF], aí o
+// cliente manda print") — um print/foto de fatura densa (muitos lançamentos) corre o mesmo risco
+// de cortar (RespostaCortadaError) que um PDF grande, mas foto não tem "página" pra contar, então
+// usa só tamanho de arquivo — e só quando o SINAL já indica fatura/boleto/cartão/extrato, pra não
+// desviar uma foto comum de comprovante único (que pode pesar bastante só pela resolução da
+// câmera, sem ter conteúdo denso) pro caminho de documento pesado sem necessidade.
+const LIMITE_BYTES_IMAGEM_PROVAVEL_EXTENSA = 800 * 1024;
+
+function imagemPareceExtensa(buffer, mimeType, sinal) {
+  if (!mimeType.startsWith('image/')) return false;
+  if (!/\b(extrato|fatura|boleto|cart[ãa]o|pagar)\b/.test(sinal)) return false;
+  return buffer.length > LIMITE_BYTES_IMAGEM_PROVAVEL_EXTENSA;
+}
+
 // Detecta estrutura de EXTRATO BANCÁRIO pelo CONTEÚDO do PDF (23/08/2026, caso real: extrato do
 // Cora com nome de arquivo tipo "silvana-rosa-vicente-..._01082026_a_31082026.pdf" — sem a palavra
 // "extrato" nem na legenda nem no nome do arquivo, então nem inferirPistaPorNomeArquivo nem a
@@ -1908,7 +1922,7 @@ async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId
   // o admin que o Drive está com problema (isso não deveria acontecer no dia a dia depois da
   // autorização OAuth; se acontecer, é sinal de token revogado ou instabilidade de rede real).
   try {
-    await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
+    await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeType);
   } catch (erro) {
     console.error(`Falha ao processar documento pesado (${tipoAlvo}):`, erro.message);
     await enviarMensagemWhatsApp(remetente, `Ops, tive um problema pra terminar de processar seu ${tipoAlvo === 'extrato' ? 'extrato' : 'documento'}. Já estou olhando isso, te aviso assim que resolver.`).catch(() => {});
@@ -1937,7 +1951,7 @@ async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId
 async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo, legenda }) {
   const legendaLower = (legenda || '').toLowerCase();
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
-  const extenso = documentoPareceExtenso(buffer, mimeType);
+  const extenso = documentoPareceExtenso(buffer, mimeType) || imagemPareceExtensa(buffer, mimeType, sinal);
   const semLegendaExplicita = !legendaLower.trim();
 
   // OFX/CSV (16/09/2026, pedido do Aroldo) — extrato/fatura em formato estruturado, não em
@@ -2021,7 +2035,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
   // reconhecido pelo conteúdo do PDF; documento extenso que MESMO ASSIM não bate com nenhum sinal
   // (nem legenda, nem nome de arquivo, nem conteúdo — provavelmente nem é extrato/fatura) continua
   // caindo no resumo automático mais abaixo, comportamento que já existia antes disso.
-  if (extenso && mimeType === 'application/pdf') {
+  if (extenso && (mimeType === 'application/pdf' || mimeType.startsWith('image/'))) {
     const ehExtrato = sinal.includes('extrato');
     const ehFatura = sinal.includes('boleto') || sinal.includes('fatura') || sinal.includes('pagar') || sinal.includes('cart');
     if (ehExtrato || ehFatura) {
@@ -2170,6 +2184,14 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   // o detalhe item a item (ver PENDENCIAS_ESCOLHA_FATURA e requisito 4 do pedido do Aroldo, 17/08/2026).
   const erroFaturaAutorresolvido = error.name === 'RespostaCortadaError' && pareceFatura && !jaEraExtrato && contexto.buffer;
 
+  // 18/09/2026 (caso real: fatura da Sirlene mandada como FOTO, sem legenda NENHUMA — nem
+  // "fatura" nem "extrato") — nem pareceFatura nem jaEraExtrato batem (os dois dependem só da
+  // legenda), então caía direto no erro genérico de "tente de novo", sem nenhum caminho — a
+  // mensagem crua que assustou o Aroldo. Sem sinal nenhum, PERGUNTA em vez de assumir (assumir
+  // fatura errado faria "total" gravar uma fatura fictícia pra um extrato de verdade).
+  const semSinalNenhum = contexto && contexto.tipoMidia && !jaEraExtrato && !pareceFatura;
+  const erroSemSinalAutorresolvido = error.name === 'RespostaCortadaError' && semSinalNenhum && contexto.buffer;
+
   // RespostaCortadaError num EXTRATO, mesmo já com max_tokens elevado pra 32000 (ver
   // extrairExtratoDeBuffer em index.js) — caso real: cliente Sirlene, extrato cortando
   // repetidamente mesmo com a legenda certa (19/08/2026). O produto promete "manda uma vez,
@@ -2177,6 +2199,23 @@ async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   // nem "manda em partes"). É tratado 100% automático: grava o resumo/saldo em segundo plano (ver
   // processarExtratoComoResumo) e escala pro admin resolver manualmente.
   const erroExtratoAutorresolvido = error.name === 'RespostaCortadaError' && jaEraExtrato && contexto.buffer;
+
+  if (erroSemSinalAutorresolvido) {
+    PENDENCIAS_ESCOLHA_FATURA.set(remetente, {
+      buffer: contexto.buffer,
+      mimeType: contexto.mimeType,
+      legendaLower,
+      criadoEm: Date.now(),
+      tipoDesconhecido: true,
+    });
+    await enviarMensagemWhatsApp(
+      remetente,
+      'Recebi seu documento, mas ele tem mais informação do que consigo processar de uma vez — e não tinha como saber pela mensagem se é uma *fatura de cartão de crédito* ou um *extrato bancário*.\n\n' +
+      'Pode me dizer qual dos dois é? Responde "fatura" ou "extrato".'
+    ).catch(() => {});
+    console.log(`Erro autorresolvido (sem sinal nenhum de tipo, cliente recebeu escolha fatura/extrato) — sem avisar admin: ${remetente} — ${error.message}`);
+    return;
+  }
 
   if (erroFaturaAutorresolvido) {
     PENDENCIAS_ESCOLHA_FATURA.set(remetente, {
@@ -2422,6 +2461,29 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
 
       if (!expirouEscolha) {
         const escolha = (interpretado.texto || '').toLowerCase();
+
+        // 18/09/2026 — quando nem sabíamos se era fatura ou extrato (ver erroSemSinalAutorresolvido
+        // em tratarErroProcessamento), a primeira resposta do cliente escolhe o TIPO, não
+        // "total"/"itens" ainda — só depois de saber que é fatura essa escolha faz sentido.
+        if (pendenciaEscolha.tipoDesconhecido) {
+          if (/extrato/.test(escolha)) {
+            await processarMidiaRecebida(remetente, cliente, sheetId, {
+              buffer: pendenciaEscolha.buffer, mimeType: pendenciaEscolha.mimeType, nomeArquivo: null, legenda: 'extrato',
+            }).catch((erro) => tratarErroProcessamento(remetente, cliente, { tipoMidia: 'document', legenda: 'extrato', buffer: pendenciaEscolha.buffer, mimeType: pendenciaEscolha.mimeType }, erro));
+            return;
+          }
+          if (/fatura|cart[ãa]o|boleto/.test(escolha)) {
+            PENDENCIAS_ESCOLHA_FATURA.set(remetente, { ...pendenciaEscolha, tipoDesconhecido: false, criadoEm: Date.now() });
+            await enviarMensagemWhatsApp(
+              remetente,
+              'Entendido! Quer que eu registre só o *valor total* (rápido, sem detalhar item por item), ou prefere que eu *tente ler os itens*?\n\nResponde "total" ou "itens".'
+            );
+            return;
+          }
+          PENDENCIAS_ESCOLHA_FATURA.set(remetente, pendenciaEscolha);
+          await enviarMensagemWhatsApp(remetente, 'Não entendi — responde "fatura" ou "extrato" pra eu saber que tipo de documento é. 🙂');
+          return;
+        }
 
         if (/total/.test(escolha)) {
           await processarFaturaComoResumo(remetente, cliente, sheetId, pendenciaEscolha.buffer, pendenciaEscolha.mimeType, pendenciaEscolha.legendaLower)
@@ -2864,16 +2926,22 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
 // que precisar sem risco de reenvio por timeout. `vencimento` (fatura) e `banco_conta` (extrato)
 // normalmente só aparecem no cabeçalho do documento, ou seja, só no 1º bloco — itens dos blocos
 // seguintes que vierem sem esse campo herdam do 1º bloco que tiver o valor.
-async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo) {
-  const blocos = await dividirPdfEmBlocos(buffer);
+// `mimeType` (18/09/2026) — imagem "extensa" (print de fatura com senha, ver imagemPareceExtensa)
+// entra aqui também, mas não tem página pra dividir: vira um único "bloco" (o buffer inteiro),
+// lido com o mimeType real em vez do 'application/pdf' fixo que só valia quando só PDF passava
+// por aqui. PDF continua exatamente igual (divide em blocos de página, cada um lido como PDF).
+async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeType = 'application/pdf') {
+  const ehPdf = mimeType === 'application/pdf';
+  const blocos = ehPdf ? await dividirPdfEmBlocos(buffer) : [buffer];
+  const mediaTypeBloco = ehPdf ? 'application/pdf' : mimeType;
 
-  console.log(`Processando documento pesado (${tipoAlvo}, ${blocos.length} bloco(s) de página) — ${cliente.nome}.`);
+  console.log(`Processando documento pesado (${tipoAlvo}, ${blocos.length} bloco(s)${ehPdf ? ' de página' : ' — imagem única, sem divisão'}) — ${cliente.nome}.`);
 
   if (tipoAlvo === 'extrato') {
     let contaBancaria = '';
     let acumulado = [];
     for (const bloco of blocos) {
-      const resultado = await extrairExtratoDeBuffer(bloco, 'application/pdf');
+      const resultado = await extrairExtratoDeBuffer(bloco, mediaTypeBloco);
       if (!contaBancaria && resultado.banco_conta) contaBancaria = resultado.banco_conta;
       acumulado = acumulado.concat(resultado.transacoes);
     }
@@ -2886,7 +2954,7 @@ async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo) {
   let bancoEmissor = null;
   let acumulado = [];
   for (const bloco of blocos) {
-    const { contas, banco_emissor: bancoDoBloco } = await extrairContasAPagarDeBuffer(bloco, 'application/pdf');
+    const { contas, banco_emissor: bancoDoBloco } = await extrairContasAPagarDeBuffer(bloco, mediaTypeBloco);
     if (!vencimentoPadrao) {
       const primeiroComVencimento = contas.find((c) => c.vencimento);
       if (primeiroComVencimento) vencimentoPadrao = primeiroComVencimento.vencimento;
@@ -2921,7 +2989,7 @@ async function processarDocumentoPesadoPendente(cliente, arquivo) {
     return;
   }
 
-  await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo);
+  await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, arquivo.mimeType);
 }
 
 // Varre a pasta de todos os clientes ativos procurando documento pesado ainda não lido (ver

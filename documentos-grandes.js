@@ -116,8 +116,13 @@ async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOri
   const competencia = new Date().toISOString().slice(0, 7); // "AAAA-MM"
   const pastaMes = await garantirPastaMes(pastaCliente, competencia);
 
+  // 18/09/2026 — foto (imagem extensa, ver imagemPareceExtensa em server.js) chega sem nome de
+  // arquivo (WhatsApp não manda nome pra foto, só pra documento) — extensão certa em vez de
+  // ".bin" genérico, só cosmético (organização de quem abre o Drive manualmente), sem efeito no
+  // processamento (que já usa o mimeType real, não a extensão).
+  const EXTENSAO_POR_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
   const drive = getDriveClientPessoal();
-  const nome = nomeArquivoOriginal || `documento-${Date.now()}.${mimeType === 'application/pdf' ? 'pdf' : 'bin'}`;
+  const nome = nomeArquivoOriginal || `documento-${Date.now()}.${EXTENSAO_POR_MIME[mimeType] || 'bin'}`;
 
   const resposta = await drive.files.create({
     requestBody: {
