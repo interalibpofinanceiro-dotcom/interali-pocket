@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Meu Painel — Interali Pocket</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+<!-- 02/10/2026: cdnjs passou a responder 404 pro Chart.js 4.4.4 — sem a lib, o painel inteiro
+     quebrava e mostrava "verifique sua internet". Mesma versão, servida pelo jsDelivr. -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script>
   tailwind.config = {
     theme: {
@@ -94,7 +96,10 @@
     );
   }
 
+  // Gráfico é enfeite: se a lib não carregou (CDN fora), o resto do painel continua aparecendo
+  // em vez de cair no erro genérico (02/10/2026, caso real: painel da Sirlene "sem internet").
   function montarGrafico(canvasId, labels, datasets) {
+    if (typeof Chart === 'undefined') return;
     var ctx = document.getElementById(canvasId).getContext('2d');
     new Chart(ctx, {
       type: 'line',
@@ -161,6 +166,7 @@
   }
 
   function montarGraficoBarras(canvasId, labels, valores) {
+    if (typeof Chart === 'undefined') return;
     var ctx = document.getElementById(canvasId).getContext('2d');
     new Chart(ctx, {
       type: 'bar',
@@ -333,10 +339,15 @@
       if (d.tipo === 'COMERCIO_MATRIZ') renderizarComercio(d);
       else renderizarPadrao(d);
     })
-    .catch(function () {
+    .catch(function (erro) {
+      // Só culpa a internet quando é de fato falha de rede (fetch rejeita com TypeError e o
+      // navegador está offline); erro de montagem da tela não é culpa da conexão do cliente.
+      console.error(erro);
       document.getElementById('carregando').classList.add('hidden');
       var erroEl = document.getElementById('erro');
-      erroEl.textContent = 'Não consegui me conectar agora. Verifique sua internet e recarregue a página.';
+      erroEl.textContent = navigator.onLine === false
+        ? 'Não consegui me conectar agora. Verifique sua internet e recarregue a página.'
+        : 'Tive um problema pra exibir seus dados agora. Recarregue a página — se continuar, avise o suporte.';
       erroEl.classList.remove('hidden');
     });
 })();
