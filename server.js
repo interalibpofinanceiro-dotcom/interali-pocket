@@ -40,6 +40,7 @@ const {
   removerLinha,
   competenciaDe,
   normalizarDataISO,
+  paraDataBR,
   getSheetsClient,
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
@@ -1342,6 +1343,36 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
   // 14/10/2026 — o que as regras determinísticas não pegam vai pra IA em UM lote por extrato (antes
   // tudo caía em "Não Classificado" e a DRE ficava sem valor). Falha da IA nunca trava o registro:
   // segue como antes, não classificado.
+  // Recorrente confirmado pelo extrato (14/10/2026, caso real do Aroldo: "recebo 1500 da Raízes todo
+  // dia 25" lançado no dia 25 + o Pix real que caiu dia 29 virou OUTRO lançamento — receita contada 2x).
+  // Transação do extrato com mesmo valor e mesmo sentido de um lançamento RECORRENTE ainda não
+  // conciliado, até 10 dias de distância -> não cria órfão: ajusta a data do recorrente pra data real
+  // do banco e concilia.
+  const MARCA_RECORRENTE = 'Lançado automaticamente (despesa/receita fixa recorrente).';
+  const recorrentesAbertos = lancamentos.filter((l) => (l.observacoes || '').includes(MARCA_RECORRENTE) && !/CONCILIADO/.test(l.status_conciliacao || ''));
+  const confirmacoes = [];
+  const orfasSemRecorrente = orfasUnicas.filter((t) => {
+    const idx = recorrentesAbertos.findIndex((l) => (l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida') === (t.tipo === 'entrada' ? 'entrada' : 'saida')
+      && Math.abs((l.valor || 0) - (t.valor || 0)) < 0.02
+      && Math.abs(new Date(`${l.data}T00:00:00`) - new Date(`${t.data}T00:00:00`)) <= 10 * 86400000);
+    if (idx === -1) return true;
+    confirmacoes.push({ l: recorrentesAbertos[idx], t });
+    recorrentesAbertos.splice(idx, 1);
+    return false;
+  });
+  if (confirmacoes.length) {
+    const data = [];
+    for (const { l, t } of confirmacoes) {
+      data.push({ range: `'${l.aba}'!A${l.linha}`, values: [[paraDataBR(t.data)]] });
+      data.push({ range: `'${l.aba}'!N${l.linha}:P${l.linha}`, values: [[t.conta_bancaria || l.conta_bancaria || '', 'CONCILIADO_OK', `Recorrente confirmado pelo extrato (previsto ${paraDataBR(l.data)}, caiu ${paraDataBR(t.data)}).`]] });
+    }
+    await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'USER_ENTERED', data } }))
+      .then(() => console.log(`Extrato confirmou ${confirmacoes.length} lançamento(s) recorrente(s) — sem duplicar.`))
+      .catch((erro) => console.error('Falha ao confirmar recorrente pelo extrato:', erro.message));
+  }
+  orfasUnicas.length = 0;
+  orfasUnicas.push(...orfasSemRecorrente);
+
   // Ordem: regra bancária fixa -> memória do cliente (o que o especialista já classificou pra essa
   // mesma loja/pessoa, ver memoria-cliente.js) -> IA (com os exemplos do especialista no prompt).
   const memoria = aprenderPorContraparte(lancamentos);
