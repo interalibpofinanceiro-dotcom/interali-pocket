@@ -1279,12 +1279,13 @@ async function comRetryTransiente(fn, tentativas = 4) {
 
 async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, extratoAtual) {
   await comRetryTransiente(async () => {
-    const [lancamentos, extrato] = await Promise.all([
+    const [lancamentos, extrato, contasAPagar] = await Promise.all([
       lancamentosExistentes || buscarTodosLancamentos(sheetId),
       extratoAtual || buscarExtrato(sheetId),
+      buscarContasAPagar(sheetId).catch(() => []), // itens de fatura — concilia compra no crédito (14/10/2026)
     ]);
 
-    const statusPorLinha = sincronizarConciliacao(lancamentos, extrato);
+    const statusPorLinha = sincronizarConciliacao(lancamentos, extrato, contasAPagar);
     const atualizacoes = lancamentos
       .map((lancamento) => {
         const novo = statusPorLinha.get(lancamento.chave || lancamento.linha) || { status: 'Pendente', observacao: '' };

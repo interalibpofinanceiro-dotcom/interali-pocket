@@ -76,6 +76,42 @@ function formatarDataBR(strData) {
 // válida pro mesmo lançamento (ex.: duas saídas de R$50 no mesmo dia), escolher a "melhor" por
 // pontuação seria um palpite, não uma conciliação de verdade — o par vem marcado com `ambiguo: true`
 // pra virar PENDENTE_DUVIDA em vez de CONCILIADO_OK (ver sincronizarConciliacao).
+// Desempate de candidatos (14/10/2026, caso real do Aroldo: Pix de R$10 na Cora em 16/09 tinha par
+// EXATO no extrato da Cora no mesmo dia, mas virou PENDENTE_DUVIDA porque havia outros R$10 no BB em
+// 17/09 e na Cora em 04/09). Antes de declarar ambiguidade, filtra em sequência: mesmo banco, mesma
+// data, descrição com palavra em comum. Se algum filtro deixa exatamente 1, não é ambíguo.
+const BANCOS_CONHECIDOS = ['cora', 'brasil', 'bradesco', 'itau', 'itaú', 'nubank', 'inter', 'sicoob', 'sicredi', 'santander', 'caixa', 'c6', 'mercado pago', 'pagbank', 'pagseguro', 'stone', 'picpay', 'xp', 'btg'];
+function chaveBanco(texto) {
+  const t = String(texto || '').toLowerCase();
+  const achado = BANCOS_CONHECIDOS.find((b) => t.includes(b));
+  return achado ? achado.replace('itaú', 'itau') : null;
+}
+// Palavras de "jargão bancário" não provam nada (caso real: "Venda QR Code Pix" casava com "Pgto QR
+// Code Pix LUCINEI" só pela palavra "code").
+const PALAVRAS_GENERICAS = new Set(['code', 'pagamento', 'pgto', 'transf', 'transferencia', 'enviado', 'enviada', 'recebido', 'recebida', 'compra', 'cartao', 'venda', 'debito', 'credito', 'conta', 'banco', 'instituicao', 'pagar', 'ltda', 'comercio', 'estabelecimento']);
+function palavrasEmComum(a, b) {
+  const util = (p) => p.length >= 4 && !PALAVRAS_GENERICAS.has(p);
+  const pa = new Set(normalizarTexto(a).split(/\s+/).filter(util));
+  return normalizarTexto(b).split(/\s+/).filter((p) => util(p) && pa.has(p)).length;
+}
+function desempatarCandidatos(lancamento, candidatos, extratoDisponivel) {
+  if (candidatos.length <= 1) return candidatos;
+  const bancoL = chaveBanco(lancamento.conta_bancaria);
+  const textoL = `${lancamento.estabelecimento_ou_pessoa || ''} ${lancamento.descricao || ''}`;
+  const filtros = [
+    (c) => bancoL && chaveBanco(extratoDisponivel[c.indice].conta_bancaria) === bancoL,
+    (c) => (extratoDisponivel[c.indice].data || '') === (lancamento.data || ''),
+    (c) => palavrasEmComum(textoL, extratoDisponivel[c.indice].descricao) > 0,
+  ];
+  let atuais = candidatos;
+  for (const filtro of filtros) {
+    const restantes = atuais.filter(filtro);
+    if (restantes.length === 1) return restantes;
+    if (restantes.length > 1) atuais = restantes;
+  }
+  return atuais;
+}
+
 function reconciliar(lancamentos, extrato) {
   const extratoDisponivel = extrato.map((transacao) => ({ ...transacao, usado: false }));
   const conciliados = [];
@@ -125,6 +161,8 @@ function reconciliar(lancamentos, extrato) {
       if (candidatos.length > 0) divergencia = extratoDisponivel[candidatos[0].indice].valor - lancamento.valor;
     }
 
+    candidatos = desempatarCandidatos(lancamento, candidatos, extratoDisponivel);
+
     if (candidatos.length > 0) {
       const indice = candidatos[0].indice;
       // Ambíguo = existe mais de 1 candidato válido, ou seja, a escolha do "melhor" seria um
@@ -172,7 +210,52 @@ function reconciliar(lancamentos, extrato) {
 // mapearLancamento em sheets.js) com fallback pra `lancamento.linha` (dado que não veio do
 // buscarTodosLancamentos novo). Quem grava de volta (sincronizarConciliacaoNaPlanilha em
 // server.js) traduz a chave -> { aba, linha } real.
-function sincronizarConciliacao(lancamentos, extrato) {
+// Compra no CARTÃO DE CRÉDITO não aparece no extrato do banco — aparece na FATURA (itens lidos da
+// fatura e gravados em Contas a Pagar, com `cartao`). 14/10/2026, pedido do Aroldo: "diz que é cartão
+// de crédito, mas precisa conciliar". Casa 1-para-1: mesmo valor (ou valor da parcela), vencimento da
+// fatura entre a data da compra e 60 dias depois; desempate por palavra em comum com o beneficiário.
+// Pagamento em DINHEIRO não passa por banco nenhum — conciliado "em espécie" (não fica pendente pra sempre).
+const JANELA_FATURA_DIAS = 60;
+function conciliarSemExtrato(lancamentosRestantes, contasAPagar = []) {
+  const itensFatura = (contasAPagar || [])
+    .filter((c) => c.cartao && c.valor)
+    .map((c) => ({ ...c, usado: false }));
+  const porFatura = [];
+  const emEspecie = [];
+  const restantes = [];
+
+  for (const l of lancamentosRestantes) {
+    const forma = String(l.forma_pagamento || '').toLowerCase();
+    if (l.tipo_movimentacao !== 'entrada' && forma === 'dinheiro') { emEspecie.push(l); continue; }
+    if (l.tipo_movimentacao === 'entrada' || !/credito|crédito/.test(forma)) { restantes.push(l); continue; }
+
+    const dataCompra = paraData(l.data);
+    const candidatos = itensFatura.filter((item) => {
+      if (item.usado || !dataCompra) return false;
+      const venc = paraData(item.vencimento);
+      if (!venc) return false;
+      const dias = (venc - dataCompra) / 86400000;
+      if (dias < -3 || dias > JANELA_FATURA_DIAS) return false;
+      const parcelas = Number(item.parcela_total) || 1;
+      return Math.abs(item.valor - l.valor) < 0.02 || (parcelas > 1 && Math.abs(item.valor * parcelas - l.valor) < 0.05);
+    });
+    let escolhidos = candidatos;
+    if (escolhidos.length > 1) {
+      const texto = `${l.estabelecimento_ou_pessoa || ''} ${l.descricao || ''}`;
+      const comPalavra = escolhidos.filter((i) => palavrasEmComum(texto, `${i.beneficiario || ''} ${i.descricao || ''}`) > 0);
+      if (comPalavra.length >= 1) escolhidos = comPalavra;
+    }
+    if (escolhidos.length >= 1) {
+      escolhidos[0].usado = true;
+      porFatura.push({ lancamento: l, item: escolhidos[0], ambiguo: escolhidos.length > 1 });
+    } else {
+      restantes.push(l);
+    }
+  }
+  return { porFatura, emEspecie, restantes };
+}
+
+function sincronizarConciliacao(lancamentos, extrato, contasAPagar = []) {
   const { conciliados, somenteNosComprovantes, agrupamentosPorTransacao, agrupamentosPorComprovante } = reconciliar(lancamentos, extrato);
   const statusPorLinha = new Map();
   const chaveDe = (l) => l.chave || l.linha;
@@ -199,7 +282,15 @@ function sincronizarConciliacao(lancamentos, extrato) {
       statusPorLinha.set(chaveDe(lancamento), { status: 'CONCILIADO_OK', observacao });
     }
   }
-  for (const lancamento of somenteNosComprovantes) {
+  const semExtrato = conciliarSemExtrato(somenteNosComprovantes, contasAPagar);
+  for (const { lancamento, item } of semExtrato.porFatura) {
+    statusPorLinha.set(chaveDe(lancamento), { status: 'CONCILIADO_OK', observacao: `Conciliado com a fatura do cartão ${item.cartao} (venc. ${formatarDataBR(item.vencimento)}) — ${item.beneficiario || item.descricao || ''}`.trim() });
+  }
+  for (const lancamento of semExtrato.emEspecie) {
+    statusPorLinha.set(chaveDe(lancamento), { status: 'CONCILIADO_OK', observacao: 'Pago em dinheiro (espécie) — não passa por conta bancária.' });
+  }
+
+  for (const lancamento of semExtrato.restantes) {
     if (lancamento.status_conciliacao === 'PENDENTE_COMPROVANTE') {
       statusPorLinha.set(chaveDe(lancamento), { status: 'PENDENTE_COMPROVANTE', observacao: lancamento.observacao_conciliacao || 'Lançado via extrato/fatura. Comprovante original pendente.' });
     } else {
@@ -1153,10 +1244,15 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     };
   }
 
-  const { conciliados, somenteNoExtrato, somenteNosComprovantes, agrupamentosPorTransacao, agrupamentosPorComprovante } = reconciliar(lancamentosMes, extratoMes);
+  const { conciliados, somenteNoExtrato, somenteNosComprovantes: semParNoExtrato, agrupamentosPorTransacao, agrupamentosPorComprovante } = reconciliar(lancamentosMes, extratoMes);
+  // 14/10/2026 — compra no crédito conciliada com a fatura e pagamento em dinheiro contam como
+  // conciliados (antes ficavam "não conciliados" pra sempre, mesmo estando certos).
+  const semExtrato = conciliarSemExtrato(semParNoExtrato, contasAPagar);
+  const somenteNosComprovantes = semExtrato.restantes;
   const qtdAgrupamentos = agrupamentosPorTransacao.length + agrupamentosPorComprovante.length;
-  const totalConciliavel = conciliados.length + qtdAgrupamentos + somenteNosComprovantes.length;
-  const pctConciliado = totalConciliavel > 0 ? Math.round(((conciliados.length + qtdAgrupamentos) / totalConciliavel) * 100) : 0;
+  const qtdSemExtrato = semExtrato.porFatura.length + semExtrato.emEspecie.length;
+  const totalConciliavel = conciliados.length + qtdAgrupamentos + qtdSemExtrato + somenteNosComprovantes.length;
+  const pctConciliado = totalConciliavel > 0 ? Math.round(((conciliados.length + qtdAgrupamentos + qtdSemExtrato) / totalConciliavel) * 100) : 0;
   const provaDosSaldos = calcularProvaDosSaldos(extratoMes);
 
   const pendentesComprovante = lancamentosMes.filter((l) => l.status_conciliacao === 'PENDENTE_COMPROVANTE');
@@ -1191,7 +1287,9 @@ function gerarFechamento(lancamentos, extrato, contasAPagar, opcoes = {}) {
     qtdLancamentos: lancamentosMes.length,
     qtdTransacoesExtrato: extratoMes.length,
     pctConciliado,
-    conciliados: conciliados.length,
+    conciliados: conciliados.length + qtdSemExtrato,
+    conciliadosComFatura: semExtrato.porFatura.length,
+    pagosEmEspecie: semExtrato.emEspecie.length,
     qtdAgrupamentos,
     naoConciliados: somenteNosComprovantes.length,
     somenteNoExtrato: somenteNoExtrato.length,
