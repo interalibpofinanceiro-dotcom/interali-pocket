@@ -131,7 +131,9 @@ function formatarMoedaSimples(valor) {
 function gerarLinhaDeLeitura(resumoMes, comparacaoMesAnterior) {
   if (!resumoMes) return '';
   const positivo = resumoMes.resultado >= 0;
-  let texto = `Resultado do mês ${positivo ? 'positivo' : 'negativo'} em ${formatarMoedaSimples(resumoMes.resultado)}`;
+  // "Caixa", não "resultado" (14/10/2026): é entradas − saídas da conta, inclui aporte e transferência;
+  // o resultado do negócio é o card da DRE — os dois não podem ter o mesmo nome na mesma tela.
+  let texto = `Caixa do mês ${positivo ? 'positivo' : 'negativo'} em ${formatarMoedaSimples(resumoMes.resultado)}`;
 
   if (comparacaoMesAnterior && Math.abs(comparacaoMesAnterior.diferenca) > 0.01) {
     const { diferenca, percentual } = comparacaoMesAnterior;
@@ -154,14 +156,26 @@ function verificarConsistenciaDashboard(resumoMes) {
   return { consistente: diferenca <= 0.02, diferenca };
 }
 
-async function montarDadosDashboardPadrao(cliente) {
+// `mes` = "AAAA-MM" opcional (14/10/2026 — seletor de mês do painel, pra revisar um mês já
+// passado/fechado; antes os cards mostravam sempre o mês corrente e confundiam a revisão do
+// fechamento). Mês passado usa o último dia dele como referência; mês corrente usa hoje.
+function referenciaDoMes(mes) {
+  const m = /^(\d{4})-(\d{2})$/.exec(mes || '');
+  if (!m) return new Date();
+  const fimDoMes = new Date(Number(m[1]), Number(m[2]), 0);
+  const hoje = new Date();
+  return fimDoMes < hoje ? fimDoMes : hoje;
+}
+
+async function montarDadosDashboardPadrao(cliente, { mes } = {}) {
   const [lancamentos, extrato, contasAPagar] = await Promise.all([
     buscarTodosLancamentos(cliente.sheetId),
     buscarExtrato(cliente.sheetId),
     buscarContasAPagar(cliente.sheetId),
   ]);
 
-  const resumoMes = gerarResumo(lancamentos, extrato, { periodo: 'mes' });
+  const referencia = referenciaDoMes(mes);
+  const resumoMes = gerarResumo(lancamentos, extrato, { periodo: 'mes', referencia });
   const saldoAtual = obterSaldoAtual(extrato);
   const contasEmAberto = filtrarContasEmAberto(contasAPagar, lancamentos).slice(0, 10);
 
@@ -169,7 +183,7 @@ async function montarDadosDashboardPadrao(cliente) {
   // disponíveis; o extrato é opcional, nem todo cliente manda com frequência).
   const serieMap = new Map();
   for (let i = 29; i >= 0; i--) {
-    const d = new Date();
+    const d = new Date(referencia);
     d.setDate(d.getDate() - i);
     serieMap.set(d.toISOString().slice(0, 10), { entradas: 0, saidas: 0 });
   }
@@ -184,6 +198,7 @@ async function montarDadosDashboardPadrao(cliente) {
   return {
     tipo: 'PADRAO',
     nome: cliente.nome,
+    mesReferencia: `${referencia.getFullYear()}-${String(referencia.getMonth() + 1).padStart(2, '0')}`,
     saldoAtual,
     resumoMes: resumoMes.totaisAtuais,
     comparacaoMesAnterior: resumoMes.comparacao,
@@ -193,16 +208,16 @@ async function montarDadosDashboardPadrao(cliente) {
     linhaDeLeitura: gerarLinhaDeLeitura(resumoMes.totaisAtuais, resumoMes.comparacao),
     consistencia: verificarConsistenciaDashboard(resumoMes.totaisAtuais),
     // 14/10/2026 — DRE do ano no padrão OMIE (mesma fonte da aba "DRE <ano>" da planilha).
-    dreAnual: montarDreAnual(lancamentos),
+    dreAnual: montarDreAnual(lancamentos, referencia.getFullYear()),
   };
 }
 
-async function montarDadosDashboard(cliente) {
+async function montarDadosDashboard(cliente, opcoes = {}) {
   if (cliente.tipo === 'COMERCIO_MATRIZ') {
     const resumoComercio = await buscarResumoComercio(cliente.sheetId, { dias: 30 });
     return { tipo: 'COMERCIO_MATRIZ', nome: cliente.nome, ...resumoComercio };
   }
-  return montarDadosDashboardPadrao(cliente);
+  return montarDadosDashboardPadrao(cliente, opcoes);
 }
 
 module.exports = {

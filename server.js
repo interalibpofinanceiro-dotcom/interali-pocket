@@ -3413,7 +3413,11 @@ app.get('/dashboard', exigirSessaoDashboard, (_req, res) => {
 
 app.get('/api/dashboard/dados', exigirSessaoDashboard, async (req, res) => {
   try {
-    const dados = await montarDadosDashboard(req.sessaoDashboard);
+    // ?mes=AAAA-MM (seletor de mês do painel) + sem cache: o painel é sempre leitura ao vivo da
+    // planilha (14/10/2026 — Aroldo achou que o painel "não atualizou" depois de corrigir setembro).
+    const mes = /^\d{4}-\d{2}$/.test(String(req.query.mes || '')) ? String(req.query.mes) : undefined;
+    const dados = await montarDadosDashboard(req.sessaoDashboard, { mes });
+    res.set('Cache-Control', 'no-store');
     res.json({ ok: true, dados });
   } catch (error) {
     console.error('Erro ao montar dados do dashboard:', error.message);

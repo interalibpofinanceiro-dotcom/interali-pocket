@@ -116,6 +116,44 @@
     });
   }
 
+  // Seletor de mês (14/10/2026) — os cards, o gráfico e as categorias seguem o mês escolhido
+  // (padrão: mês atual). Troca recarrega com ?mes=AAAA-MM: link compartilhável e sem estado escondido.
+  var NOMES_MES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  function rotuloMes(aaaamm) {
+    var m = /^(\d{4})-(\d{2})$/.exec(aaaamm || '');
+    return m ? NOMES_MES[Number(m[2]) - 1] + '/' + m[1] : 'mês';
+  }
+  // Últimos 12 meses (pedido do Aroldo: "manter pelo menos 6 meses" — 12 custa o mesmo, os dados
+  // já são lidos inteiros da planilha a cada acesso, e permite comparar com o mesmo mês do ano anterior).
+  window.trocarMesPainel = function (valor) { window.location.search = '?mes=' + valor; };
+  function seletorMes(d) {
+    var hoje = new Date();
+    var opcoes = [];
+    for (var i = 0; i < 12; i++) {
+      var dt = new Date(hoje.getFullYear(), hoje.getMonth() - i, 1);
+      var valor = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0');
+      opcoes.push('<option value="' + valor + '"' + (valor === d.mesReferencia ? ' selected' : '') + '>' + rotuloMes(valor) + '</option>');
+    }
+    return '<div class="flex items-center gap-3 text-sm"><label for="seletor-mes" class="text-slate-400">Mês:</label>' +
+      '<select id="seletor-mes" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5" onchange="trocarMesPainel(this.value)">' +
+      opcoes.join('') + '</select></div>';
+  }
+
+  // Card principal = Lucro/Prejuízo da DRE do mês (14/10/2026). Antes era entradas − saídas do
+  // caixa, que soma aporte do sócio e transferência entre contas como se fosse resultado — caso
+  // real: setembro do Aroldo mostrava "+R$ 3.622" no card e "−R$ 4.029" na DRE, na mesma tela.
+  function cardResultadoDre(d, compTexto) {
+    var dre = d.dreAnual;
+    var m = /^(\d{4})-(\d{2})$/.exec(d.mesReferencia || '');
+    var i = m ? Number(m[2]) - 1 : -1;
+    var valor = (dre && m && Number(m[1]) === dre.ano && dre.totalGeral.valores[i] !== null) ? dre.totalGeral.valores[i] : null;
+    if (valor === null) {
+      return card('Resultado do caixa · ' + rotuloMes(d.mesReferencia), formatarMoeda(d.resumoMes.resultado), d.resumoMes.resultado >= 0 ? CORES.green : CORES.red, compTexto);
+    }
+    var caixa = 'caixa do mês: ' + formatarMoeda(d.resumoMes.resultado);
+    return card((valor >= 0 ? 'Lucro' : 'Prejuízo') + ' (DRE) · ' + rotuloMes(d.mesReferencia), formatarMoeda(valor), valor >= 0 ? CORES.green : CORES.red, caixa);
+  }
+
   function renderizarPadrao(d) {
     var comp = d.comparacaoMesAnterior;
     var compTexto = '';
@@ -126,9 +164,9 @@
 
     var cards =
       card('Saldo Atual', formatarMoeda(d.saldoAtual), null) +
-      card('Entradas (mês)', formatarMoeda(d.resumoMes.entradas), CORES.green) +
-      card('Saídas (mês)', formatarMoeda(d.resumoMes.saidas), CORES.red) +
-      card('Resultado (mês)', formatarMoeda(d.resumoMes.resultado), d.resumoMes.resultado >= 0 ? CORES.green : CORES.red, compTexto);
+      card('Entrou na conta · ' + rotuloMes(d.mesReferencia), formatarMoeda(d.resumoMes.entradas), CORES.green, 'caixa — inclui aportes e transferências') +
+      card('Saiu da conta · ' + rotuloMes(d.mesReferencia), formatarMoeda(d.resumoMes.saidas), CORES.red, 'caixa — inclui transferências entre contas') +
+      cardResultadoDre(d, compTexto);
 
     // topCategorias vem como pares [categoria, valor] (calcularTopCategorias em reconciliacao.js) —
     // antes lia c.categoria/c.total e o painel mostrava "undefined R$ 0,00" (achado em 14/10/2026).
@@ -154,6 +192,7 @@
       : '';
 
     document.getElementById('conteudo').innerHTML =
+      seletorMes(d) +
       avisoConsistencia + linhaLeitura +
       '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
       secao('Fluxo de caixa — últimos 30 dias', '<div class="card"><canvas id="grafico-fluxo" height="90"></canvas></div>') +
@@ -389,7 +428,8 @@
     if (ranking.length > 0) montarGraficoBarras('grafico-ranking', labelsRanking, valoresRanking);
   }
 
-  fetch('/api/dashboard/dados')
+  var mesUrl = (/[?&]mes=(\d{4}-\d{2})/.exec(window.location.search) || [])[1];
+  fetch('/api/dashboard/dados' + (mesUrl ? '?mes=' + mesUrl : ''), { cache: 'no-store' })
     .then(function (r) { return r.json().then(function (d) { return { status: r.status, dados: d }; }); })
     .then(function (r) {
       if (r.status === 401) { window.location.href = '/dashboard/login'; return; }
