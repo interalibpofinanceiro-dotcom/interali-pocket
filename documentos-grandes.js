@@ -111,7 +111,11 @@ async function garantirPastaMes(pastaClienteId, competencia) {
 // histórico) na pasta do mês do cliente. `appProperties.status` é o que marca "ainda não lido" —
 // ver listarDocumentosPendentes/marcarStatusArquivo. Usa busca por appProperties (não por nome de
 // arquivo ou subpasta) pra achar pendências depois, então não precisa varrer pasta por pasta.
-async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOriginal, tipoAlvo) {
+// `extras` (14/10/2026, OFX/CSV também passou a ser guardado e lido depois): `formato` garante a
+// extensão certa quando o WhatsApp não manda nome de arquivo (a leitura posterior reconhece OFX/CSV
+// pela extensão), `contaBancaria` preserva a conta escrita na legenda ("extrato BB setembro"), que
+// senão se perderia até o cron ler o arquivo.
+async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOriginal, tipoAlvo, extras = {}) {
   const pastaCliente = await garantirPastaCliente(cliente);
   const competencia = new Date().toISOString().slice(0, 7); // "AAAA-MM"
   const pastaMes = await garantirPastaMes(pastaCliente, competencia);
@@ -122,7 +126,7 @@ async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOri
   // processamento (que já usa o mimeType real, não a extensão).
   const EXTENSAO_POR_MIME = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
   const drive = getDriveClientPessoal();
-  const nome = nomeArquivoOriginal || `documento-${Date.now()}.${EXTENSAO_POR_MIME[mimeType] || 'bin'}`;
+  const nome = nomeArquivoOriginal || `documento-${Date.now()}.${extras.formato || EXTENSAO_POR_MIME[mimeType] || 'bin'}`;
 
   const resposta = await drive.files.create({
     requestBody: {
@@ -132,6 +136,7 @@ async function salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivoOri
         status: 'aguardando',
         tipoAlvo, // 'extrato' | 'fatura'
         numeroWhatsapp: cliente.numeroWhatsapp,
+        ...(extras.contaBancaria ? { contaBancaria: String(extras.contaBancaria).slice(0, 80) } : {}),
       },
     },
     media: { mimeType, body: Readable.from(buffer) },
@@ -277,8 +282,35 @@ function campoOfx(bloco, tag) {
 // OFX pode vir em SGML antigo (tag sem fechamento, ex. "<DTPOSTED>20260901000000") ou XML novo
 // (com fechamento, "<DTPOSTED>20260901</DTPOSTED>") — campoOfx lida com os dois porque só lê até
 // o próximo "<" ou fim de linha, não depende da tag de fechamento existir.
+// Codificação (14/10/2026, caso real: OFX do Banco do Brasil em UTF-8 lido como latin1 virava
+// "CobranÃ§a"/"CartÃ£o" na planilha). Tenta UTF-8 primeiro; se o arquivo não for UTF-8 válido
+// (aparece o caractere de substituição), é o OFX antigo em CHARSET 1252/latin1.
+function decodificarOfx(buffer) {
+  const utf8 = buffer.toString('utf8');
+  return utf8.includes('�') ? buffer.toString('latin1') : utf8;
+}
+
+// Descrição = NAME + MEMO quando os dois existem e são diferentes. No BB, NAME é genérico ("Compra
+// com Cartão", "Pix - Recebido") e o MEMO traz quem/onde ("12/09 14:22 SUPERMERCADO X") — usar só
+// o NAME deixava a classificação contábil sem pista nenhuma.
+function descricaoOfx(bloco) {
+  const nome = campoOfx(bloco, 'NAME');
+  const memo = campoOfx(bloco, 'MEMO');
+  if (nome && memo && !nome.toLowerCase().includes(memo.toLowerCase()) && !memo.toLowerCase().includes(nome.toLowerCase())) {
+    return `${nome} - ${memo}`;
+  }
+  return (memo.length > nome.length ? memo : nome) || '';
+}
+
+const NOME_BANCO_POR_CODIGO = {
+  '001': 'Banco do Brasil', '033': 'Santander', '077': 'Banco Inter', '104': 'Caixa', '208': 'BTG Pactual',
+  '212': 'Banco Original', '237': 'Bradesco', '260': 'Nubank', '290': 'PagBank', '323': 'Mercado Pago',
+  '336': 'C6 Bank', '341': 'Itaú', '380': 'PicPay', '403': 'Cora', '422': 'Safra', '748': 'Sicredi',
+  '756': 'Sicoob', '197': 'Stone', '655': 'Neon', '102': 'XP',
+};
+
 function parseOFX(buffer) {
-  const texto = buffer.toString('latin1');
+  const texto = decodificarOfx(buffer);
   const blocosTransacao = texto.match(/<STMTTRN>[\s\S]*?(?=<STMTTRN>|<\/BANKTRANLIST>|<\/CCSTMTRS>|$)/gi) || [];
 
   const transacoes = blocosTransacao
@@ -286,7 +318,7 @@ function parseOFX(buffer) {
       const dataRaw = campoOfx(bloco, 'DTPOSTED');
       const data = dataRaw.length >= 8 ? `${dataRaw.slice(0, 4)}-${dataRaw.slice(4, 6)}-${dataRaw.slice(6, 8)}` : null;
       const valorRaw = parseFloat(campoOfx(bloco, 'TRNAMT').replace(',', '.'));
-      const descricao = campoOfx(bloco, 'NAME') || campoOfx(bloco, 'MEMO') || '';
+      const descricao = descricaoOfx(bloco);
 
       return {
         data,
@@ -299,7 +331,9 @@ function parseOFX(buffer) {
     .filter((t) => t.data && !Number.isNaN(t.valor));
 
   const bancoMatch = texto.match(/<ORG>([^<\r\n]*)/i) || texto.match(/<BANKID>([^<\r\n]*)/i);
-  const contaBancaria = bancoMatch ? bancoMatch[1].trim() : null;
+  const bruto = bancoMatch ? bancoMatch[1].trim() : null;
+  // BANKID vem como código COMPE ("001") — traduz pros bancos mais comuns (14/10/2026).
+  const contaBancaria = bruto ? (NOME_BANCO_POR_CODIGO[bruto.replace(/^0+(?=\d{3})/, '').padStart(3, '0')] || bruto) : null;
 
   return { transacoes, contaBancaria };
 }

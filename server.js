@@ -1998,8 +1998,27 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
       return;
     }
 
-    console.log(`${formatoArquivo.toUpperCase()} processado direto (sem IA): ${resultado.transacoes.length} transação(ões).`);
     const contaBancaria = extrairNomeConta(legendaLower) || resultado.contaBancaria || '';
+
+    // 14/10/2026 (pedido do Aroldo: "subir o arquivo OFX igual o PDF e deixar pra fazer a leitura
+    // depois") — o arquivo já foi validado acima (tem transação, formato reconhecido), então só
+    // guarda no Drive e deixa o lançamento pro cron de documentos pendentes (a cada 30min). Caso
+    // real que motivou: OFX do BB com 70 transações lido na hora estourou a cota de leitura por
+    // minuto do Google Sheets no meio do registro. Se o Drive falhar, cai no processamento imediato
+    // de antes — o cliente nunca fica sem o extrato lançado.
+    try {
+      await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, 'extrato', { formato: formatoArquivo, contaBancaria });
+      console.log(`${formatoArquivo.toUpperCase()} guardado no Drive pra leitura posterior: ${resultado.transacoes.length} transação(ões) — ${cliente ? cliente.nome : remetente}.`);
+      await enviarMensagemWhatsApp(
+        remetente,
+        `📄 Recebi seu extrato${contaBancaria ? ` (${contaBancaria})` : ''} com ${resultado.transacoes.length} movimentações. Já guardei o arquivo na sua pasta e vou lançar e conciliar tudo nos próximos minutos — te aviso por aqui quando terminar. Não precisa fazer nada.`
+      ).catch(() => {});
+      return;
+    } catch (erro) {
+      console.error(`Falha ao guardar ${formatoArquivo.toUpperCase()} no Drive — processando na hora como rede de segurança:`, erro.message);
+    }
+
+    console.log(`${formatoArquivo.toUpperCase()} processado direto (sem IA): ${resultado.transacoes.length} transação(ões).`);
     const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: contaBancaria }));
     await registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas);
     return;
@@ -3032,7 +3051,8 @@ async function processarDocumentoPesadoPendente(cliente, arquivo) {
   const formato = tipoDoArquivo(arquivo.name, arquivo.mimeType);
   if (formato === 'ofx' || formato === 'csv') {
     const resultado = formato === 'ofx' ? parseOFX(buffer) : parseCSV(buffer);
-    const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: resultado.contaBancaria || '' }));
+    const conta = (arquivo.appProperties && arquivo.appProperties.contaBancaria) || resultado.contaBancaria || '';
+    const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: conta }));
     await registrarTransacoesDeExtrato(cliente.numeroWhatsapp, cliente.sheetId, transacoesBrutas);
     return;
   }
