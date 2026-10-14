@@ -1412,7 +1412,8 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
     const fixa = classificarTransacaoBancaria(t);
     if (fixa) return fixa;
     const lembrada = sugerirPelaMemoria(memoria, t);
-    return lembrada ? { ...lembrada, subcategoria: 'Pela memória do cliente (classificação anterior do especialista)' } : null;
+    // 14/10/2026: origem vai em Fonte_Categoria, NUNCA em Subcategoria (coluna de trabalho do especialista).
+    return lembrada ? { ...lembrada, fonte: 'memoria_cliente' } : null; // categoria + subcategoria do especialista
   });
   const paraIA = orfasUnicas.filter((_, i) => !deterministicas[i]);
   const porIA = paraIA.length
@@ -1429,7 +1430,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
     if (!auto) {
       const ia = porIA[iIA++];
       if (ia && ia.grupo_dre !== 'nao_classificado' && ia.confianca !== 'baixa') {
-        classificacao = { categoria: ia.categoria, subcategoria: 'Classificado por IA (extrato)', grupo_dre: ia.grupo_dre };
+        classificacao = { categoria: ia.categoria, subcategoria: '', grupo_dre: ia.grupo_dre, fonte: 'ia_extrato' };
         if (CHAVES_SEM_COMPROVANTE.includes(ia.grupo_dre)) auto = classificacao;
       }
     }
@@ -1444,6 +1445,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
       categoria: classificacao ? classificacao.categoria : 'Não Classificado',
       subcategoria: classificacao ? classificacao.subcategoria : '',
       grupo_dre: classificacao ? classificacao.grupo_dre : 'nao_classificado',
+      fonte_categoria: classificacao ? (classificacao.fonte || 'regra_bancaria') : '',
       // 09/09/2026 — antes ficava sempre vazio pra lançamento órfão (não tinha imagem nem legenda
       // própria pro Claude ler); agora herda do extrato de onde a transação veio (ver banco_conta).
       conta_bancaria: transacao.conta_bancaria || '',
@@ -1463,29 +1465,39 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
 // controle (Fechamento do cliente + Fechamentos da mestre), manda o resumo em texto e o PDF.
 // Reescreve a aba "DRE <ano>" (padrão OMIE, ver dre-anual.js) da planilha do cliente. Sempre
 // best-effort: quem chama nunca deve falhar por causa disso.
-// Categoria escrita pelo especialista num lançamento ainda sem grupo contábil -> preenche o Grupo_DRE
-// (14/10/2026, processo de BPO do Aroldo: o especialista mexe SÓ na Categoria). Ordem: "Retirada do
-// titular" (fixa) -> mesma categoria já usada no cliente -> mesma contraparte -> IA com a categoria
-// como pista principal. Nunca sobrescreve um Grupo_DRE que já é válido.
-async function preencherGrupoPelaCategoria(cliente) {
+// O especialista é a autoridade da categorização; o Pocket traduz pra DRE e aprende (14/10/2026,
+// pedido do Aroldo: "o Pocket precisa compreender as categorizações dele, juntar com a
+// especialização do Pocket e gravar — assim vamos melhorando"). Roda todo dia antes de reescrever a
+// aba DRE. Três casos:
+//   1. EDITADO pelo especialista — a Categoria da planilha ficou diferente da que o Pocket gravou
+//      (Fonte_Categoria = "origem|categoria do Pocket"): o Grupo_DRE é RECALCULADO a partir da
+//      categoria + subcategoria dele, mesmo que já tivesse grupo (é o especialista mandando).
+//   2. SEM GRUPO — categoria escrita num lançamento ainda "nao_classificado": preenche o grupo.
+//   3. LINHA ANTIGA (sem registro do Pocket) — só passa a ser acompanhada a partir de agora.
+// Tradução categoria -> grupo: "Retirada do titular" (fixa) -> mesma categoria+subcategoria já
+// usada por ELE neste cliente -> IA com a categoria/subcategoria dele como pista principal e os
+// exemplos do próprio especialista no prompt. Em todos os casos grava "especialista|categoria" em
+// Fonte_Categoria — é isso que alimenta a memória (memoria-cliente.js) pros próximos lançamentos.
+async function sincronizarComEspecialista(cliente) {
   const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
-  const alvo = lancamentos.filter((l) => l.categoria && l.categoria !== 'Não Classificado'
-    && (!l.grupo_dre || l.grupo_dre === 'nao_classificado' || !porChave(l.grupo_dre)));
-  if (!alvo.length) return 0;
+  const valida = (l) => l.categoria && l.categoria !== 'Não Classificado';
+  const editados = lancamentos.filter((l) => valida(l) && l.categoria_pocket !== null && l.categoria.trim() !== String(l.categoria_pocket).trim());
+  const semGrupo = lancamentos.filter((l) => valida(l) && !editados.includes(l) && (!l.grupo_dre || l.grupo_dre === 'nao_classificado' || !porChave(l.grupo_dre)));
+  const legado = lancamentos.filter((l) => l.categoria_pocket === null && l.data);
 
-  const porCategoria = aprenderPorCategoria(lancamentos);
-  const porContraparte = aprenderPorContraparte(lancamentos);
+  // Exemplos e memória priorizam o que o ESPECIALISTA confirmou.
+  const doEspecialista = lancamentos.filter((l) => l.fonte_categoria === 'especialista');
+  const base = doEspecialista.length ? [...doEspecialista, ...lancamentos.filter((l) => l.fonte_categoria !== 'especialista')] : lancamentos;
+  const porCategoria = aprenderPorCategoria(doEspecialista);
+  const exemplos = exemplosParaIA(base);
+
   const definidos = new Map();
   const paraIA = [];
-  for (const l of alvo) {
+  for (const l of [...editados, ...semGrupo]) {
     const tipo = l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida';
     let grupo = null;
     if (tipo === 'saida' && /^retirada do titular/i.test(l.categoria.trim())) grupo = 'pessoal_prolabore';
-    if (!grupo) grupo = porCategoria.get(`${tipo}|${normalizarMemoria(l.categoria)}`) || null;
-    if (!grupo) {
-      const m = sugerirPelaMemoria(porContraparte, { tipo, descricao: l.estabelecimento_ou_pessoa || l.descricao });
-      if (m) grupo = m.grupo_dre;
-    }
+    if (!grupo) grupo = porCategoria.get(`${tipo}|${normalizarMemoria(`${l.categoria} ${l.subcategoria || ''}`)}`) || porCategoria.get(`${tipo}|${normalizarMemoria(l.categoria)}`) || null;
     if (grupo) definidos.set(l, grupo);
     else paraIA.push(l);
   }
@@ -1494,22 +1506,32 @@ async function preencherGrupoPelaCategoria(cliente) {
       data: l.data,
       tipo: l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida',
       valor: l.valor,
-      descricao: `CATEGORIA DEFINIDA PELO ESPECIALISTA (vale mais que a descrição): "${l.categoria}" — ${(l.descricao || '').slice(0, 60)}`,
-    })), { nomeCliente: cliente.nome, exemplos: exemplosParaIA(lancamentos) }).catch(() => []);
+      descricao: `CLASSIFICAÇÃO DO ESPECIALISTA (é a autoridade — traduza para a linha da DRE): categoria "${l.categoria}"${l.subcategoria ? `, subcategoria "${l.subcategoria}"` : ''} — extrato: ${(l.descricao || '').slice(0, 60)}`,
+    })), { nomeCliente: cliente.nome, exemplos }).catch(() => []);
     paraIA.forEach((l, i) => {
       const s = sugestoes[i];
       if (s && s.grupo_dre !== 'nao_classificado' && s.confianca !== 'baixa') definidos.set(l, s.grupo_dre);
     });
   }
-  if (!definidos.size) return 0;
-  const data = [...definidos].map(([l, grupo]) => ({ range: `'${l.aba}'!M${l.linha}`, values: [[grupo]] }));
-  await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: cliente.sheetId, requestBody: { valueInputOption: 'RAW', data } }));
-  console.log(`Grupo_DRE preenchido pela categoria do especialista: ${definidos.size} lançamento(s) — ${cliente.nome}.`);
-  return definidos.size;
+
+  const data = [];
+  for (const l of [...editados, ...semGrupo]) {
+    const grupo = definidos.get(l);
+    if (grupo && grupo !== l.grupo_dre) data.push({ range: `'${l.aba}'!M${l.linha}`, values: [[grupo]] });
+    // Mesmo sem conseguir traduzir, registra que a categoria é do especialista (não pergunta de novo amanhã).
+    data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`especialista|${l.categoria}`]] });
+  }
+  for (const l of legado) data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`${l.fonte_categoria || 'legado'}|${l.categoria || ''}`]] });
+  for (let i = 0; i < data.length; i += 500) {
+    await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: cliente.sheetId, requestBody: { valueInputOption: 'RAW', data: data.slice(i, i + 500) } }));
+  }
+  const mudouGrupo = [...definidos].filter(([l, g]) => g !== l.grupo_dre).length;
+  if (editados.length || semGrupo.length) console.log(`Especialista (${cliente.nome}): ${editados.length} categoria(s) editada(s), ${semGrupo.length} sem grupo -> ${mudouGrupo} linha(s) da DRE ajustada(s).`);
+  return { editados: editados.length, semGrupo: semGrupo.length, mudouGrupo, legadoMarcado: legado.length };
 }
 
 async function atualizarAbaDreCliente(cliente, ano = new Date().getFullYear()) {
-  await preencherGrupoPelaCategoria(cliente).catch((erro) => console.error('Falha ao preencher Grupo_DRE pela categoria (segue com a DRE):', erro.message));
+  await sincronizarComEspecialista(cliente).catch((erro) => console.error('Falha ao sincronizar com as categorias do especialista (segue com a DRE):', erro.message));
   const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
   if (!lancamentos.some((l) => (l.data || '').startsWith(String(ano)))) return null;
   return escreverAbaDre(cliente.sheetId, montarDreAnual(lancamentos, ano), cliente.nome);

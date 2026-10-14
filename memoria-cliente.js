@@ -51,7 +51,7 @@ function aprenderPorContraparte(lancamentos) {
       const k = `${tipo}|${chave}`;
       const atual = vistos.get(k);
       if (atual && atual.grupo_dre !== l.grupo_dre) atual.conflito = true;
-      else vistos.set(k, { categoria: l.categoria, grupo_dre: l.grupo_dre, tipo, conflito: atual ? atual.conflito : false });
+      else vistos.set(k, { categoria: l.categoria, subcategoria: l.subcategoria || '', grupo_dre: l.grupo_dre, tipo, conflito: atual ? atual.conflito : false });
     }
   }
   for (const [k, v] of vistos) if (v.conflito) vistos.delete(k);
@@ -63,17 +63,22 @@ function sugerirPelaMemoria(memoria, transacao) {
   const chave = chaveContraparte(transacao.descricao);
   if (!chave) return null;
   const achado = memoria.get(`${tipo}|${chave}`);
-  return achado ? { categoria: achado.categoria, grupo_dre: achado.grupo_dre } : null;
+  return achado ? { categoria: achado.categoria, subcategoria: achado.subcategoria || '', grupo_dre: achado.grupo_dre } : null;
 }
 
 // Map categoria (normalizada) + tipo -> grupo_dre, só quando a categoria é usada sempre com o mesmo grupo.
 function aprenderPorCategoria(lancamentos) {
   const mapa = new Map();
   for (const l of lancamentos.filter(valida)) {
-    const k = `${l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida'}|${normalizar(l.categoria)}`;
-    const atual = mapa.get(k);
-    if (atual && atual !== l.grupo_dre) mapa.set(k, 'CONFLITO');
-    else if (!atual) mapa.set(k, l.grupo_dre);
+    const tipo = l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida';
+    // Categoria sozinha e categoria + subcategoria (o detalhe do especialista desempata).
+    const chaves = [`${tipo}|${normalizar(l.categoria)}`];
+    if (l.subcategoria) chaves.push(`${tipo}|${normalizar(`${l.categoria} ${l.subcategoria}`)}`);
+    for (const k of chaves) {
+      const atual = mapa.get(k);
+      if (atual && atual !== l.grupo_dre) mapa.set(k, 'CONFLITO');
+      else if (!atual) mapa.set(k, l.grupo_dre);
+    }
   }
   for (const [k, v] of mapa) if (v === 'CONFLITO') mapa.delete(k);
   return mapa;
@@ -84,10 +89,11 @@ function exemplosParaIA(lancamentos, limite = 40) {
   const vistos = new Set();
   const exemplos = [];
   for (const l of lancamentos.filter(valida).reverse()) {
-    const k = `${normalizar(l.categoria)}|${l.grupo_dre}`;
+    const k = `${normalizar(l.categoria)}|${normalizar(l.subcategoria || '')}|${l.grupo_dre}`;
     if (vistos.has(k)) continue;
     vistos.add(k);
-    exemplos.push(`"${l.categoria}" (${l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saída'}) -> ${l.grupo_dre}`);
+    const origem = l.fonte_categoria === 'especialista' ? ' [especialista]' : '';
+    exemplos.push(`"${l.categoria}"${l.subcategoria ? ` / "${l.subcategoria}"` : ''} (${l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saída'}) -> ${l.grupo_dre}${origem}`);
     if (exemplos.length >= limite) break;
   }
   return exemplos;

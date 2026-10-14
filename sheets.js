@@ -413,7 +413,10 @@ function linhaLancamento(dados, competencia) {
     dados.razao_social_fornecedor || '',
     dados.cnae_codigo || '',
     dados.cnae_descricao || '',
-    dados.fonte_categoria || '',
+    // 14/10/2026 — "origem|categoria que o Pocket gravou": se depois a Categoria da planilha ficar
+    // diferente, foi o ESPECIALISTA que mudou, e a linha da DRE passa a seguir ele
+    // (sincronizarComEspecialista em server.js).
+    `${dados.fonte_categoria || ''}|${dados.categoria || ''}`,
   ];
 }
 
@@ -479,7 +482,9 @@ function mapearLancamento(linha, aba, competenciaAba, indiceZero) {
     razao_social_fornecedor: linha[18] || '',
     cnae_codigo: linha[19] || '',
     cnae_descricao: linha[20] || '',
-    fonte_categoria: linha[21] || '',
+    fonte_categoria: String(linha[21] || '').split('|')[0],
+    // null = linha antiga, sem registro do que o Pocket gravou (ver linhaLancamento).
+    categoria_pocket: String(linha[21] || '').includes('|') ? String(linha[21]).split('|').slice(1).join('|') : null,
   };
 }
 
