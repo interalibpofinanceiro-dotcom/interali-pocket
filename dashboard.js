@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { montarDreAnual } = require('./dre-anual');
+const { porChave } = require('./dre');
 const crypto = require('crypto');
 const { buscarTodosLancamentos, buscarExtrato, buscarContasAPagar } = require('./sheets');
 const { gerarResumo, obterSaldoAtual, filtrarContasEmAberto } = require('./reconciliacao');
@@ -167,6 +168,65 @@ function referenciaDoMes(mes) {
   return fimDoMes < hoje ? fimDoMes : hoje;
 }
 
+// "De onde veio e pra onde foi o dinheiro" (14/10/2026, pedido do Aroldo: "14 mil é um valor total,
+// preciso enxergar o que foi de cliente, o que foi aporte, o que era de terceiros — o cliente precisa
+// enxergar isso, sendo PF ou PJ"). Agrupa os lançamentos do mês por NATUREZA (a partir do grupo_dre)
+// com a lista de cada um. Mesma fonte da DRE: o lançamento classificado.
+const NATUREZA_ENTRADA = [
+  { id: 'receitas', rotulo: 'Receitas (clientes e vendas)', teste: (g) => g.startsWith('receita_') },
+  { id: 'aportes', rotulo: 'Aportes do titular (dinheiro próprio)', teste: (g) => g === 'aporte_titular' },
+  { id: 'transferencias', rotulo: 'Transferências entre suas contas', teste: (g) => g === 'transferencia_entre_contas' },
+  { id: 'terceiros', rotulo: 'Dinheiro de terceiros (não é seu)', teste: (g) => g === 'repasse_terceiros_entrada' },
+  { id: 'rendimentos', rotulo: 'Rendimentos de aplicações', teste: (g) => g === 'financeiro_rendimentos' },
+];
+const NATUREZA_SAIDA = [
+  { id: 'retiradas', rotulo: 'Retiradas e gastos pessoais do titular', teste: (g) => g === 'pessoal_prolabore' },
+  { id: 'fatura', rotulo: 'Pagamento de fatura de cartão', teste: (g) => g === 'admin_fatura_cartao_consolidada' },
+  { id: 'terceiros', rotulo: 'Repasses a terceiros (dinheiro deles)', teste: (g) => g === 'repasse_terceiros_saida' },
+  { id: 'transferencias', rotulo: 'Transferências entre suas contas', teste: (g) => g === 'transferencia_entre_contas' },
+  { id: 'investimentos', rotulo: 'Investimentos (equipamentos, reformas)', teste: (g) => g === 'investimento_imobilizado' },
+  { id: 'despesas', rotulo: 'Despesas do negócio', teste: (g) => !!porChave(g) && g !== 'nao_classificado' },
+];
+
+function montarComposicaoDoMes(lancamentos, referencia) {
+  const ano = referencia.getFullYear();
+  const mes = String(referencia.getMonth() + 1).padStart(2, '0');
+  const doMes = lancamentos.filter((l) => String(l.data || '').startsWith(`${ano}-${mes}`));
+  const item = (l) => ({
+    data: l.data,
+    descricao: l.categoria && l.categoria !== 'Não Classificado' ? l.categoria : (l.descricao || l.estabelecimento_ou_pessoa || ''),
+    detalhe: l.estabelecimento_ou_pessoa && l.estabelecimento_ou_pessoa !== l.descricao ? l.estabelecimento_ou_pessoa : (l.descricao || ''),
+    valor: Math.round((Number(l.valor) || 0) * 100) / 100,
+    banco: l.conta_bancaria ? String(l.conta_bancaria).split(' - ')[0].replace(/\s+SCFI.*$/, '') : '',
+    credito: /credito|crédito/i.test(l.forma_pagamento || ''),
+  });
+  const montar = (lista, naturezas) => {
+    const grupos = naturezas.map((n) => ({ id: n.id, rotulo: n.rotulo, total: 0, itens: [] }));
+    const aClassificar = { id: 'a_classificar', rotulo: 'A classificar', total: 0, itens: [] };
+    for (const l of lista) {
+      const g = l.grupo_dre && porChave(l.grupo_dre) ? l.grupo_dre : 'nao_classificado';
+      const idx = naturezas.findIndex((n) => n.teste(g));
+      const destino = idx === -1 ? aClassificar : grupos[idx];
+      const it = item(l);
+      it.linhaDre = porChave(g) ? porChave(g).rotulo : '';
+      destino.itens.push(it);
+      destino.total += it.valor;
+    }
+    const todos = [...grupos, aClassificar].filter((g) => g.itens.length);
+    const totalGeral = todos.reduce((s, g) => s + g.total, 0);
+    todos.forEach((g) => {
+      g.total = Math.round(g.total * 100) / 100;
+      g.percentual = totalGeral ? Math.round((g.total / totalGeral) * 1000) / 10 : 0;
+      g.itens.sort((a, b) => String(a.data).localeCompare(String(b.data)));
+    });
+    return { total: Math.round(totalGeral * 100) / 100, grupos: todos };
+  };
+  return {
+    entradas: montar(doMes.filter((l) => l.tipo_movimentacao === 'entrada'), NATUREZA_ENTRADA),
+    saidas: montar(doMes.filter((l) => l.tipo_movimentacao !== 'entrada'), NATUREZA_SAIDA),
+  };
+}
+
 async function montarDadosDashboardPadrao(cliente, { mes } = {}) {
   const [lancamentos, extrato, contasAPagar] = await Promise.all([
     buscarTodosLancamentos(cliente.sheetId),
@@ -209,6 +269,7 @@ async function montarDadosDashboardPadrao(cliente, { mes } = {}) {
     consistencia: verificarConsistenciaDashboard(resumoMes.totaisAtuais),
     // 14/10/2026 — DRE do ano no padrão OMIE (mesma fonte da aba "DRE <ano>" da planilha).
     dreAnual: montarDreAnual(lancamentos, referencia.getFullYear()),
+    composicao: montarComposicaoDoMes(lancamentos, referencia),
   };
 }
 

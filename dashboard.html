@@ -154,6 +154,56 @@
     return card((valor >= 0 ? 'Lucro' : 'Prejuízo') + ' (DRE) · ' + rotuloMes(d.mesReferencia), formatarMoeda(valor), valor >= 0 ? CORES.green : CORES.red, caixa);
   }
 
+  // De onde veio e pra onde foi o dinheiro (14/10/2026) — total do mês aberto por NATUREZA, cada
+  // grupo expansível com os lançamentos. "Despesas do negócio" abre de novo por linha da DRE.
+  function esc(t) { return String(t || '').replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function linhaItem(it) {
+    var data = it.data ? it.data.slice(8, 10) + '/' + it.data.slice(5, 7) : '';
+    var selos = (it.banco ? '<span class="text-slate-500">' + esc(it.banco) + '</span>' : '') +
+      (it.credito ? ' <span class="text-amber-300/80">· cartão de crédito</span>' : '');
+    return '<li class="flex justify-between gap-3 py-1.5 border-b border-slate-700/30 text-sm">' +
+      '<span class="min-w-0"><span class="text-slate-500 mr-2">' + data + '</span>' + esc(it.descricao) +
+        (it.detalhe && it.detalhe !== it.descricao ? '<span class="block text-xs text-slate-500 truncate">' + esc(it.detalhe) + '</span>' : '') +
+        (selos ? '<span class="block text-xs">' + selos + '</span>' : '') +
+      '</span><span class="whitespace-nowrap text-slate-200">' + formatarMoeda(it.valor) + '</span></li>';
+  }
+  function blocoGrupo(g, cor) {
+    var conteudo;
+    if (g.id === 'despesas') {
+      var porLinha = {};
+      g.itens.forEach(function (it) { (porLinha[it.linhaDre] = porLinha[it.linhaDre] || []).push(it); });
+      conteudo = Object.keys(porLinha).map(function (linha) {
+        var itens = porLinha[linha];
+        var total = itens.reduce(function (s, it) { return s + it.valor; }, 0);
+        return { linha: linha, itens: itens, total: total };
+      }).sort(function (a, b) { return b.total - a.total; }).map(function (x) {
+        return '<details class="ml-3 mt-1"><summary class="cursor-pointer flex justify-between text-sm py-1"><span>' + esc(x.linha) + ' <span class="text-slate-500">(' + x.itens.length + ')</span></span><span>' + formatarMoeda(x.total) + '</span></summary>' +
+          '<ul class="ml-3">' + x.itens.map(linhaItem).join('') + '</ul></details>';
+      }).join('');
+    } else {
+      conteudo = '<ul class="ml-3">' + g.itens.map(linhaItem).join('') + '</ul>';
+    }
+    var alerta = g.id === 'a_classificar' ? ' <span class="text-amber-400 text-xs">⚠️ fale com seu especialista</span>' : '';
+    return '<details class="border-b border-slate-700/50 py-2"><summary class="cursor-pointer flex justify-between items-center gap-3">' +
+      '<span class="font-medium">' + esc(g.rotulo) + alerta + ' <span class="text-xs text-slate-500">' + g.percentual + '% · ' + g.itens.length + ' lançamento(s)</span></span>' +
+      '<span class="font-semibold whitespace-nowrap" style="color:' + cor + '">' + formatarMoeda(g.total) + '</span></summary>' + conteudo + '</details>';
+  }
+  function renderizarComposicao(d) {
+    var c = d.composicao;
+    if (!c || (!c.entradas.grupos.length && !c.saidas.grupos.length)) return '';
+    var coluna = function (titulo, lado, cor, nota) {
+      return '<div class="card"><div class="flex justify-between items-baseline mb-2"><h3 class="font-semibold">' + titulo + '</h3>' +
+        '<span class="font-bold" style="color:' + cor + '">' + formatarMoeda(lado.total) + '</span></div>' +
+        '<p class="text-xs text-slate-500 mb-2">' + nota + '</p>' +
+        (lado.grupos.map(function (g) { return blocoGrupo(g, cor); }).join('') || '<p class="text-sm text-slate-500">Nada neste mês.</p>') + '</div>';
+    };
+    return secao('De onde veio e pra onde foi o dinheiro · ' + rotuloMes(d.mesReferencia),
+      '<div class="grid md:grid-cols-2 gap-6">' +
+        coluna('Entradas', c.entradas, CORES.green, 'Toque em cada grupo pra ver os lançamentos.') +
+        coluna('Saídas', c.saidas, CORES.red, 'Inclui compras no cartão de crédito e em dinheiro (não passam pela conta).') +
+      '</div>');
+  }
+
   function renderizarPadrao(d) {
     var comp = d.comparacaoMesAnterior;
     var compTexto = '';
@@ -195,6 +245,7 @@
       seletorMes(d) +
       avisoConsistencia + linhaLeitura +
       '<div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">' + cards + '</div>' +
+      renderizarComposicao(d) +
       secao('Fluxo de caixa — últimos 30 dias', '<div class="card"><canvas id="grafico-fluxo" height="90"></canvas></div>') +
       '<div class="grid md:grid-cols-2 gap-6">' +
         secao('Top categorias de despesa (mês)', '<div class="card">' + categorias + '</div>') +
