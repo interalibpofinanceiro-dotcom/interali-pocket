@@ -92,6 +92,12 @@ const GRUPOS_DRE = [
   // prompts.js (aplicada em PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO e PROMPT_EXTRATO).
   { chave: 'transferencia_entre_contas', bloco: 'TRANSFERENCIA_CONTAS', rotulo: 'Transferência entre Contas do Mesmo Titular (Não Afeta Resultado)' },
 
+  // Bloco à parte (14/10/2026, caso real do Aroldo: Pix de R$250 pela venda PESSOAL de uma barraca
+  // entrou na conta). Dinheiro pessoal do titular entrando na conta — venda de bem pessoal, depósito
+  // de dinheiro próprio, empréstimo do sócio — NÃO é receita da empresa. Mesmo raciocínio dos blocos
+  // acima: nunca entra em total de resultado, só fica marcado.
+  { chave: 'aporte_titular', bloco: 'MOVIMENTACAO_TITULAR', rotulo: 'Aporte / Entrada Pessoal do Titular (Venda de Bem Pessoal, Dinheiro Próprio Depositado — Não é Receita)' },
+
   { chave: 'nao_classificado', bloco: 'NAO_CLASSIFICADO', rotulo: 'Não Classificado' },
 ];
 
@@ -109,7 +115,7 @@ function porChave(chave) {
 // passa pela conta: investimento (vai pro balanço), repasse de terceiros, transferência entre
 // contas do mesmo titular. `gerarDRE` já ignora esses blocos; esta função deixa o mesmo critério
 // disponível pro fechamento mensal e pro resumo (calcularTotais em reconciliacao.js).
-const BLOCOS_FORA_DO_RESULTADO = ['INVESTIMENTO', 'REPASSE_TERCEIROS', 'TRANSFERENCIA_CONTAS'];
+const BLOCOS_FORA_DO_RESULTADO = ['INVESTIMENTO', 'REPASSE_TERCEIROS', 'TRANSFERENCIA_CONTAS', 'MOVIMENTACAO_TITULAR'];
 
 function chaveForaDoResultado(chave) {
   const def = porChave(chave);
