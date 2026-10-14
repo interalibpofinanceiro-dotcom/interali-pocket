@@ -39,6 +39,7 @@ const {
   buscarOrcamento,
   removerLinha,
   competenciaDe,
+  normalizarDataISO,
   getSheetsClient,
   ABA_LANCAMENTOS,
   ABA_CONTAS_A_PAGAR,
@@ -104,6 +105,8 @@ const {
   garantirPastaCliente,
   salvarDocumentoPendente,
   listarDocumentosPendentes,
+  contarDocumentosEmFila,
+  organizarArquivoPorCompetencia,
   baixarArquivo,
   marcarStatusArquivo,
   listarArquivosNaoMarcados,
@@ -1394,6 +1397,27 @@ async function atualizarAbaDreCliente(cliente, ano = new Date().getFullYear()) {
 }
 
 async function processarFechamentoMes(remetente, cliente, sheetId, competencia) {
+  // 14/10/2026 (caso real + pedido do Aroldo) — setembro do Aroldo foi fechado com extrato Cora,
+  // faturas Bradesco/Mercado Pago e OFX do BB ainda na fila do Drive, sem ninguém avisar. Agora:
+  // se houver extrato/fatura dessa planilha (qualquer número do mesmo cliente) ainda não lido, NÃO
+  // fecha — avisa pra aguardar ~30 min e já dispara a leitura na hora.
+  try {
+    const mesmosClientes = (await listarClientesAtivos({ ignorarCache: true })).filter((c) => c.sheetId === sheetId);
+    let emFila = 0;
+    for (const c of mesmosClientes) if (c.pastaDriveId) emFila += await contarDocumentosEmFila(c);
+    if (emFila > 0) {
+      mesmosClientes.forEach((c) => agendarLeituraPendentes(c, 0));
+      await enviarMensagemWhatsApp(
+        remetente,
+        `⏳ Ainda estou lançando ${emFila === 1 ? '1 extrato/fatura' : `${emFila} extratos/faturas`} que você enviou na sua planilha. Aguarde uns *30 minutos* e peça o fechamento de novo ("fechar ${['janeiro', 'fevereiro', 'março', 'abril', 'maio', 'junho', 'julho', 'agosto', 'setembro', 'outubro', 'novembro', 'dezembro'][Number(String(competencia).slice(5, 7)) - 1] || rotuloCompetencia(competencia)}") — assim o fechamento sai completo, com tudo conciliado.`
+      );
+      console.log(`Fechamento de ${rotuloCompetencia(competencia)} adiado: ${emFila} documento(s) na fila — ${cliente ? cliente.nome : remetente}.`);
+      return;
+    }
+  } catch (erro) {
+    console.error('Falha ao checar documentos na fila antes do fechamento (segue fechando):', erro.message);
+  }
+
   await enviarMensagemWhatsApp(remetente, `⏳ Fechando ${rotuloCompetencia(competencia)}... rodando a conciliação e montando o relatório.`);
 
   // Recalcula o Status_Conciliacao com tudo que já foi enviado antes de fotografar o mês.
@@ -1922,7 +1946,9 @@ async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas
 // Rede de segurança: se o Drive falhar MESMO ASSIM (rede caiu, token revogado etc.), processa na
 // hora em vez de simplesmente perder o documento — o cliente não pode nunca ficar sem resposta
 // nenhuma só porque o armazenamento teve um problema pontual.
-const MENSAGEM_DOCUMENTO_PESADO_RECEBIDO = '📄 Recebi! Como é um documento grande, vou processar com calma pra não perder nenhum detalhe — te aviso por aqui assim que estiver tudo lançado e conciliado na sua planilha. Não precisa fazer nada.';
+// 14/10/2026 (pedido do Aroldo) — orienta a esperar ~30 min antes de pedir o fechamento do mês.
+const AVISO_AGUARDAR_FECHAMENTO = '⏱️ Se for pedir o *fechamento do mês*, aguarde uns 30 minutos depois de enviar os extratos e faturas, pra dar tempo de eu ler tudo.';
+const MENSAGEM_DOCUMENTO_PESADO_RECEBIDO = `📄 Recebi! Como é um documento grande, vou processar com calma pra não perder nenhum detalhe — te aviso por aqui assim que estiver tudo lançado e conciliado na sua planilha. Não precisa fazer nada.\n\n${AVISO_AGUARDAR_FECHAMENTO}`;
 
 async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId, buffer, mimeType, nomeArquivo, tipoAlvo) {
   await enviarMensagemWhatsApp(remetente, MENSAGEM_DOCUMENTO_PESADO_RECEBIDO).catch(() => {});
@@ -1930,7 +1956,8 @@ async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId
   try {
     await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, tipoAlvo);
     console.log(`Documento pesado (${tipoAlvo}) guardado no Drive pra processar depois — ${cliente ? cliente.nome : remetente}.`);
-    return; // sucesso: a leitura de verdade fica pro cron, sem pressa.
+    agendarLeituraPendentes(cliente); // lê em ~1 min no próprio servidor; o cron é só rede de segurança
+    return;
   } catch (erro) {
     console.error(`Falha ao guardar documento pesado (${tipoAlvo}) no Drive — processando na hora como rede de segurança:`, erro.message);
   }
@@ -2009,9 +2036,10 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
     try {
       await salvarDocumentoPendente(cliente, buffer, mimeType, nomeArquivo, 'extrato', { formato: formatoArquivo, contaBancaria });
       console.log(`${formatoArquivo.toUpperCase()} guardado no Drive pra leitura posterior: ${resultado.transacoes.length} transação(ões) — ${cliente ? cliente.nome : remetente}.`);
+      agendarLeituraPendentes(cliente);
       await enviarMensagemWhatsApp(
         remetente,
-        `📄 Recebi seu extrato${contaBancaria ? ` (${contaBancaria})` : ''} com ${resultado.transacoes.length} movimentações. Já guardei o arquivo na sua pasta e vou lançar e conciliar tudo nos próximos minutos — te aviso por aqui quando terminar. Não precisa fazer nada.`
+        `📄 Recebi seu extrato${contaBancaria ? ` (${contaBancaria})` : ''} com ${resultado.transacoes.length} movimentações. Já guardei o arquivo na sua pasta e vou lançar e conciliar tudo nos próximos minutos — te aviso por aqui quando terminar. Não precisa fazer nada.\n\n${AVISO_AGUARDAR_FECHAMENTO}`
       ).catch(() => {});
       return;
     } catch (erro) {
@@ -2997,6 +3025,19 @@ app.all('/tarefas/despesas-fixas', async (req, res) => {
 // entra aqui também, mas não tem página pra dividir: vira um único "bloco" (o buffer inteiro),
 // lido com o mimeType real em vez do 'application/pdf' fixo que só valia quando só PDF passava
 // por aqui. PDF continua exatamente igual (divide em blocos de página, cada um lido como PDF).
+// Mês ("AAAA-MM") que mais aparece numa lista de datas — competência de um extrato que pega o fim
+// de um mês e o começo do outro (14/10/2026, organização das pastas do Drive por competência).
+function competenciaPredominante(datas) {
+  const contagem = {};
+  for (const d of datas) {
+    const m = (normalizarDataISO(d || '') || '').match(/^(\d{4})-(\d{2})/);
+    if (m) contagem[`${m[1]}-${m[2]}`] = (contagem[`${m[1]}-${m[2]}`] || 0) + 1;
+  }
+  const [melhor] = Object.entries(contagem).sort((a, b) => b[1] - a[1]);
+  return melhor ? melhor[0] : null;
+}
+
+// Devolve { competencia, banco } do que foi lido — usado pra mover o arquivo pra pasta certa.
 async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeType = 'application/pdf') {
   const ehPdf = mimeType === 'application/pdf';
   const blocos = ehPdf ? await dividirPdfEmBlocos(buffer) : [buffer];
@@ -3014,7 +3055,7 @@ async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeTyp
     }
     const transacoesBrutas = acumulado.map((t) => ({ ...t, conta_bancaria: contaBancaria }));
     await registrarTransacoesDeExtrato(cliente.numeroWhatsapp, cliente.sheetId, transacoesBrutas);
-    return;
+    return { competencia: competenciaPredominante(acumulado.map((t) => t.data)), banco: contaBancaria };
   }
 
   let vencimentoPadrao = null;
@@ -3034,6 +3075,8 @@ async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeTyp
   if (vencimentoPadrao) acumulado.forEach((c) => { if (!c.vencimento) c.vencimento = vencimentoPadrao; });
 
   await registrarContasAPagarProcessadas(cliente.numeroWhatsapp, cliente.sheetId, acumulado, bancoEmissor);
+  // Fatura de cartão: competência = mês do VENCIMENTO (quando é paga e entra na DRE, regime de caixa).
+  return { competencia: vencimentoPadrao ? competenciaPredominante([vencimentoPadrao]) : null, banco: bancoEmissor };
 }
 
 // Retoma UM documento pesado que ficou esperando no Drive (ex.: processamento imediato falhou por
@@ -3054,10 +3097,78 @@ async function processarDocumentoPesadoPendente(cliente, arquivo) {
     const conta = (arquivo.appProperties && arquivo.appProperties.contaBancaria) || resultado.contaBancaria || '';
     const transacoesBrutas = resultado.transacoes.map((t) => ({ ...t, conta_bancaria: conta }));
     await registrarTransacoesDeExtrato(cliente.numeroWhatsapp, cliente.sheetId, transacoesBrutas);
-    return;
+    return { competencia: competenciaPredominante(resultado.transacoes.map((t) => t.data)), banco: conta };
   }
 
-  await processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, arquivo.mimeType);
+  return processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, arquivo.mimeType);
+}
+
+// Lê os documentos "aguardando" de UM cliente (14/10/2026 — extraído do endpoint abaixo pra ser
+// chamado também logo depois do envio e antes do fechamento do mês). Caso real que motivou: o cron
+// "a cada 30 min" do GitHub Actions atrasa horas na prática (14/10: rodou 11:45, 12:15, 12:45, 14:15
+// BRT...) e o Aroldo fechou setembro com extrato Cora, faturas Bradesco/Mercado Pago e OFX do BB
+// ainda parados no Drive. Marca "processando" ANTES de ler, pra duas execuções simultâneas (envio +
+// cron + fechamento) nunca lerem o mesmo arquivo duas vezes.
+async function processarPendentesDoCliente(cliente) {
+  const processados = [];
+  const falhas = [];
+  if (!cliente || !cliente.pastaDriveId) return { processados, falhas };
+  const pendentes = await listarDocumentosPendentes(cliente);
+  for (const arquivo of pendentes) {
+    await marcarStatusArquivo(arquivo.id, 'processando').catch(() => {});
+    try {
+      const lido = await processarDocumentoPesadoPendente(cliente, arquivo);
+      await marcarStatusArquivo(arquivo.id, 'processado');
+      // Organização (14/10/2026): move pra pasta do mês a que o documento PERTENCE (não o mês do
+      // envio) e padroniza o nome. Best-effort — nunca desfaz uma leitura que já deu certo.
+      await organizarArquivoPorCompetencia(cliente, arquivo, { ...(lido || {}), tipoAlvo: (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'fatura' })
+        .catch((erro) => console.error(`Falha ao organizar "${arquivo.name}" na pasta da competência (arquivo já foi lido):`, erro.message));
+      processados.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name });
+    } catch (erro) {
+      console.error(`Falha ao processar documento pesado pendente "${arquivo.name}" de ${cliente.numeroWhatsapp}:`, erro.message);
+      await marcarStatusArquivo(arquivo.id, 'falhou').catch(() => {});
+      falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: erro.message });
+
+      // 16/09/2026 (pedido do Aroldo: "se não conseguir, precisa avisar o cliente que houve
+      // erro") — antes só o admin era avisado aqui, o cliente ficava sem resposta nenhuma
+      // (só recebia a confirmação de recebimento e nunca mais nada, se a leitura de verdade
+      // falhasse depois). Mensagem sem detalhe técnico, só o essencial pro cliente saber que
+      // precisa de atenção/reenvio.
+      const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'documento';
+      const rotuloTipo = tipoAlvo === 'extrato' ? 'extrato' : tipoAlvo === 'fatura' ? 'fatura' : 'documento';
+      await enviarMensagemWhatsApp(
+        cliente.numeroWhatsapp,
+        `⚠️ Não consegui terminar de processar o ${rotuloTipo} que você mandou (${arquivo.name}) — pode reenviar? Se continuar dando errado, me avisa que a equipe verifica.`
+      ).catch((erroEnvio) => console.error(`Falha ao avisar cliente ${cliente.numeroWhatsapp} sobre erro no documento:`, erroEnvio.message));
+
+      await avisarAdmin(
+        cliente.numeroWhatsapp,
+        TEMPLATE_AVISO_ADMIN,
+        ['Falha ao processar documento pesado pendente', `${cliente.nome} (${cliente.numeroWhatsapp}) — "${arquivo.name}" — ${erro.message}`],
+        `🔴 Falha ao processar documento pesado pendente\n\n👤 ${cliente.nome}\n📱 ${cliente.numeroWhatsapp}\n📎 ${arquivo.name}\n❌ ${erro.message}\n\nO arquivo ficou marcado como "falhou" no Drive — não tenta de novo sozinho. Cliente já foi avisado por WhatsApp pra reenviar.`
+      );
+    }
+  }
+  return { processados, falhas };
+}
+
+// Leitura logo depois do envio (14/10/2026): espera ~1 min (o cliente costuma mandar vários
+// arquivos em sequência — agrupa tudo numa passada só) e lê os pendentes daquele cliente no próprio
+// servidor, sem depender do agendador do GitHub. O cron continua como rede de segurança.
+const LEITURA_AGENDADA = new Map(); // numeroWhatsapp -> timer
+function agendarLeituraPendentes(cliente, atrasoMs = 60 * 1000) {
+  if (!cliente || !cliente.numeroWhatsapp) return;
+  clearTimeout(LEITURA_AGENDADA.get(cliente.numeroWhatsapp));
+  LEITURA_AGENDADA.set(cliente.numeroWhatsapp, setTimeout(async () => {
+    LEITURA_AGENDADA.delete(cliente.numeroWhatsapp);
+    try {
+      const clienteAtual = (await buscarClientePorNumero(cliente.numeroWhatsapp)) || cliente;
+      const r = await processarPendentesDoCliente(clienteAtual);
+      if (r.processados.length || r.falhas.length) console.log(`Leitura pós-envio de ${clienteAtual.nome}: ${r.processados.length} processado(s), ${r.falhas.length} falha(s).`);
+    } catch (erro) {
+      console.error('Falha na leitura pós-envio de documentos pendentes:', erro.message);
+    }
+  }, atrasoMs));
 }
 
 // Varre a pasta de todos os clientes ativos procurando documento pesado ainda não lido (ver
@@ -3078,37 +3189,9 @@ app.all('/tarefas/processar-documentos-pendentes', async (req, res) => {
     for (const cliente of clientes) {
       if (!cliente.pastaDriveId) continue;
 
-      const pendentes = await listarDocumentosPendentes(cliente);
-      for (const arquivo of pendentes) {
-        try {
-          await processarDocumentoPesadoPendente(cliente, arquivo);
-          await marcarStatusArquivo(arquivo.id, 'processado');
-          processados.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name });
-        } catch (erro) {
-          console.error(`Falha ao processar documento pesado pendente "${arquivo.name}" de ${cliente.numeroWhatsapp}:`, erro.message);
-          await marcarStatusArquivo(arquivo.id, 'falhou').catch(() => {});
-          falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: erro.message });
-
-          // 16/09/2026 (pedido do Aroldo: "se não conseguir, precisa avisar o cliente que houve
-          // erro") — antes só o admin era avisado aqui, o cliente ficava sem resposta nenhuma
-          // (só recebia a confirmação de recebimento e nunca mais nada, se a leitura de verdade
-          // falhasse depois). Mensagem sem detalhe técnico, só o essencial pro cliente saber que
-          // precisa de atenção/reenvio.
-          const tipoAlvo = (arquivo.appProperties && arquivo.appProperties.tipoAlvo) || 'documento';
-          const rotuloTipo = tipoAlvo === 'extrato' ? 'extrato' : tipoAlvo === 'fatura' ? 'fatura' : 'documento';
-          await enviarMensagemWhatsApp(
-            cliente.numeroWhatsapp,
-            `⚠️ Não consegui terminar de processar o ${rotuloTipo} que você mandou (${arquivo.name}) — pode reenviar? Se continuar dando errado, me avisa que a equipe verifica.`
-          ).catch((erroEnvio) => console.error(`Falha ao avisar cliente ${cliente.numeroWhatsapp} sobre erro no documento:`, erroEnvio.message));
-
-          await avisarAdmin(
-            cliente.numeroWhatsapp,
-            TEMPLATE_AVISO_ADMIN,
-            ['Falha ao processar documento pesado pendente', `${cliente.nome} (${cliente.numeroWhatsapp}) — "${arquivo.name}" — ${erro.message}`],
-            `🔴 Falha ao processar documento pesado pendente\n\n👤 ${cliente.nome}\n📱 ${cliente.numeroWhatsapp}\n📎 ${arquivo.name}\n❌ ${erro.message}\n\nO arquivo ficou marcado como "falhou" no Drive — não tenta de novo sozinho. Cliente já foi avisado por WhatsApp pra reenviar.`
-          );
-        }
-      }
+      const r = await processarPendentesDoCliente(cliente);
+      processados.push(...r.processados);
+      falhas.push(...r.falhas);
     }
 
     res.json({ ok: true, processados, falhas });

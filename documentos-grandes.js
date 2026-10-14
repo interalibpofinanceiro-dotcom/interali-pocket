@@ -152,13 +152,57 @@ async function listarDocumentosPendentes(cliente) {
   const drive = getDriveClientPessoal();
   const numeroEscapado = cliente.numeroWhatsapp.replace(/'/g, "\\'");
 
+  // "processando" há mais de 30 min = leitura interrompida (servidor reiniciou no meio, 14/10/2026)
+  // — volta pra fila em vez de ficar travado pra sempre.
+  const limiteTravado = new Date(Date.now() - 30 * 60 * 1000).toISOString();
   const resposta = await drive.files.list({
-    q: `appProperties has { key='status' and value='aguardando' } and appProperties has { key='numeroWhatsapp' and value='${numeroEscapado}' } and trashed = false`,
+    q: `(appProperties has { key='status' and value='aguardando' } or (appProperties has { key='status' and value='processando' } and modifiedTime < '${limiteTravado}')) and appProperties has { key='numeroWhatsapp' and value='${numeroEscapado}' } and trashed = false`,
     fields: 'files(id,name,mimeType,appProperties)',
     pageSize: 50,
   });
 
   return resposta.data.files || [];
+}
+
+// Organização do Drive por COMPETÊNCIA (14/10/2026, pedido do Aroldo: "cliente manda o cartão de
+// setembro no fim de outubro e ele entra na pasta de outubro"). Na chegada o arquivo vai pra pasta do
+// mês do envio (ainda não dá pra saber a que mês pertence); depois de lido, vem pra cá:
+//   - extrato -> mês com mais movimentações; fatura -> mês do vencimento (regime de caixa);
+//   - nome padronizado "AAAA-MM · Extrato · Banco.ext" / "AAAA-MM · Fatura · Banco.ext".
+// A leitura nunca dependeu da pasta (busca por appProperties), então mover é só organização.
+async function organizarArquivoPorCompetencia(cliente, arquivo, { competencia, banco, tipoAlvo } = {}) {
+  if (!competencia || !/^\d{4}-\d{2}$/.test(competencia)) return null;
+  const drive = getDriveClientPessoal();
+  const pastaCliente = await garantirPastaCliente(cliente);
+  const pastaDestino = await garantirPastaMes(pastaCliente, competencia);
+
+  const atual = await drive.files.get({ fileId: arquivo.id, fields: 'name,parents' });
+  const extensao = (atual.data.name.match(/\.([a-z0-9]{2,4})$/i) || [])[1] || 'pdf';
+  const rotulo = tipoAlvo === 'extrato' ? 'Extrato' : 'Fatura';
+  const bancoLimpo = String(banco || '').replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+  const nomeNovo = `${competencia} · ${rotulo}${bancoLimpo ? ` · ${bancoLimpo}` : ''}.${extensao.toLowerCase()}`;
+
+  const paisAtuais = (atual.data.parents || []).filter((p) => p !== pastaDestino);
+  await drive.files.update({
+    fileId: arquivo.id,
+    addParents: (atual.data.parents || []).includes(pastaDestino) ? undefined : pastaDestino,
+    removeParents: paisAtuais.length ? paisAtuais.join(',') : undefined,
+    requestBody: { name: nomeNovo, appProperties: { competencia, nomeOriginal: String(atual.data.name).slice(0, 100) } },
+  });
+  return { pastaDestino, nomeNovo };
+}
+
+// Tudo que ainda não terminou de ser lido (aguardando OU processando agora) — usado pra segurar o
+// fechamento do mês enquanto há extrato/fatura na fila (14/10/2026).
+async function contarDocumentosEmFila(cliente) {
+  const drive = getDriveClientPessoal();
+  const numeroEscapado = cliente.numeroWhatsapp.replace(/'/g, "\\'");
+  const resposta = await drive.files.list({
+    q: `(appProperties has { key='status' and value='aguardando' } or appProperties has { key='status' and value='processando' }) and appProperties has { key='numeroWhatsapp' and value='${numeroEscapado}' } and trashed = false`,
+    fields: 'files(id)',
+    pageSize: 50,
+  });
+  return (resposta.data.files || []).length;
 }
 
 async function baixarArquivo(fileId) {
@@ -448,6 +492,8 @@ module.exports = {
   garantirPastaCliente,
   salvarDocumentoPendente,
   listarDocumentosPendentes,
+  contarDocumentosEmFila,
+  organizarArquivoPorCompetencia,
   baixarArquivo,
   marcarStatusArquivo,
   listarArquivosNaoMarcados,
