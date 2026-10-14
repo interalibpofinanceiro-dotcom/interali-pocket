@@ -797,11 +797,27 @@ function transacoesIguais(a, b) {
 // contra 1 gravada insere a que falta). Dentro do lote: OFX/CSV com FITID diferente são transações
 // diferentes; sem FITID (leitura por IA de PDF/imagem) mantém o comportamento antigo de tratar linha
 // idêntica como repetição de leitura.
+// 14/10/2026 (2ª correção no mesmo dia, caso real: extrato BB de agosto reenviado em PDF com descrição
+// em outro formato — "Pix - Enviado 08/08 10:36 SU…" vs "Pix - Enviado SUPER POPULAR" — entrou inteiro
+// de novo). Contra o que JÁ está gravado, a descrição não decide mais nada: mesma data + valor + tipo
+// (+ mesmo banco quando os dois lados têm banco) já é a mesma transação, contada UM-PRA-UM — então
+// reenvio em qualquer layout não duplica, e 2 iguais no arquivo contra 1 gravada ainda insere 1.
+function mesmoMovimentoBancario(a, b) {
+  if ((a.data || '') !== (b.data || '')) return false;
+  if (Math.abs((a.valor || 0) - (b.valor || 0)) >= 0.01) return false;
+  if ((a.tipo || '') !== (b.tipo || '')) return false;
+  const nomeBanco = (t) => String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .split(/[\s\-–,]+/).filter((p) => p && !['banco', 'do', 'da', 'de', 's.a', 'sa', 'scfi', 'ag', 'conta'].includes(p))[0] || '';
+  const ba = nomeBanco(a.conta_bancaria);
+  const bb = nomeBanco(b.conta_bancaria);
+  return !ba || !bb || ba === bb;
+}
+
 function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
   const existentesLivres = extratoExistente.map((ex) => ({ ex, usado: false }));
   const jaVistas = [];
   return transacoesExtraidas.filter((nova) => {
-    const par = existentesLivres.find((e) => !e.usado && transacoesIguais(e.ex, nova));
+    const par = existentesLivres.find((e) => !e.usado && mesmoMovimentoBancario(e.ex, nova));
     if (par) { par.usado = true; return false; }
     if (!nova.fitid && jaVistas.some((v) => !v.fitid && transacoesIguais(v, nova))) return false;
     jaVistas.push(nova);
