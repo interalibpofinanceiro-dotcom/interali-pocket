@@ -6,7 +6,9 @@ const RE_TARIFA = /\btarifa|cesta\s+de\s+servi[çc]|pacote\s+de\s+servi[çc]|man
 const RE_RENDIMENTO = /rendimento|rend\s+pago|remunera[çc][ãa]o|juros\s+s\/?\s*saldo|juros\s+sobre\s+saldo|aplica[çc][ãa]o\s+autom.*rendiment|resgate.*rendiment/i;
 const RE_TRANSF_MESMO_TITULAR = /transf(er[êe]ncia)?\s+entre\s+contas|mesma\s+titularidade|entre\s+contas\s+propri|aplica[çc][ãa]o\s+autom(?!.*rendiment)|resgate\s+autom(?!.*rendiment)|aplica[çc][ãa]o\s+financeira|resgate\s+de\s+aplica|\baplic(a[çc][ãa]o)?\s+(cdb|lci|lca|poupan|fundo|tesouro|rdb)|\bresgate\s+(cdb|lci|lca|poupan|fundo|tesouro|rdb)/i;
 // 14/10/2026 — débito de fatura de cartão (caso real: "DEB AUTOR PORTOSEG SA CR" caía em não classificado).
-const RE_PAGAMENTO_FATURA = /pag(amento|to)?\.?\s+(de\s+)?fatura|fatura\s+(do\s+)?cart|pgto\s+cart[ãa]o|deb\s+autor\s+.*(portoseg|nubank|itaucard|bradescard|santander\s+card|cartao|card)/i;
+// Só "fatura" sozinha NÃO basta (14/10/2026, caso real: "Pagamento Fatura de Água" virou fatura de
+// cartão) — precisa citar cartão/crédito ou um emissor de cartão conhecido.
+const RE_PAGAMENTO_FATURA = /fatura\s+(de\s+|do\s+)?(cart|card|cr[ée]dito)|pgto\s+cart[ãa]o|pag(amento|to)?\.?\s+(de\s+)?fatura\s+(portoseg|nubank|itaucard|bradescard|ourocard|santander|c6|inter|xp)|deb\s+autor\s+.*(portoseg|nubank|itaucard|bradescard|santander\s+card|cartao|card)/i;
 
 function classificarTransacaoBancaria(transacao) {
   const desc = transacao.descricao || '';
