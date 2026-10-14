@@ -1417,7 +1417,7 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
   });
   const paraIA = orfasUnicas.filter((_, i) => !deterministicas[i]);
   const porIA = paraIA.length
-    ? await classificarTransacoesParaDRE(paraIA, { nomeCliente, exemplos: exemplosParaIA(lancamentos) }).catch((erro) => {
+    ? await classificarTransacoesParaDRE(paraIA, { nomeCliente, exemplos: exemplosParaIA(lancamentos), forcar: true }).catch((erro) => {
       console.error('Falha na classificação contábil por IA dos órfãos (seguem não classificados):', erro.message);
       return [];
     })
@@ -1429,9 +1429,11 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
     let classificacao = auto;
     if (!auto) {
       const ia = porIA[iIA++];
-      if (ia && ia.grupo_dre !== 'nao_classificado' && ia.confianca !== 'baixa') {
-        classificacao = { categoria: ia.categoria, subcategoria: '', grupo_dre: ia.grupo_dre, fonte: 'ia_extrato' };
-        if (CHAVES_SEM_COMPROVANTE.includes(ia.grupo_dre)) auto = classificacao;
+      // Planilha sempre categorizada (14/10/2026): palpite de confiança baixa também entra (marcado
+      // "ia_palpite" em Fonte_Categoria pro especialista revisar); só não dispensa comprovante.
+      if (ia && ia.grupo_dre !== 'nao_classificado') {
+        classificacao = { categoria: ia.categoria, subcategoria: '', grupo_dre: ia.grupo_dre, fonte: ia.confianca === 'baixa' ? 'ia_palpite' : 'ia_extrato' };
+        if (ia.confianca !== 'baixa' && CHAVES_SEM_COMPROVANTE.includes(ia.grupo_dre)) auto = classificacao;
       }
     }
 
@@ -1514,20 +1516,45 @@ async function sincronizarComEspecialista(cliente) {
     });
   }
 
+  // Planilha SEMPRE categorizada (14/10/2026, decisão do Aroldo): o que continua sem linha da DRE
+  // (categoria genérica tipo "Despesa"/"Doação") ou sem categoria nenhuma recebe o palpite mais
+  // provável da IA — modo obrigatório, com os exemplos do especialista deste cliente. Fica marcado
+  // "ia_palpite" em Fonte_Categoria; se o especialista trocar a categoria, o caso 1 acima assume.
+  const restantesSemGrupo = semGrupo.filter((l) => !definidos.has(l));
+  const naoCategorizados = lancamentos.filter((l) => l.data && !valida(l));
+  const alvoForcar = [...restantesSemGrupo, ...naoCategorizados];
+  const palpites = new Map();
+  if (alvoForcar.length) {
+    const sugestoes = await classificarTransacoesParaDRE(alvoForcar.map((l) => ({
+      data: l.data,
+      tipo: l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida',
+      valor: l.valor,
+      descricao: `${valida(l) ? `Categoria genérica do especialista: "${l.categoria}". ` : ''}${(l.descricao || l.estabelecimento_ou_pessoa || '').slice(0, 80)}`,
+    })), { nomeCliente: cliente.nome, exemplos, forcar: true }).catch(() => []);
+    alvoForcar.forEach((l, i) => { if (sugestoes[i] && sugestoes[i].grupo_dre !== 'nao_classificado') palpites.set(l, sugestoes[i]); });
+  }
+
   const data = [];
+  for (const [l, s] of palpites) {
+    if (s.grupo_dre !== l.grupo_dre) data.push({ range: `'${l.aba}'!M${l.linha}`, values: [[s.grupo_dre]] });
+    if (!valida(l) && s.categoria) {
+      data.push({ range: `'${l.aba}'!I${l.linha}`, values: [[s.categoria]] });
+      data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`ia_palpite|${s.categoria}`]] });
+    }
+  }
   for (const l of [...editados, ...semGrupo]) {
     const grupo = definidos.get(l);
     if (grupo && grupo !== l.grupo_dre) data.push({ range: `'${l.aba}'!M${l.linha}`, values: [[grupo]] });
     // Mesmo sem conseguir traduzir, registra que a categoria é do especialista (não pergunta de novo amanhã).
     data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`especialista|${l.categoria}`]] });
   }
-  for (const l of legado) data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`${l.fonte_categoria || 'legado'}|${l.categoria || ''}`]] });
+  for (const l of legado) if (!(palpites.has(l) && !valida(l))) data.push({ range: `'${l.aba}'!V${l.linha}`, values: [[`${l.fonte_categoria || 'legado'}|${l.categoria || ''}`]] });
   for (let i = 0; i < data.length; i += 500) {
     await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: cliente.sheetId, requestBody: { valueInputOption: 'RAW', data: data.slice(i, i + 500) } }));
   }
   const mudouGrupo = [...definidos].filter(([l, g]) => g !== l.grupo_dre).length;
-  if (editados.length || semGrupo.length) console.log(`Especialista (${cliente.nome}): ${editados.length} categoria(s) editada(s), ${semGrupo.length} sem grupo -> ${mudouGrupo} linha(s) da DRE ajustada(s).`);
-  return { editados: editados.length, semGrupo: semGrupo.length, mudouGrupo, legadoMarcado: legado.length };
+  if (editados.length || semGrupo.length || palpites.size) console.log(`Especialista (${cliente.nome}): ${editados.length} categoria(s) editada(s), ${semGrupo.length} sem grupo -> ${mudouGrupo} linha(s) da DRE ajustada(s); ${palpites.size} palpite(s) do Pocket pra planilha não ficar sem categoria.`);
+  return { editados: editados.length, semGrupo: semGrupo.length, mudouGrupo, palpites: palpites.size, legadoMarcado: legado.length };
 }
 
 async function atualizarAbaDreCliente(cliente, ano = new Date().getFullYear()) {

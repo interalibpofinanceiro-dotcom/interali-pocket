@@ -319,7 +319,12 @@ function direcaoCompativel(chave, tipo) {
   return tipo === 'entrada' ? CHAVES_SO_ENTRADA.has(chave) : !CHAVES_SO_ENTRADA.has(chave);
 }
 
-async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, exemplos } = {}) {
+// `forcar` (14/10/2026, decisão do Aroldo: "sempre que visualizar, a planilha precisa estar
+// categorizada; se o especialista não colocou, você pode colocar") — a IA NUNCA deixa
+// "nao_classificado": escolhe a linha mais provável (o especialista corrige depois e o Pocket aprende).
+const INSTRUCAO_FORCAR = 'MODO OBRIGATÓRIO: NUNCA responda "nao_classificado". Para cada transação escolha a linha MAIS PROVÁVEL da lista (use os exemplos do especialista deste cliente como guia principal) e dê uma "categoria" curta e específica (ex.: "Pix para pessoa física — despesa diversa", "Pix recebido — doação de terceiros"). Use "confianca": "baixa" quando for palpite — o especialista revisa depois.';
+
+async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, exemplos, forcar = false } = {}) {
   const { porChave } = require('./dre');
   const saida = new Array(transacoes.length).fill(null);
   for (let ini = 0; ini < transacoes.length; ini += TAMANHO_LOTE_CLASSIFICACAO) {
@@ -331,6 +336,7 @@ async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, ex
       // Como o especialista de BPO já classificou este cliente (memoria-cliente.js) — tem prioridade
       // sobre a regra genérica quando a transação é do mesmo tipo.
       exemplos && exemplos.length ? `COMO O ESPECIALISTA JÁ CLASSIFICOU ESTE CLIENTE (siga este padrão):\n${exemplos.join('\n')}` : null,
+      forcar ? INSTRUCAO_FORCAR : null,
     ].filter(Boolean).join('\n');
     const resposta = await chamarExtracaoTexto(PROMPT_CLASSIFICAR_TRANSACOES_DRE, `${contexto ? `${contexto}\n\n` : ''}TRANSAÇÕES:\n${lista}`, 8000);
     const json = extrairJSON(resposta);
