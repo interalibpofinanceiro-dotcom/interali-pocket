@@ -312,7 +312,7 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
 // devolveu aquele índice ou devolveu uma chave inválida — quem chama mantém "nao_classificado").
 const TAMANHO_LOTE_CLASSIFICACAO = 60;
 
-const CHAVES_SO_ENTRADA = new Set(['receita_venda_mercadorias', 'receita_prestacao_servicos', 'financeiro_rendimentos', 'aporte_titular', 'repasse_terceiros_entrada']);
+const CHAVES_SO_ENTRADA = new Set(['receita_venda_mercadorias', 'receita_prestacao_servicos', 'receita_outras', 'financeiro_rendimentos', 'aporte_titular', 'repasse_terceiros_entrada']);
 const CHAVES_DUAS_DIRECOES = new Set(['transferencia_entre_contas', 'nao_classificado']);
 function direcaoCompativel(chave, tipo) {
   if (CHAVES_DUAS_DIRECOES.has(chave)) return true;

@@ -1434,6 +1434,9 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
       if (ia && ia.grupo_dre !== 'nao_classificado') {
         classificacao = { categoria: ia.categoria, subcategoria: '', grupo_dre: ia.grupo_dre, fonte: ia.confianca === 'baixa' ? 'ia_palpite' : 'ia_extrato' };
         if (ia.confianca !== 'baixa' && CHAVES_SEM_COMPROVANTE.includes(ia.grupo_dre)) auto = classificacao;
+      } else {
+        const r = reservaSemPista(transacao.tipo === 'entrada' ? 'entrada' : 'saida');
+        classificacao = { categoria: r.categoria, subcategoria: '', grupo_dre: r.grupo_dre, fonte: 'ia_palpite' };
       }
     }
 
@@ -1480,6 +1483,16 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
 // usada por ELE neste cliente -> IA com a categoria/subcategoria dele como pista principal e os
 // exemplos do próprio especialista no prompt. Em todos os casos grava "especialista|categoria" em
 // Fonte_Categoria — é isso que alimenta a memória (memoria-cliente.js) pros próximos lançamentos.
+// Última reserva da "planilha sempre categorizada" (14/10/2026): sem memória do cliente e sem
+// palpite válido da IA -> linha "diversas (revisar)". Mantém a categoria genérica do especialista
+// quando ele escreveu uma ("Despesa", "Doação").
+function reservaSemPista(tipo, categoriaAtual) {
+  const generica = categoriaAtual && categoriaAtual !== 'Não Classificado' ? categoriaAtual : null;
+  return tipo === 'entrada'
+    ? { grupo_dre: 'receita_outras', categoria: generica || 'Entrada diversa — revisar', confianca: 'baixa' }
+    : { grupo_dre: 'admin_outras_despesas', categoria: generica || 'Despesa diversa — revisar', confianca: 'baixa' };
+}
+
 async function sincronizarComEspecialista(cliente) {
   const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
   const valida = (l) => l.categoria && l.categoria !== 'Não Classificado';
@@ -1531,7 +1544,11 @@ async function sincronizarComEspecialista(cliente) {
       valor: l.valor,
       descricao: `${valida(l) ? `Categoria genérica do especialista: "${l.categoria}". ` : ''}${(l.descricao || l.estabelecimento_ou_pessoa || '').slice(0, 80)}`,
     })), { nomeCliente: cliente.nome, exemplos, forcar: true }).catch(() => []);
-    alvoForcar.forEach((l, i) => { if (sugestoes[i] && sugestoes[i].grupo_dre !== 'nao_classificado') palpites.set(l, sugestoes[i]); });
+    alvoForcar.forEach((l, i) => {
+      const s = sugestoes[i];
+      if (s && s.grupo_dre !== 'nao_classificado') palpites.set(l, s);
+      else palpites.set(l, reservaSemPista(l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida', l.categoria));
+    });
   }
 
   const data = [];

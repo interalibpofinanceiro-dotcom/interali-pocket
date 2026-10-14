@@ -10,6 +10,9 @@
 const GRUPOS_DRE = [
   { chave: 'receita_venda_mercadorias', bloco: 'RECEITA_BRUTA', rotulo: 'Venda de Mercadorias / Produtos' },
   { chave: 'receita_prestacao_servicos', bloco: 'RECEITA_BRUTA', rotulo: 'Prestação de Serviços' },
+  // 14/10/2026 — reserva da "planilha sempre categorizada": entrada sem pista nenhuma que nem a
+  // memória do cliente nem a IA conseguiram classificar. Categoria fica "… — revisar".
+  { chave: 'receita_outras', bloco: 'RECEITA_BRUTA', rotulo: 'Outras Receitas / Entradas Diversas (revisar)' },
 
   { chave: 'deducao_impostos_vendas', bloco: 'DEDUCOES', rotulo: 'Impostos sobre Vendas (Simples Nacional / DAS)' },
   { chave: 'deducao_devolucoes', bloco: 'DEDUCOES', rotulo: 'Devoluções e Cancelamentos de Vendas' },
@@ -58,6 +61,9 @@ const GRUPOS_DRE = [
   // misturar com "admin_sistemas_softwares" nem forçar numa categoria de nicho que não se aplica
   // a um lançamento consolidado.
   { chave: 'admin_fatura_cartao_consolidada', bloco: 'DESPESAS_ADMIN', rotulo: 'Fatura de Cartão de Crédito (Lançamento Consolidado, sem Detalhamento por Item)' },
+
+  // 14/10/2026 — reserva da "planilha sempre categorizada" pra saída sem pista nenhuma.
+  { chave: 'admin_outras_despesas', bloco: 'DESPESAS_ADMIN', rotulo: 'Outras Despesas Diversas (revisar)' },
 
   { chave: 'vendas_marketing', bloco: 'DESPESAS_VENDAS', rotulo: 'Anúncios e Tráfego Pago (Meta/Google Ads)' },
   { chave: 'vendas_comissoes', bloco: 'DESPESAS_VENDAS', rotulo: 'Comissões de Vendas' },
