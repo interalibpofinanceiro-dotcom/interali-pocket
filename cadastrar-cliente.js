@@ -1,13 +1,13 @@
 require('dotenv').config();
-const { adicionarCliente } = require('./clientes');
+const { adicionarCliente, aplicarCompartilhamentoPadrao } = require('./clientes');
 const { enviarMensagemWhatsApp } = require('./whatsapp');
 const { estilizarPlanilhaCliente } = require('./sheets-styler');
 const { garantirPastaCliente } = require('./documentos-grandes');
 
-const [, , numero, nome, sheetId] = process.argv;
+const [, , numero, nome, sheetId, emailCliente] = process.argv;
 
 if (!numero || !nome || !sheetId) {
-  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA"');
+  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA" ["email-do-cliente@gmail.com"]');
   process.exit(1);
 }
 
@@ -20,6 +20,11 @@ async function main() {
   await garantirPastaCliente({ numeroWhatsapp: numero, nome, sheetId, pastaDriveId: '' })
     .then((pastaId) => console.log(`Pasta no Drive criada/reaproveitada (ID: ${pastaId}).`))
     .catch((erro) => console.error('Aviso: cliente cadastrado, mas a criação da pasta no Drive falhou:', erro.message));
+
+  // Acesso padrão (14/10/2026): equipe edita, cliente só lê (e-mail opcional), nenhum link aberto.
+  await aplicarCompartilhamentoPadrao(sheetId, emailCliente)
+    .then(() => console.log(`Compartilhamento padrão aplicado (equipe edita${emailCliente ? `, ${emailCliente} como leitor` : ''}).`))
+    .catch((erro) => console.error('Aviso: cliente cadastrado, mas o compartilhamento padrão falhou:', erro.message));
 
   await estilizarPlanilhaCliente(sheetId)
     .then((r) => console.log(`Planilha estilizada (${r.abasEstilizadas} aba(s)).`))

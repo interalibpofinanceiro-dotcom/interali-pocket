@@ -228,6 +228,14 @@ async function reordenarAbas(sheets, spreadsheetId) {
 // etc.) fica protegida por inteiro. Só o service account (que grava programaticamente) consegue
 // editar as partes protegidas — se quiser dar acesso de edição total pra alguém além dele (o
 // próprio Aroldo, por exemplo), adicionar o e-mail em `editors.users` abaixo.
+// Equipe de BPO que edita TODAS as planilhas de cliente (14/10/2026: Silvana é a dona; Aroldo e
+// Sirlene editam). Configurável por env pra não precisar de deploy quando a equipe mudar.
+const EQUIPE_PADRAO = ['aroldopcorrea@gmail.com', 'aroldocorrea2000@yahoo.com.br', 'sirlenerosavicente@gmail.com'];
+function equipeEditores() {
+  const env = (process.env.EQUIPE_EDITORES || '').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+  return env.length ? env : EQUIPE_PADRAO;
+}
+
 async function protegerAbaExcetoSubcategoria(sheets, spreadsheetId, sheetIdNumerico, cabecalho) {
   const emailServico = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   if (!emailServico || sheetIdNumerico === null || sheetIdNumerico === undefined) return;
@@ -243,7 +251,9 @@ async function protegerAbaExcetoSubcategoria(sheets, spreadsheetId, sheetIdNumer
           range: { sheetId: sheetIdNumerico, startColumnIndex, endColumnIndex },
           description: 'Interali Pocket — editado só pelo sistema/consultor',
           warningOnly: false,
-          editors: { users: [emailServico] },
+          // 14/10/2026 — a equipe de BPO (EQUIPE_EDITORES) também edita: o especialista ajusta a
+          // Categoria; o cliente é só leitor da planilha (compartilhamento padrão, ver clientes.js).
+          editors: { users: [emailServico, ...equipeEditores()] },
         },
       },
     });
@@ -908,6 +918,7 @@ module.exports = {
   getSheetsClient,
   obterSheetIdNumerico,
   protegerAbaExcetoSubcategoria,
+  equipeEditores,
   buscarLinhas,
   SUFIXO,
   RE_ABA_MENSAL,

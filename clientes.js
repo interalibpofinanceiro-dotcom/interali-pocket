@@ -189,6 +189,41 @@ function candidatosNumero(numeroWhatsapp) {
   return [numeroWhatsapp];
 }
 
+// Compartilhamento padrão da planilha do cliente (14/10/2026, decisão do Aroldo: "os clientes vão
+// ficar todos como leitor; quem edita é só Aroldo, Sirlene e Silvana"). Caso real que motivou:
+// planilha da Sirlene estava com "qualquer pessoa com o link pode editar". Aplica:
+//   - equipe (EQUIPE_EDITORES) + service account como editores;
+//   - e-mail do cliente (opcional) como LEITOR — o cliente pede mudança ao especialista;
+//   - remove link aberto ("qualquer pessoa") e rebaixa pra leitor qualquer outro editor de fora.
+async function aplicarCompartilhamentoPadrao(sheetId, emailCliente) {
+  const { equipeEditores } = require('./sheets');
+  const drive = getDriveClientPessoal();
+  const servico = (process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL || '').toLowerCase();
+  const equipe = equipeEditores();
+  const cliente = (emailCliente || '').trim().toLowerCase();
+  const perms = (await drive.permissions.list({ fileId: sheetId, fields: 'permissions(id,type,role,emailAddress)' })).data.permissions || [];
+  const de = (email) => perms.find((p) => (p.emailAddress || '').toLowerCase() === email);
+
+  for (const email of [servico, ...equipe].filter(Boolean)) {
+    const atual = de(email);
+    if (!atual) await drive.permissions.create({ fileId: sheetId, sendNotificationEmail: false, requestBody: { type: 'user', role: 'writer', emailAddress: email } });
+    else if (!['writer', 'owner'].includes(atual.role)) await drive.permissions.update({ fileId: sheetId, permissionId: atual.id, requestBody: { role: 'writer' } });
+  }
+  if (cliente && !equipe.includes(cliente)) {
+    const atual = de(cliente);
+    if (!atual) await drive.permissions.create({ fileId: sheetId, sendNotificationEmail: true, emailMessage: 'Sua planilha do Interali Pocket — acesso de leitura. Pra qualquer ajuste, fale com o seu especialista.', requestBody: { type: 'user', role: 'reader', emailAddress: cliente } });
+    else if (atual.role !== 'owner' && atual.role !== 'reader') await drive.permissions.update({ fileId: sheetId, permissionId: atual.id, requestBody: { role: 'reader' } });
+  }
+  for (const p of perms) {
+    const email = (p.emailAddress || '').toLowerCase();
+    if (p.type === 'anyone' || p.type === 'domain') {
+      await drive.permissions.delete({ fileId: sheetId, permissionId: p.id });
+    } else if (p.role !== 'owner' && p.role !== 'reader' && email && email !== servico && !equipe.includes(email)) {
+      await drive.permissions.update({ fileId: sheetId, permissionId: p.id, requestBody: { role: 'reader' } });
+    }
+  }
+}
+
 async function buscarClientePorNumero(numeroWhatsapp) {
   const clientes = await listarClientesAtivos();
   const alvo = (numeroWhatsapp || '').trim();
@@ -380,6 +415,7 @@ async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
 
 module.exports = {
   listarClientesAtivos,
+  aplicarCompartilhamentoPadrao,
   buscarClientePorNumero,
   adicionarCliente,
   desativarCliente,
