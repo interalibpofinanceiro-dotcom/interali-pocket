@@ -2317,6 +2317,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
 // (permite oferecer "total"/"itens" de novo sem pedir reenvio do arquivo).
 async function tratarErroProcessamento(remetente, cliente, contexto, error) {
   console.error('Erro ao processar mensagem:', error.message);
+  avisarFaltaDeCredito(error);
 
   // Marca o horário do erro pra esse remetente — se ele reenviar o mesmo documento logo em
   // seguida e a checagem de duplicidade bater, processarLancamentoExtraido trata como confirmação
@@ -3229,6 +3230,14 @@ async function processarPendentesDoCliente(cliente) {
       processados.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name });
     } catch (erro) {
       console.error(`Falha ao processar documento pesado pendente "${arquivo.name}" de ${cliente.numeroWhatsapp}:`, erro.message);
+      // Sem crédito na Anthropic NÃO é problema do arquivo (14/10/2026): volta pra fila e é lido
+      // sozinho quando o crédito voltar — sem pedir reenvio ao cliente, sem marcar "falhou".
+      if (/credit balance is too low/i.test(erro.message || '')) {
+        avisarFaltaDeCredito(erro);
+        await marcarStatusArquivo(arquivo.id, 'aguardando').catch(() => {});
+        falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: 'sem crédito na Anthropic — volta pra fila' });
+        break; // não adianta tentar os outros arquivos agora
+      }
       await marcarStatusArquivo(arquivo.id, 'falhou').catch(() => {});
       falhas.push({ cliente: cliente.numeroWhatsapp, arquivo: arquivo.name, erro: erro.message });
 
@@ -3763,54 +3772,83 @@ app.post('/webhook-asaas', async (req, res) => {
 // estabelece a base, e passa a alertar a partir da PRÓXIMA mudança de verdade.
 // Limitação conhecida: se o WHATSAPP em si estiver fora do ar, não tem como avisar POR whatsapp —
 // só fica registrado no log do Railway (não existe outro canal de alerta configurado hoje).
-let ULTIMO_STATUS_SAUDE = { anthropic: null, whatsapp: null };
+let ULTIMO_STATUS_SAUDE = { anthropic: null, whatsapp: null, drive: null };
 
-app.all('/tarefas/checar-saude', async (req, res) => {
-  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
-    return res.status(403).json({ erro: 'Não autorizado' });
-  }
-
+// 14/10/2026 (caso real: crédito da Anthropic acabou às 15:12 e o Aroldo só descobriu porque os
+// extratos de agosto não foram lidos — ele já tinha pedido esse aviso antes). Duas falhas do
+// desenho anterior: (1) só avisava quando o status MUDAVA e o status vivia na memória — depois de
+// cada deploy/reinício a 1ª checagem só "anotava" a base, então se o problema já existia (ou surgia
+// logo depois) nunca avisava; (2) dependia do cron do GitHub, que atrasa horas. Agora: problema
+// encontrado na 1ª checagem também avisa, a checagem roda DENTRO do servidor a cada 15 min, inclui
+// o token do Google Drive, e erro de crédito numa leitura real avisa na hora (avisarFaltaDeCredito).
+async function verificarSaude() {
   const status = {};
-
-  try {
-    await testarAnthropic();
-    status.anthropic = { ok: true };
-  } catch (error) {
-    status.anthropic = { ok: false, erro: error.message };
-  }
-
-  try {
-    await testarConexaoWhatsApp();
-    status.whatsapp = { ok: true };
-  } catch (error) {
-    status.whatsapp = { ok: false, erro: error.message };
-  }
+  try { await testarAnthropic(); status.anthropic = { ok: true }; } catch (error) { status.anthropic = { ok: false, erro: error.message }; }
+  try { await testarConexaoWhatsApp(); status.whatsapp = { ok: true }; } catch (error) { status.whatsapp = { ok: false, erro: error.message }; }
+  try { await getDriveClientPessoal().files.list({ pageSize: 1, fields: 'files(id)' }); status.drive = { ok: true }; } catch (error) { status.drive = { ok: false, erro: error.message }; }
 
   const avisados = [];
-  const NOME_SERVICO = { anthropic: 'Anthropic (IA)', whatsapp: 'WhatsApp' };
-
-  for (const servico of ['anthropic', 'whatsapp']) {
+  const NOME_SERVICO = { anthropic: 'Anthropic (IA — leitura de documentos)', whatsapp: 'WhatsApp', drive: 'Google Drive (arquivos dos clientes)' };
+  const DICA = {
+    anthropic: '\n\n👉 Colocar crédito: https://platform.claude.com/settings/billing (ative o Auto-reload)',
+    drive: '\n\n👉 Reautorizar: https://pocket.interali.com.br/admin/google-oauth/iniciar?chave=<RELATORIO_SECRET>',
+    whatsapp: '',
+  };
+  for (const servico of ['anthropic', 'whatsapp', 'drive']) {
     const atual = status[servico].ok;
     const anterior = ULTIMO_STATUS_SAUDE[servico];
-
-    if (anterior !== null && anterior !== atual) {
-      const dica = servico === 'anthropic' ? '\n\n👉 console.anthropic.com → Plans & Billing' : '';
+    const mudou = anterior !== null && anterior !== atual;
+    const problemaNaPrimeira = anterior === null && atual === false;
+    if (mudou || problemaNaPrimeira) {
       const mensagem = atual
         ? `✅ *${NOME_SERVICO[servico]} voltou a funcionar* — Interali Pocket normalizado.`
-        : `🔴 *${NOME_SERVICO[servico]} fora do ar* — Interali Pocket parou de responder.\n\n${status[servico].erro || ''}${dica}`;
+        : `🔴 *${NOME_SERVICO[servico]} com problema* — o Pocket não consegue trabalhar normalmente.
 
-      console.log(`Alerta de saúde: ${servico} mudou de ${anterior} para ${atual}`);
+${status[servico].erro || ''}${DICA[servico]}`;
+      console.log(`Alerta de saúde: ${servico} ${anterior} -> ${atual}`);
       if (ADMIN_WHATSAPP_NUMBER) {
         await enviarMensagemWhatsApp(ADMIN_WHATSAPP_NUMBER, mensagem).catch((erro) => console.error(`Falha ao mandar alerta de saúde (${servico}) pro admin:`, erro.message));
       }
       avisados.push(servico);
     }
-
+    // Crédito/Drive voltou -> lê sozinho o que ficou parado na fila (sem ninguém reenviar nada).
+    if ((servico === 'anthropic' || servico === 'drive') && atual && anterior === false) {
+      listarClientesAtivos({ ignorarCache: true })
+        .then(async (clientes) => { for (const c of clientes) await processarPendentesDoCliente(c).catch(() => {}); })
+        .catch((e) => console.error('Falha ao retomar a fila depois do serviço voltar:', e.message));
+    }
     ULTIMO_STATUS_SAUDE[servico] = atual;
   }
+  return { status, avisados };
+}
 
+// Erro de crédito numa leitura de verdade -> avisa o admin NA HORA (no máx. 1x a cada 30 min).
+let ULTIMO_AVISO_CREDITO = 0;
+function avisarFaltaDeCredito(erro) {
+  const msg = String((erro && erro.message) || erro || '');
+  if (!/credit balance is too low/i.test(msg)) return;
+  ULTIMO_STATUS_SAUDE.anthropic = false;
+  if (Date.now() - ULTIMO_AVISO_CREDITO < 30 * 60 * 1000 || !ADMIN_WHATSAPP_NUMBER) return;
+  ULTIMO_AVISO_CREDITO = Date.now();
+  enviarMensagemWhatsApp(
+    ADMIN_WHATSAPP_NUMBER,
+    '🔴 *Crédito da Anthropic acabou* — o Pocket parou de ler comprovantes, extratos e faturas dos clientes.\n\n👉 https://platform.claude.com/settings/billing → Buy credits (e ative o Auto-reload).\n\nDepois de recarregar, os arquivos que falharam podem ser reprocessados sem o cliente reenviar.'
+  ).catch((e) => console.error('Falha ao avisar falta de crédito:', e.message));
+}
+
+app.all('/tarefas/checar-saude', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+  const { status, avisados } = await verificarSaude();
   res.json({ ok: true, status, avisados });
 });
+
+// Checagem interna a cada 15 min (não depende do agendador do GitHub). 1ª rodada 1 min após subir.
+setTimeout(() => {
+  verificarSaude().catch((e) => console.error('Falha na checagem de saúde interna:', e.message));
+  setInterval(() => verificarSaude().catch((e) => console.error('Falha na checagem de saúde interna:', e.message)), 15 * 60 * 1000);
+}, 60 * 1000);
 
 app.get('/health', async (_req, res) => {
   const envChecks = {
