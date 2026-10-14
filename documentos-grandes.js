@@ -370,6 +370,9 @@ function parseOFX(buffer) {
         tipo: valorRaw >= 0 ? 'entrada' : 'saida',
         descricao,
         saldo_apos: null,
+        // ID único da transação no banco — 2 linhas idênticas com FITID diferente são 2 transações
+        // de verdade (ex.: 2 guias DAS iguais no mesmo dia, uma por CNPJ — 14/10/2026).
+        fitid: campoOfx(bloco, 'FITID') || null,
       };
     })
     .filter((t) => t.data && !Number.isNaN(t.valor));

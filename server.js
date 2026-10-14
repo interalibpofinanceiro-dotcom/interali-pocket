@@ -790,11 +790,20 @@ function transacoesIguais(a, b) {
   return da === db || da.includes(db) || db.includes(da);
 }
 
+// 14/10/2026 (caso real do Aroldo: 2 guias DAS de R$86,05 no mesmo dia, uma por CNPJ, e 2 tarifas de
+// R$5 — o OFX do BB trazia as duas com FITID diferente, mas a 2ª de cada par era descartada como
+// "repetida"). Agora o casamento com o que já está gravado é UM-PRA-UM (cada linha existente só
+// "absorve" uma nova — reenviar o mesmo arquivo continua não duplicando, mas 2 iguais no arquivo
+// contra 1 gravada insere a que falta). Dentro do lote: OFX/CSV com FITID diferente são transações
+// diferentes; sem FITID (leitura por IA de PDF/imagem) mantém o comportamento antigo de tratar linha
+// idêntica como repetição de leitura.
 function filtrarTransacoesNovas(transacoesExtraidas, extratoExistente) {
-  const jaVistas = []; // pega duplicata DENTRO do próprio lote também (extrato com linha repetida)
+  const existentesLivres = extratoExistente.map((ex) => ({ ex, usado: false }));
+  const jaVistas = [];
   return transacoesExtraidas.filter((nova) => {
-    if (extratoExistente.some((ex) => transacoesIguais(ex, nova))) return false;
-    if (jaVistas.some((v) => transacoesIguais(v, nova))) return false;
+    const par = existentesLivres.find((e) => !e.usado && transacoesIguais(e.ex, nova));
+    if (par) { par.usado = true; return false; }
+    if (!nova.fitid && jaVistas.some((v) => !v.fitid && transacoesIguais(v, nova))) return false;
     jaVistas.push(nova);
     return true;
   });
@@ -1317,8 +1326,13 @@ async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, 
 const { classificarTransacaoBancaria, CHAVES_SEM_COMPROVANTE } = require('./classificacao-bancaria');
 
 async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { nomeCliente } = {}) {
-  const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
+  const { somenteNoExtrato, conciliados: jaCasados } = reconciliar(lancamentos, extratoTotal);
   const registrados = []; // { transacao, ref, auto }
+  // Lançamento que a conciliação já casou com OUTRA linha do extrato não pode "esconder" esta
+  // (14/10/2026, 2ª guia DAS igual no mesmo dia era descartada porque a 1ª já tinha lançamento).
+  const lancamentosLivres = lancamentos
+    .filter((l) => !jaCasados.some((c) => c.lancamento === l))
+    .map((l) => ({ l, usado: false }));
 
   // Rede de segurança extra (03/09/2026): NUNCA registra um órfão que já é lançamento com mesma
   // DATA + VALOR + TIPO (sem olhar descrição — um órfão não tem comprovante mesmo, e se já existe
@@ -1333,9 +1347,11 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
   );
   const jaRegistrados = [];
   const orfasUnicas = somenteNoExtrato.filter((t) => {
-    const chave = { data: t.data, valor: t.valor, tipo: t.tipo };
-    if (lancamentos.some((l) => mesmaTransacaoBasica({ data: l.data, valor: l.valor, tipo: l.tipo_movimentacao }, chave))) return false;
-    if (jaRegistrados.some((j) => mesmaTransacaoBasica(j, chave))) return false;
+    const chave = { data: t.data, valor: t.valor, tipo: t.tipo, fitid: t.fitid };
+    const par = lancamentosLivres.find((x) => !x.usado && mesmaTransacaoBasica({ data: x.l.data, valor: x.l.valor, tipo: x.l.tipo_movimentacao }, chave));
+    if (par) { par.usado = true; return false; }
+    // Duas iguais na mesma passada só são repetição se não tiverem FITID distinto (OFX).
+    if (jaRegistrados.some((j) => mesmaTransacaoBasica(j, chave) && (!j.fitid || !chave.fitid || j.fitid === chave.fitid))) return false;
     jaRegistrados.push(chave);
     return true;
   });
