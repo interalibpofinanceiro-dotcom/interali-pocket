@@ -81,6 +81,7 @@ const { consultarCNPJ } = require('./cnae');
 const { sugerirPorCNAE } = require('./cnae-categorias');
 const { chaveForaDoResultado, porChave } = require('./dre');
 const { montarDreAnual, escreverAbaDre } = require('./dre-anual');
+const { aprenderPorContraparte, sugerirPelaMemoria, aprenderPorCategoria, exemplosParaIA, normalizar: normalizarMemoria } = require('./memoria-cliente');
 const {
   registrarFechamentoCliente,
   registrarFechamentoMestre,
@@ -1341,10 +1342,18 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
   // 14/10/2026 — o que as regras determinísticas não pegam vai pra IA em UM lote por extrato (antes
   // tudo caía em "Não Classificado" e a DRE ficava sem valor). Falha da IA nunca trava o registro:
   // segue como antes, não classificado.
-  const deterministicas = orfasUnicas.map((t) => classificarTransacaoBancaria(t));
+  // Ordem: regra bancária fixa -> memória do cliente (o que o especialista já classificou pra essa
+  // mesma loja/pessoa, ver memoria-cliente.js) -> IA (com os exemplos do especialista no prompt).
+  const memoria = aprenderPorContraparte(lancamentos);
+  const deterministicas = orfasUnicas.map((t) => {
+    const fixa = classificarTransacaoBancaria(t);
+    if (fixa) return fixa;
+    const lembrada = sugerirPelaMemoria(memoria, t);
+    return lembrada ? { ...lembrada, subcategoria: 'Pela memória do cliente (classificação anterior do especialista)' } : null;
+  });
   const paraIA = orfasUnicas.filter((_, i) => !deterministicas[i]);
   const porIA = paraIA.length
-    ? await classificarTransacoesParaDRE(paraIA, { nomeCliente }).catch((erro) => {
+    ? await classificarTransacoesParaDRE(paraIA, { nomeCliente, exemplos: exemplosParaIA(lancamentos) }).catch((erro) => {
       console.error('Falha na classificação contábil por IA dos órfãos (seguem não classificados):', erro.message);
       return [];
     })
@@ -1391,7 +1400,53 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { no
 // controle (Fechamento do cliente + Fechamentos da mestre), manda o resumo em texto e o PDF.
 // Reescreve a aba "DRE <ano>" (padrão OMIE, ver dre-anual.js) da planilha do cliente. Sempre
 // best-effort: quem chama nunca deve falhar por causa disso.
+// Categoria escrita pelo especialista num lançamento ainda sem grupo contábil -> preenche o Grupo_DRE
+// (14/10/2026, processo de BPO do Aroldo: o especialista mexe SÓ na Categoria). Ordem: "Retirada do
+// titular" (fixa) -> mesma categoria já usada no cliente -> mesma contraparte -> IA com a categoria
+// como pista principal. Nunca sobrescreve um Grupo_DRE que já é válido.
+async function preencherGrupoPelaCategoria(cliente) {
+  const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
+  const alvo = lancamentos.filter((l) => l.categoria && l.categoria !== 'Não Classificado'
+    && (!l.grupo_dre || l.grupo_dre === 'nao_classificado' || !porChave(l.grupo_dre)));
+  if (!alvo.length) return 0;
+
+  const porCategoria = aprenderPorCategoria(lancamentos);
+  const porContraparte = aprenderPorContraparte(lancamentos);
+  const definidos = new Map();
+  const paraIA = [];
+  for (const l of alvo) {
+    const tipo = l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida';
+    let grupo = null;
+    if (tipo === 'saida' && /^retirada do titular/i.test(l.categoria.trim())) grupo = 'pessoal_prolabore';
+    if (!grupo) grupo = porCategoria.get(`${tipo}|${normalizarMemoria(l.categoria)}`) || null;
+    if (!grupo) {
+      const m = sugerirPelaMemoria(porContraparte, { tipo, descricao: l.estabelecimento_ou_pessoa || l.descricao });
+      if (m) grupo = m.grupo_dre;
+    }
+    if (grupo) definidos.set(l, grupo);
+    else paraIA.push(l);
+  }
+  if (paraIA.length) {
+    const sugestoes = await classificarTransacoesParaDRE(paraIA.map((l) => ({
+      data: l.data,
+      tipo: l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida',
+      valor: l.valor,
+      descricao: `CATEGORIA DEFINIDA PELO ESPECIALISTA (vale mais que a descrição): "${l.categoria}" — ${(l.descricao || '').slice(0, 60)}`,
+    })), { nomeCliente: cliente.nome, exemplos: exemplosParaIA(lancamentos) }).catch(() => []);
+    paraIA.forEach((l, i) => {
+      const s = sugestoes[i];
+      if (s && s.grupo_dre !== 'nao_classificado' && s.confianca !== 'baixa') definidos.set(l, s.grupo_dre);
+    });
+  }
+  if (!definidos.size) return 0;
+  const data = [...definidos].map(([l, grupo]) => ({ range: `'${l.aba}'!M${l.linha}`, values: [[grupo]] }));
+  await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: cliente.sheetId, requestBody: { valueInputOption: 'RAW', data } }));
+  console.log(`Grupo_DRE preenchido pela categoria do especialista: ${definidos.size} lançamento(s) — ${cliente.nome}.`);
+  return definidos.size;
+}
+
 async function atualizarAbaDreCliente(cliente, ano = new Date().getFullYear()) {
+  await preencherGrupoPelaCategoria(cliente).catch((erro) => console.error('Falha ao preencher Grupo_DRE pela categoria (segue com a DRE):', erro.message));
   const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
   if (!lancamentos.some((l) => (l.data || '').startsWith(String(ano)))) return null;
   return escreverAbaDre(cliente.sheetId, montarDreAnual(lancamentos, ano), cliente.nome);

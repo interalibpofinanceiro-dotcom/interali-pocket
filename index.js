@@ -312,18 +312,34 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
 // devolveu aquele índice ou devolveu uma chave inválida — quem chama mantém "nao_classificado").
 const TAMANHO_LOTE_CLASSIFICACAO = 60;
 
-async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho } = {}) {
+const CHAVES_SO_ENTRADA = new Set(['receita_venda_mercadorias', 'receita_prestacao_servicos', 'financeiro_rendimentos', 'aporte_titular', 'repasse_terceiros_entrada']);
+const CHAVES_DUAS_DIRECOES = new Set(['transferencia_entre_contas', 'nao_classificado']);
+function direcaoCompativel(chave, tipo) {
+  if (CHAVES_DUAS_DIRECOES.has(chave)) return true;
+  return tipo === 'entrada' ? CHAVES_SO_ENTRADA.has(chave) : !CHAVES_SO_ENTRADA.has(chave);
+}
+
+async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, exemplos } = {}) {
   const { porChave } = require('./dre');
   const saida = new Array(transacoes.length).fill(null);
   for (let ini = 0; ini < transacoes.length; ini += TAMANHO_LOTE_CLASSIFICACAO) {
     const lote = transacoes.slice(ini, ini + TAMANHO_LOTE_CLASSIFICACAO);
     const lista = lote.map((t, i) => `${i}. ${t.data} | ${t.tipo === 'entrada' ? 'ENTRADA' : 'SAÍDA'} | R$ ${Number(t.valor || 0).toFixed(2)} | "${(t.descricao || '').slice(0, 120)}"`).join('\n');
-    const contexto = [nomeCliente && `Cliente: ${nomeCliente}`, nicho && `Nicho: ${nicho}`].filter(Boolean).join(' · ');
+    const contexto = [
+      nomeCliente && `Cliente: ${nomeCliente}`,
+      nicho && `Nicho: ${nicho}`,
+      // Como o especialista de BPO já classificou este cliente (memoria-cliente.js) — tem prioridade
+      // sobre a regra genérica quando a transação é do mesmo tipo.
+      exemplos && exemplos.length ? `COMO O ESPECIALISTA JÁ CLASSIFICOU ESTE CLIENTE (siga este padrão):\n${exemplos.join('\n')}` : null,
+    ].filter(Boolean).join('\n');
     const resposta = await chamarExtracaoTexto(PROMPT_CLASSIFICAR_TRANSACOES_DRE, `${contexto ? `${contexto}\n\n` : ''}TRANSAÇÕES:\n${lista}`, 8000);
     const json = extrairJSON(resposta);
     for (const c of (json.classificacoes || [])) {
       const t = lote[c.indice];
       if (!t || !porChave(c.grupo_dre)) continue;
+      // Direção (14/10/2026, caso real: IA sugeriu "aporte_titular" pra SAÍDA de plano de saúde e
+      // futebol). Chave só de entrada nunca vai pra saída e vice-versa — na dúvida, descarta.
+      if (!direcaoCompativel(c.grupo_dre, t.tipo)) continue;
       saida[ini + c.indice] = { grupo_dre: c.grupo_dre, categoria: c.categoria || '', confianca: c.confianca || 'baixa' };
     }
   }
