@@ -161,7 +161,12 @@ async function listarClientesAtivos({ ignorarCache = false } = {}) {
     return cache;
   }
 
-  const clientes = await carregarTodosClientes();
+  // 14/10/2026 — antes devolvia TODAS as linhas (inclusive Ativo=FALSE), apesar do nome: as tarefas
+  // agendadas (/tarefas/relatorio, previsao, despesas-fixas, documentos, varredura do Drive, DRE)
+  // rodavam também pra cliente desativado — caso real: Mysael excluído continuava na fila e o
+  // relatório semanal (template pago) iria pra ele. buscarClientePorNumero já filtrava por conta
+  // própria, então nada que dependia da lista completa muda.
+  const clientes = (await carregarTodosClientes()).filter((c) => c.ativo);
   cache = clientes;
   cacheExpiraEm = agora + CACHE_TTL_MS;
   return clientes;

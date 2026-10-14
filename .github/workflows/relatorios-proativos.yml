@@ -114,3 +114,15 @@ jobs:
           curl -sf -X POST "https://pocket.interali.com.br/tarefas/varrer-drive-clientes?chave=${{ secrets.RELATORIO_SECRET }}" \
             -o resposta.json -w "\nHTTP %{http_code}\n"
           cat resposta.json
+
+  # 14/10/2026 — reescreve a aba "DRE <ano>" (padrão OMIE) na planilha de TODO cliente ativo, todo
+  # dia. Cliente novo ganha a aba no primeiro dia sem precisar de passo manual no cadastro.
+  atualizar-dre:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * *'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chama /tarefas/atualizar-dre
+        run: |
+          curl -sf -X POST "https://pocket.interali.com.br/tarefas/atualizar-dre?chave=${{ secrets.RELATORIO_SECRET }}" \
+            -o resposta.json -w "\nHTTP %{http_code}\n" --max-time 600
+          cat resposta.json

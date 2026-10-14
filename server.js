@@ -15,6 +15,7 @@ const {
   extrairResumoFaturaDeBuffer,
   extrairResumoExtratoDeBuffer,
   esclarecerOrfaosDeTexto,
+  classificarTransacoesParaDRE,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -78,6 +79,7 @@ const {
 const { consultarCNPJ } = require('./cnae');
 const { sugerirPorCNAE } = require('./cnae-categorias');
 const { chaveForaDoResultado, porChave } = require('./dre');
+const { montarDreAnual, escreverAbaDre } = require('./dre-anual');
 const {
   registrarFechamentoCliente,
   registrarFechamentoMestre,
@@ -1306,25 +1308,9 @@ async function sincronizarConciliacaoNaPlanilha(sheetId, lancamentosExistentes, 
 // lançamentos nascem do banco e NUNCA vão ter um comprovante, então já entram CONCILIADO_OK e
 // ficam fora da pergunta "recebimento sem nota". Devolve null quando a descrição não é nem tarifa
 // nem rendimento (segue o fluxo de órfão normal — PENDENTE_COMPROVANTE).
-const RE_TARIFA = /\btarifa|cesta\s+de\s+servi[çc]|pacote\s+de\s+servi[çc]|manuten[çc][ãa]o\s+de\s+conta|tar\s+(ted|doc|pix|pacote)|\biof\b|anuidade|taxa\s+de\s+manuten|c\/c\s+tarifa/i;
-const RE_RENDIMENTO = /rendimento|rend\s+pago|remunera[çc][ãa]o|juros\s+s\/?\s*saldo|juros\s+sobre\s+saldo|aplica[çc][ãa]o\s+autom.*rendiment|resgate.*rendiment/i;
-const RE_TRANSF_MESMO_TITULAR = /transf(er[êe]ncia)?\s+entre\s+contas|mesma\s+titularidade|entre\s+contas\s+propri|aplica[çc][ãa]o\s+autom(?!.*rendiment)|resgate\s+autom(?!.*rendiment)|aplica[çc][ãa]o\s+financeira|resgate\s+de\s+aplica/i;
+const { classificarTransacaoBancaria, CHAVES_SEM_COMPROVANTE } = require('./classificacao-bancaria');
 
-function classificarTransacaoBancaria(transacao) {
-  const desc = transacao.descricao || '';
-  if (RE_TRANSF_MESMO_TITULAR.test(desc)) {
-    return { categoria: 'Transferência entre Contas', subcategoria: 'Mesmo titular', grupo_dre: 'transferencia_entre_contas' };
-  }
-  if (transacao.tipo === 'saida' && RE_TARIFA.test(desc)) {
-    return { categoria: 'Tarifas Bancárias', subcategoria: 'Tarifa de conta', grupo_dre: 'financeiro_tarifas' };
-  }
-  if (transacao.tipo === 'entrada' && RE_RENDIMENTO.test(desc)) {
-    return { categoria: 'Rendimentos de Aplicações', subcategoria: 'Rendimento de conta', grupo_dre: 'financeiro_rendimentos' };
-  }
-  return null;
-}
-
-async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
+async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal, { nomeCliente } = {}) {
   const { somenteNoExtrato } = reconciliar(lancamentos, extratoTotal);
   const registrados = []; // { transacao, ref, auto }
 
@@ -1348,8 +1334,29 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
     return true;
   });
 
-  for (const transacao of orfasUnicas) {
-    const auto = classificarTransacaoBancaria(transacao);
+  // 14/10/2026 — o que as regras determinísticas não pegam vai pra IA em UM lote por extrato (antes
+  // tudo caía em "Não Classificado" e a DRE ficava sem valor). Falha da IA nunca trava o registro:
+  // segue como antes, não classificado.
+  const deterministicas = orfasUnicas.map((t) => classificarTransacaoBancaria(t));
+  const paraIA = orfasUnicas.filter((_, i) => !deterministicas[i]);
+  const porIA = paraIA.length
+    ? await classificarTransacoesParaDRE(paraIA, { nomeCliente }).catch((erro) => {
+      console.error('Falha na classificação contábil por IA dos órfãos (seguem não classificados):', erro.message);
+      return [];
+    })
+    : [];
+  let iIA = 0;
+
+  for (const [idx, transacao] of orfasUnicas.entries()) {
+    let auto = deterministicas[idx];
+    let classificacao = auto;
+    if (!auto) {
+      const ia = porIA[iIA++];
+      if (ia && ia.grupo_dre !== 'nao_classificado' && ia.confianca !== 'baixa') {
+        classificacao = { categoria: ia.categoria, subcategoria: 'Classificado por IA (extrato)', grupo_dre: ia.grupo_dre };
+        if (CHAVES_SEM_COMPROVANTE.includes(ia.grupo_dre)) auto = classificacao;
+      }
+    }
 
     const ref = await comRetryTransiente(() => salvarComprovanteComItens(sheetId, {
       data: transacao.data,
@@ -1358,15 +1365,15 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
       tipo_movimentacao: transacao.tipo,
       descricao: transacao.descricao || '',
       estabelecimento_ou_pessoa: transacao.descricao || '',
-      categoria: auto ? auto.categoria : 'Não Classificado',
-      subcategoria: auto ? auto.subcategoria : '',
-      grupo_dre: auto ? auto.grupo_dre : 'nao_classificado',
+      categoria: classificacao ? classificacao.categoria : 'Não Classificado',
+      subcategoria: classificacao ? classificacao.subcategoria : '',
+      grupo_dre: classificacao ? classificacao.grupo_dre : 'nao_classificado',
       // 09/09/2026 — antes ficava sempre vazio pra lançamento órfão (não tinha imagem nem legenda
       // própria pro Claude ler); agora herda do extrato de onde a transação veio (ver banco_conta).
       conta_bancaria: transacao.conta_bancaria || '',
       status_conciliacao: auto ? 'CONCILIADO_OK' : 'PENDENTE_COMPROVANTE',
       observacao_conciliacao: auto
-        ? 'Tarifa/rendimento do próprio banco — classificado automaticamente, sem comprovante a receber.'
+        ? 'Movimento bancário (tarifa, rendimento, transferência/aplicação própria ou fatura) — classificado automaticamente, sem comprovante a receber.'
         : 'Lançado via extrato/fatura. Comprovante original pendente.',
     }));
     registrados.push({ transacao, ref, auto: !!auto });
@@ -1378,6 +1385,14 @@ async function registrarOrfaosDoExtrato(sheetId, lancamentos, extratoTotal) {
 // Fechamento mensal de uma competência (02/09/2026) — disparado pelo comando "fechar <mês>".
 // Roda a conciliação, calcula o fechamento (reconciliacao.gerarFechamento), grava nas abas de
 // controle (Fechamento do cliente + Fechamentos da mestre), manda o resumo em texto e o PDF.
+// Reescreve a aba "DRE <ano>" (padrão OMIE, ver dre-anual.js) da planilha do cliente. Sempre
+// best-effort: quem chama nunca deve falhar por causa disso.
+async function atualizarAbaDreCliente(cliente, ano = new Date().getFullYear()) {
+  const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
+  if (!lancamentos.some((l) => (l.data || '').startsWith(String(ano)))) return null;
+  return escreverAbaDre(cliente.sheetId, montarDreAnual(lancamentos, ano), cliente.nome);
+}
+
 async function processarFechamentoMes(remetente, cliente, sheetId, competencia) {
   await enviarMensagemWhatsApp(remetente, `⏳ Fechando ${rotuloCompetencia(competencia)}... rodando a conciliação e montando o relatório.`);
 
@@ -1401,6 +1416,7 @@ async function processarFechamentoMes(remetente, cliente, sheetId, competencia) 
 
   await registrarFechamentoCliente(sheetId, fechamento, 'FECHADO').catch((erro) => console.error('Falha ao gravar Fechamento do cliente:', erro.message));
   await registrarFechamentoMestre(cliente, fechamento, 'FECHADO').catch((erro) => console.error('Falha ao gravar Fechamentos na mestre:', erro.message));
+  await atualizarAbaDreCliente(cliente, Number(String(competencia).slice(0, 4)) || undefined).catch((erro) => console.error('Falha ao atualizar aba DRE no fechamento:', erro.message));
 
   await enviarMensagemWhatsApp(remetente, formatarResumoFechamentoTexto(cliente, fechamento));
 
@@ -1861,7 +1877,8 @@ async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas
   // abaixo, que é só entrada) — status PENDENTE_COMPROVANTE, completado depois se o comprovante
   // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
   // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
-  const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal).catch((erro) => {
+  const clienteExtrato = await buscarClientePorNumero(remetente).catch(() => null);
+  const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal, { nomeCliente: clienteExtrato && clienteExtrato.nome }).catch((erro) => {
     console.error('Falha ao registrar órfãos do extrato:', erro.message);
     return [];
   });
@@ -2668,6 +2685,7 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const lancamentos = await buscarTodosLancamentos(sheetId);
         const dre = gerarDRE(lancamentos, { periodo });
         await enviarMensagemWhatsApp(remetente, formatarDRE(dre, cliente.nome));
+        atualizarAbaDreCliente(cliente).catch((erro) => console.error('Falha ao atualizar aba DRE sob demanda:', erro.message));
       } else if (!cliente.planoEspecialista && interpretarPedidoEspecialista(interpretado.texto)) {
         const assinatura = await buscarAssinaturaAtivaPorWhatsapp(remetente);
 
@@ -2850,6 +2868,36 @@ app.all('/tarefas/previsao', async (req, res) => {
 // Não manda template de aviso pro cliente — é opcional/best-effort (só chega se já houver sessão
 // aberta), porque isso sozinho não justifica pedir aprovação de mais um template só pra isso; o
 // essencial (o lançamento em si, refletido no resumo/DRE) já acontece de qualquer forma.
+// 14/10/2026 — aba "DRE <ano>" de todo cliente ativo (ou só ?numero=). Um cliente com erro não
+// impede os outros.
+app.all('/tarefas/atualizar-dre', async (req, res) => {
+  if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
+    return res.status(403).json({ erro: 'Não autorizado' });
+  }
+  try {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const alvo = req.query.numero ? clientes.filter((c) => c.numeroWhatsapp === req.query.numero) : clientes;
+    const vistos = new Set(); // vários números podem apontar pra mesma planilha
+    const atualizados = [];
+    const falhas = [];
+    for (const cliente of alvo) {
+      if (!cliente.sheetId || vistos.has(cliente.sheetId)) continue;
+      vistos.add(cliente.sheetId);
+      try {
+        const aba = await atualizarAbaDreCliente(cliente);
+        if (aba) atualizados.push(cliente.nome);
+      } catch (erro) {
+        console.error(`Falha ao atualizar DRE de ${cliente.nome}:`, erro.message);
+        falhas.push({ cliente: cliente.nome, erro: erro.message });
+      }
+    }
+    res.json({ ok: true, atualizados, falhas });
+  } catch (erro) {
+    console.error('Erro em /tarefas/atualizar-dre:', erro.message);
+    res.status(500).json({ ok: false, erro: erro.message });
+  }
+});
+
 app.all('/tarefas/despesas-fixas', async (req, res) => {
   if (!RELATORIO_SECRET || req.query.chave !== RELATORIO_SECRET) {
     return res.status(403).json({ erro: 'Não autorizado' });

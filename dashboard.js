@@ -1,4 +1,5 @@
 require('dotenv').config();
+const { montarDreAnual } = require('./dre-anual');
 const crypto = require('crypto');
 const { buscarTodosLancamentos, buscarExtrato, buscarContasAPagar } = require('./sheets');
 const { gerarResumo, obterSaldoAtual, filtrarContasEmAberto } = require('./reconciliacao');
@@ -191,6 +192,8 @@ async function montarDadosDashboardPadrao(cliente) {
     serieDiaria,
     linhaDeLeitura: gerarLinhaDeLeitura(resumoMes.totaisAtuais, resumoMes.comparacao),
     consistencia: verificarConsistenciaDashboard(resumoMes.totaisAtuais),
+    // 14/10/2026 — DRE do ano no padrão OMIE (mesma fonte da aba "DRE <ano>" da planilha).
+    dreAnual: montarDreAnual(lancamentos),
   };
 }
 

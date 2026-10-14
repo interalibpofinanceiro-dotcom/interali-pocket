@@ -676,7 +676,44 @@ ${listaParaPrompt()}
 
 ${REGRAS_CATEGORIZACAO_DINAMICA}`;
 
+// Classificação contábil em LOTE de transações que vieram só do extrato bancário (14/10/2026, caso
+// real: DRE da Sirlene com 285 de 386 lançamentos "nao_classificado" — Pix, aplicação/resgate de
+// CDB e débito automático de fatura entravam sem grupo_dre e inflavam receita E despesa da DRE).
+// Uma chamada por extrato (ou por lote no reprocessamento), nunca uma por transação. Postura de BPO:
+// classifica só o que a descrição deixa claro; o que é ambíguo (ex.: Pix de pessoa física sem
+// contexto) continua "nao_classificado" e aparece como "revisar" na DRE — melhor um buraco visível
+// do que um número inventado.
+const PROMPT_CLASSIFICAR_TRANSACOES_DRE = `Você é um analista de BPO financeiro classificando transações de EXTRATO BANCÁRIO de um cliente para montar a DRE gerencial (regime de caixa). Você recebe só a descrição curta do banco, o valor, a data e se foi entrada ou saída.
+
+Retorne SOMENTE um JSON:
+{
+  "classificacoes": [
+    { "indice": 0, "grupo_dre": "chave da lista abaixo", "categoria": "categoria curta e legível", "confianca": "alta | media | baixa" }
+  ]
+}
+
+REGRAS (na ordem — a primeira que se aplicar vence):
+1. Aplicação, resgate ou transferência para investimento do PRÓPRIO titular (CDB, LCI, LCA, poupança, fundo, Tesouro, "aplicação", "resgate", "invest") -> "transferencia_entre_contas" (dinheiro só mudando de lugar, NÃO é receita nem despesa). RESGATE é SEMPRE "transferencia_entre_contas" (é o principal voltando, mesmo que o valor tenha centavos de rendimento embutidos). Só use "financeiro_rendimentos" quando a descrição disser explicitamente rendimento/juros/remuneração (ex.: "REND PAGO APLIC", "JUROS S/ SALDO").
+   Pix/TED com o NOME DO PRÓPRIO CLIENTE (informado em "Cliente:") como origem ou destino também é "transferencia_entre_contas".
+2. Pagamento de fatura de cartão de crédito (ex.: "pagamento fatura", "pgto cartão", "deb autor <emissor de cartão>", Nubank/PortoSeg/Itaucard/Bradescard etc. como débito) -> "admin_fatura_cartao_consolidada".
+3. Tarifas, IOF, anuidade, cesta de serviços -> "financeiro_tarifas". Juros/encargos de empréstimo ou cheque especial -> "financeiro_juros_emprestimos". Multa/juros por atraso -> "financeiro_multas_atraso".
+4. Impostos e guias: DAS/Simples -> "deducao_impostos_vendas"; INSS/FGTS/GPS -> "pessoal_encargos".
+5. Folha: "salário", "folha", "pagto func" (saída) -> "pessoal_salarios"; "pró-labore" -> "pessoal_prolabore".
+6. Fornecedores e despesas reconhecíveis pelo nome (supermercado, posto, energia/Copel, água/Sanepar, internet/Vivo/Claro, aluguel, condomínio, contador, Google/Meta Ads, iFood como despesa, Uber/99, software/SaaS) -> a chave de despesa correspondente.
+7. Recebimento de maquininha/adquirente (Cielo, Stone, Rede, Getnet, PagSeguro, Mercado Pago, SumUp — "venda", "antecipação", "crédito de vendas") -> receita: "receita_venda_mercadorias" para comércio, "receita_prestacao_servicos" para serviço (use o nicho do cliente, se informado).
+8. Dízimo, oferta, doação -> "admin_doacoes_contribuicoes".
+9. Pix/TED/DOC de ou para PESSOA FÍSICA sem nenhuma pista do motivo, depósito em dinheiro sem contexto, ou qualquer descrição genérica -> "nao_classificado" com "confianca": "baixa". NÃO adivinhe se é venda, empréstimo, salário ou transferência pessoal — isso fica para o cliente/analista revisar.
+
+- Entrada nunca recebe chave de custo/despesa; saída nunca recebe chave de receita (exceto "transferencia_entre_contas", que vale para os dois lados, e "repasse_terceiros_*").
+- "categoria": nome curto e legível em português (ex.: "Aplicação CDB", "Fatura PortoSeg", "Supermercado", "Energia elétrica", "Pix recebido — revisar").
+- Inclua TODOS os índices recebidos, na mesma ordem.
+- Responda APENAS com o JSON.
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre) — use SOMENTE estas chaves:
+${listaParaPrompt()}`;
+
 module.exports = {
+  PROMPT_CLASSIFICAR_TRANSACOES_DRE,
   PROMPT_ESCLARECER_ORFAOS,
   PROMPT_EXTRACAO,
   PROMPT_EXTRACAO_TEXTO,

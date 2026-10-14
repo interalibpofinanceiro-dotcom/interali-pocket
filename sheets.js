@@ -203,7 +203,11 @@ async function reordenarAbas(sheets, spreadsheetId) {
     return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
   });
 
-  const desejada = [...mensais, ...controle];
+  // 14/10/2026 — "DRE <ano>" (dre-anual.js) é a vitrine da planilha: sempre na frente, ano mais
+  // recente primeiro.
+  const ehDre = (p) => /^DRE \d{4}$/.test(p.title);
+  const dres = controle.filter(ehDre).sort((a, b) => b.title.localeCompare(a.title));
+  const desejada = [...dres, ...mensais, ...controle.filter((p) => !ehDre(p))];
   const requests = [];
   desejada.forEach((p, idx) => {
     if (p.index !== idx) {

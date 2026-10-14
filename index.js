@@ -5,7 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const {
   PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_ORCAMENTO, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
-  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS,
+  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS, PROMPT_CLASSIFICAR_TRANSACOES_DRE,
 } = require('./prompts');
 
 const anthropic = new Anthropic({
@@ -307,6 +307,29 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
 // Casa a resposta livre do cliente com a lista de recebimentos do extrato sem comprovante
 // (ver PROMPT_ESCLARECER_ORFAOS / PENDENCIAS_ORFAOS em server.js). `itens` = [{ valor, data,
 // descricao }] na MESMA ordem em que foram mostrados pro cliente (o índice do JSON aponta pra cá).
+// Classificação contábil em lote (ver PROMPT_CLASSIFICAR_TRANSACOES_DRE). Lotes de 60 pra resposta
+// nunca chegar perto do max_tokens. Devolve um array alinhado com `transacoes` (null quando a IA não
+// devolveu aquele índice ou devolveu uma chave inválida — quem chama mantém "nao_classificado").
+const TAMANHO_LOTE_CLASSIFICACAO = 60;
+
+async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho } = {}) {
+  const { porChave } = require('./dre');
+  const saida = new Array(transacoes.length).fill(null);
+  for (let ini = 0; ini < transacoes.length; ini += TAMANHO_LOTE_CLASSIFICACAO) {
+    const lote = transacoes.slice(ini, ini + TAMANHO_LOTE_CLASSIFICACAO);
+    const lista = lote.map((t, i) => `${i}. ${t.data} | ${t.tipo === 'entrada' ? 'ENTRADA' : 'SAÍDA'} | R$ ${Number(t.valor || 0).toFixed(2)} | "${(t.descricao || '').slice(0, 120)}"`).join('\n');
+    const contexto = [nomeCliente && `Cliente: ${nomeCliente}`, nicho && `Nicho: ${nicho}`].filter(Boolean).join(' · ');
+    const resposta = await chamarExtracaoTexto(PROMPT_CLASSIFICAR_TRANSACOES_DRE, `${contexto ? `${contexto}\n\n` : ''}TRANSAÇÕES:\n${lista}`, 8000);
+    const json = extrairJSON(resposta);
+    for (const c of (json.classificacoes || [])) {
+      const t = lote[c.indice];
+      if (!t || !porChave(c.grupo_dre)) continue;
+      saida[ini + c.indice] = { grupo_dre: c.grupo_dre, categoria: c.categoria || '', confianca: c.confianca || 'baixa' };
+    }
+  }
+  return saida;
+}
+
 async function esclarecerOrfaosDeTexto(itens, texto) {
   const lista = itens.map((it, i) => `${i}. R$ ${it.valor} em ${it.data}${it.descricao ? ` — "${it.descricao}"` : ''}`).join('\n');
   const resposta = await chamarExtracaoTexto(PROMPT_ESCLARECER_ORFAOS, `RECEBIMENTOS PENDENTES:\n${lista}\n\nMENSAGEM DO CLIENTE:\n${texto}`, 2048);
@@ -368,6 +391,7 @@ module.exports = {
   extrairResumoFaturaDeBuffer,
   extrairResumoExtratoDeBuffer,
   esclarecerOrfaosDeTexto,
+  classificarTransacoesParaDRE,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

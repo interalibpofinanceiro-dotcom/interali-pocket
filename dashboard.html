@@ -130,8 +130,12 @@
       card('Saídas (mês)', formatarMoeda(d.resumoMes.saidas), CORES.red) +
       card('Resultado (mês)', formatarMoeda(d.resumoMes.resultado), d.resumoMes.resultado >= 0 ? CORES.green : CORES.red, compTexto);
 
+    // topCategorias vem como pares [categoria, valor] (calcularTopCategorias em reconciliacao.js) —
+    // antes lia c.categoria/c.total e o painel mostrava "undefined R$ 0,00" (achado em 14/10/2026).
     var categorias = (d.topCategorias || []).map(function (c) {
-      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + c.categoria + '</span><span class="text-slate-300">' + formatarMoeda(c.total) + '</span></div>';
+      var nome = Array.isArray(c) ? c[0] : c.categoria;
+      var valor = Array.isArray(c) ? c[1] : c.total;
+      return '<div class="flex justify-between text-sm py-2 border-b border-slate-700/50"><span>' + nome + '</span><span class="text-slate-300">' + formatarMoeda(valor) + '</span></div>';
     }).join('') || '<p class="text-sm text-slate-500">Sem despesas categorizadas este mês ainda.</p>';
 
     var contas = (d.contasEmAberto || []).map(function (c) {
@@ -156,13 +160,79 @@
       '<div class="grid md:grid-cols-2 gap-6">' +
         secao('Top categorias de despesa (mês)', '<div class="card">' + categorias + '</div>') +
         secao('Contas a pagar em aberto', '<div class="card overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2">Vencimento</th><th class="text-left pb-2">Beneficiário</th><th class="text-right pb-2">Valor</th></tr></thead><tbody>' + contas + '</tbody></table></div>') +
-      '</div>';
+      '</div>' +
+      renderizarDre(d.dreAnual);
 
     var labels = d.serieDiaria.map(function (p) { return formatarDataCurta(p.data); });
     montarGrafico('grafico-fluxo', labels, [
       { label: 'Entradas', data: d.serieDiaria.map(function (p) { return p.entradas; }), borderColor: CORES.green, backgroundColor: 'transparent', tension: .3 },
       { label: 'Saídas', data: d.serieDiaria.map(function (p) { return p.saidas; }), borderColor: CORES.red, backgroundColor: 'transparent', tension: .3 }
     ]);
+  }
+
+  // DRE do ano no padrão OMIE (14/10/2026) — mesmos números da aba "DRE <ano>" da planilha e da
+  // DRE do WhatsApp. Só mostra os meses que já começaram; rolagem lateral no celular.
+  function moedaDre(v) {
+    if (v === null || v === undefined) return '';
+    var n = Number(v) || 0;
+    var cor = n < 0 ? 'text-red-400' : (n > 0 ? 'text-slate-200' : 'text-slate-600');
+    return '<span class="' + cor + '">' + n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '</span>';
+  }
+
+  function renderizarDre(dre) {
+    if (!dre) return '';
+    // Só a partir do 1º mês com movimento (cliente que entrou em agosto não vê jan–jul zerados).
+    var temValor = function (i) {
+      return dre.linhas.some(function (l) { return l.valores[i]; });
+    };
+    var primeiro = -1;
+    dre.meses.forEach(function (m, i) { if (primeiro < 0 && dre.mesesComDado[i] && temValor(i)) primeiro = i; });
+    var cols = [];
+    dre.meses.forEach(function (m, i) { if (dre.mesesComDado[i] && primeiro >= 0 && i >= primeiro) cols.push(i); });
+    var th = 'class="text-right pb-2 px-2 whitespace-nowrap"';
+    var cabecalhoMeses = cols.map(function (i) { return '<th ' + th + '>' + dre.meses[i] + '</th>'; }).join('') + '<th ' + th + '>Total</th>';
+    var celulas = function (valores, total) {
+      return cols.map(function (i) { return '<td class="py-1.5 px-2 text-right whitespace-nowrap">' + moedaDre(valores[i]) + '</td>'; }).join('') +
+        '<td class="py-1.5 px-2 text-right whitespace-nowrap font-semibold">' + moedaDre(total) + '</td>';
+    };
+
+    var anterior = {};
+    var corpo = dre.linhas.map(function (l) {
+      var novoTipo = l.tipo !== anterior.tipo;
+      var novaConta = novoTipo || l.conta !== anterior.conta || l.grupo !== anterior.grupo;
+      var linhaTipo = novoTipo ? '<tr><td colspan="' + (cols.length + 2) + '" class="pt-3 pb-1 text-xs font-semibold text-brand-gold uppercase tracking-wide">' + l.tipo + '</td></tr>' : '';
+      var linhaConta = novaConta ? '<tr><td colspan="' + (cols.length + 2) + '" class="pt-2 pb-1 text-xs text-slate-400">' + l.grupo + ' › ' + l.conta + '</td></tr>' : '';
+      anterior = l;
+      var revisar = /Não Classificado/.test(l.categoria) ? ' <span class="text-amber-400 text-xs">⚠️</span>' : '';
+      return linhaTipo + linhaConta +
+        '<tr class="border-b border-slate-700/40"><td class="py-1.5 pr-3 pl-3">' + l.categoria + revisar + '</td>' + celulas(l.valores, l.total) + '</tr>';
+    }).join('') || '<tr><td colspan="' + (cols.length + 2) + '" class="py-3 text-sm text-slate-500">Ainda não há lançamentos categorizados neste ano.</td></tr>';
+
+    var totalGeral = '<tr class="bg-slate-700/30 font-semibold"><td class="py-2 pr-3">Total geral (Lucro / Prejuízo)</td>' + celulas(dre.totalGeral.valores, dre.totalGeral.total) + '</tr>';
+
+    var indicadores = dre.indicadores.map(function (ind) {
+      var cls = ind.destaque ? 'bg-slate-700/30 font-semibold' : 'border-b border-slate-700/40';
+      return '<tr class="' + cls + '"><td class="py-1.5 pr-3">' + ind.rotulo + '</td>' + celulas(ind.valores, ind.total) + '</tr>';
+    }).join('');
+    var margem = '<tr><td class="py-1.5 pr-3 italic text-slate-400">Margem Líquida (% da Receita Líquida)</td>' +
+      cols.map(function (i) { var v = dre.margemLiquida.valores[i]; return '<td class="py-1.5 px-2 text-right italic text-slate-400">' + (v === null ? '' : v.toFixed(1) + '%') + '</td>'; }).join('') +
+      '<td class="py-1.5 px-2 text-right italic text-slate-300">' + (dre.margemLiquida.total === null ? '' : dre.margemLiquida.total.toFixed(1) + '%') + '</td></tr>';
+
+    var temRevisar = dre.linhas.some(function (l) { return /Não Classificado/.test(l.categoria) && l.total !== 0; });
+    var aviso = temRevisar
+      ? '<p class="text-xs text-amber-300/80 mb-3">⚠️ Linhas marcadas ainda não têm categoria — normalmente Pix/depósitos sem descrição clara no extrato. Responda à pergunta do Pocket no WhatsApp sobre esses lançamentos e a DRE se ajusta sozinha.</p>'
+      : '';
+    var tabela = function (cab, linhas) {
+      return '<div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="text-slate-400 text-xs"><th class="text-left pb-2 pr-3 min-w-[220px]">' + cab + '</th>' + cabecalhoMeses + '</tr></thead><tbody>' + linhas + '</tbody></table></div>';
+    };
+
+    return secao('DRE ' + dre.ano + ' — Demonstração do Resultado',
+      '<div class="card">' +
+        '<p class="text-xs text-slate-500 mb-3">Regime de caixa · padrão OMIE · valores em R$. A mesma DRE fica na aba "DRE ' + dre.ano + '" da sua planilha.</p>' +
+        aviso +
+        tabela('Categoria', corpo + totalGeral) +
+      '</div>') +
+      secao('Indicadores do resultado', '<div class="card">' + tabela('Linha do DRE', indicadores + margem) + '</div>');
   }
 
   function montarGraficoBarras(canvasId, labels, valores) {
