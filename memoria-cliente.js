@@ -92,7 +92,7 @@ function exemplosParaIA(lancamentos, limite = 40) {
     const k = `${normalizar(l.categoria)}|${normalizar(l.subcategoria || '')}|${l.grupo_dre}`;
     if (vistos.has(k)) continue;
     vistos.add(k);
-    const origem = l.fonte_categoria === 'especialista' ? ' [especialista]' : '';
+    const origem = l.fonte_categoria === 'especialista' ? ' [especialista]' : l.fonte_categoria === 'cliente' ? ' [cliente]' : '';
     exemplos.push(`"${l.categoria}"${l.subcategoria ? ` / "${l.subcategoria}"` : ''} (${l.tipo_movimentacao === 'entrada' ? 'entrada' : 'saída'}) -> ${l.grupo_dre}${origem}`);
     if (exemplos.length >= limite) break;
   }

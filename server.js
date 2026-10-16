@@ -1611,8 +1611,8 @@ async function sincronizarComEspecialista(cliente) {
   const legado = lancamentos.filter((l) => l.categoria_pocket === null && l.data);
 
   // Exemplos e memória priorizam o que o ESPECIALISTA confirmou.
-  const doEspecialista = lancamentos.filter((l) => l.fonte_categoria === 'especialista');
-  const base = doEspecialista.length ? [...doEspecialista, ...lancamentos.filter((l) => l.fonte_categoria !== 'especialista')] : lancamentos;
+  const doEspecialista = lancamentos.filter((l) => l.fonte_categoria === 'especialista' || l.fonte_categoria === 'cliente');
+  const base = doEspecialista.length ? [...doEspecialista, ...lancamentos.filter((l) => !doEspecialista.includes(l))] : lancamentos;
   const porCategoria = aprenderPorCategoria(doEspecialista);
   const exemplos = exemplosParaIA(base);
 
