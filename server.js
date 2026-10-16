@@ -97,6 +97,7 @@ const {
 const {
   buscarClientePorNumero,
   listarClientesAtivos,
+  adicionarIdentidadesCliente,
   adicionarCliente,
   criarPlanilhaCliente,
   ativarPlanoEspecialista,
@@ -698,7 +699,7 @@ async function aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, texto
   return true;
 }
 
-const RE_PARECE_CORRECAO = /\b(despesa|receita|gasto|pagu|compr|venda|vendi|recebi|entrada|sa[ií]da|pessoal|retirada|transfer|d[ií]zimo|oferta|categoria|era|foi|n[ãa]o\s+[ée]|errad|na verdade|coloca|muda|troca)/i;
+const RE_PARECE_CORRECAO = /\b(meu|minha|paguei|despesa|receita|gasto|pagu|compr|venda|vendi|recebi|entrada|sa[ií]da|pessoal|retirada|transfer|d[ií]zimo|oferta|categoria|era|foi|n[ãa]o\s+[ée]|errad|na verdade|coloca|muda|troca)/i;
 
 async function aplicarCorrecaoDeClassificacao(remetente, cliente, sheetId, memoria, texto) {
   let correcao;
@@ -732,6 +733,14 @@ async function aplicarCorrecaoDeClassificacao(remetente, cliente, sheetId, memor
     return true;
   }
   registrarMemoriaCorrecao(remetente, { ...memoria, dados: { ...memoria.dados, ...novo } });
+  // Aprende a identidade (16/10/2026): cliente disse que um lançamento de SAÍDA era RECEITA e o
+  // documento tinha recebedor -> esse nome/CNPJ é do cliente. Próximo comprovante dele já vem certo.
+  if (memoria.dados.tipo_movimentacao !== 'entrada' && novo.tipo_movimentacao === 'entrada' && memoria.dados.recebedor_nome) {
+    const doc = soDigitos(memoria.dados.recebedor_documento);
+    adicionarIdentidadesCliente(sheetId, [memoria.dados.recebedor_nome, ...(doc.length === 11 || doc.length === 14 ? [doc] : [])])
+      .then((add) => add && console.log(`Identidade aprendida (${cliente ? cliente.nome : remetente}): "${memoria.dados.recebedor_nome}"`))
+      .catch((e) => console.error('Falha ao gravar identidade aprendida:', e.message));
+  }
   console.log(`Correção do cliente aplicada (${cliente ? cliente.nome : remetente}): ${memoria.dados.tipo_movimentacao}/${memoria.dados.grupo_dre} -> ${novo.tipo_movimentacao}/${novo.grupo_dre} — "${texto}"`);
   const sentido = novo.tipo_movimentacao === 'entrada' ? 'entrada (receita)' : 'saída (despesa)';
   await enviarMensagemWhatsApp(remetente, `✅ ${correcao.resposta || 'Corrigido!'}
@@ -1091,16 +1100,28 @@ function tokensNome(t) {
   return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
     .replace(/[^a-z\s]/g, ' ').split(/\s+/).filter((p) => p.length >= 3 && !PALAVRAS_NOME_IGNORADAS.has(p));
 }
+const soDigitos = (t) => String(t || '').replace(/\D/g, '');
 async function identidadesDoCliente(cliente) {
   if (!cliente) return [];
   const todos = await listarClientesAtivos().catch(() => [cliente]);
   const nomes = new Set();
+  const docs = new Set();
   for (const c of todos.filter((x) => x.sheetId === cliente.sheetId)) {
     String(c.nome || '').split(/[()]/).map((p) => p.trim()).filter(Boolean).forEach((p) => nomes.add(p));
+    // Coluna "Identidades" da mestre (16/10/2026): razão social, fantasia, CNPJ/CPF.
+    for (const ident of c.identidades || []) {
+      const d = soDigitos(ident);
+      if (d.length === 11 || d.length === 14) docs.add(d); else nomes.add(ident);
+    }
   }
-  return [...nomes].map(tokensNome).filter((t) => t.length);
+  const lista = [...nomes].map(tokensNome).filter((t) => t.length);
+  lista.docs = [...docs];
+  return lista;
 }
-function ehDoCliente(nome, identidades) {
+function ehDoCliente(nome, identidades, documento) {
+  const d = soDigitos(documento);
+  // Documento completo (sem máscara) bate -> é o cliente, sem precisar comparar nome.
+  if ((d.length === 11 || d.length === 14) && (identidades.docs || []).includes(d)) return true;
   const t = tokensNome(nome);
   if (!t.length) return false;
   // Mesmo primeiro nome + algum sobrenome, ou 2+ palavras em comum (cobre "SIRLENE ROSA VICENTE").
@@ -1113,10 +1134,14 @@ async function ajustarSentidoPorPartes(dados, cliente) {
   if (!dados || !cliente || /d[ií]zimo|oferta|doa[cç][aã]o/i.test(`${dados.descricao} ${dados.categoria}`)) return; // regra 2: sempre saída
   const ids = await identidadesDoCliente(cliente);
   if (!ids.length) return;
-  const pagaCliente = ehDoCliente(dados.pagador_nome, ids);
-  const recebeCliente = ehDoCliente(dados.recebedor_nome, ids);
+  const pagaCliente = ehDoCliente(dados.pagador_nome, ids, dados.pagador_documento);
+  const recebeCliente = ehDoCliente(dados.recebedor_nome, ids, dados.recebedor_documento);
   const maquininha = /via estabelecimento|via cliente|maquininha|point|cielo|stone|getnet|sumup|pagseguro/i.test(`${dados.observacoes} ${dados.descricao}`);
   let novo = null;
+  // Recebedor desconhecido num documento de venda/maquininha: lança como compra (o caso mais comum) e
+  // PERGUNTA ao cliente — "é seu (venda) ou você pagou?". A resposta corrige e ensina (ver
+  // aplicarCorrecaoDeClassificacao: "é meu" -> entrada + o nome entra nas identidades do cliente).
+  if (maquininha && dados.recebedor_nome && !recebeCliente && !pagaCliente) dados._perguntarSentido = dados.recebedor_nome;
   if (dados.tipo_movimentacao === 'entrada' && pagaCliente && !recebeCliente) novo = 'saida';
   else if (dados.tipo_movimentacao === 'entrada' && maquininha && dados.recebedor_nome && !recebeCliente) novo = 'saida';
   else if (dados.tipo_movimentacao === 'saida' && recebeCliente && !pagaCliente && dados.pagador_nome) novo = 'entrada';
@@ -1192,11 +1217,19 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
       mimeType: documentoOriginal.mimeType,
       nomeArquivo: documentoOriginal.nomeArquivo,
       resumoTipo: documentoOriginal.resumoTipo || 'comprovante',
-      dados: { data: dadosExtraidos.data, valor: dadosExtraidos.valor, tipo_movimentacao: dadosExtraidos.tipo_movimentacao, descricao: dadosExtraidos.descricao, estabelecimento_ou_pessoa: dadosExtraidos.estabelecimento_ou_pessoa, categoria: dadosExtraidos.categoria, grupo_dre: dadosExtraidos.grupo_dre },
+      dados: { data: dadosExtraidos.data, valor: dadosExtraidos.valor, tipo_movimentacao: dadosExtraidos.tipo_movimentacao, descricao: dadosExtraidos.descricao, estabelecimento_ou_pessoa: dadosExtraidos.estabelecimento_ou_pessoa, categoria: dadosExtraidos.categoria, grupo_dre: dadosExtraidos.grupo_dre, pagador_nome: dadosExtraidos.pagador_nome, pagador_documento: dadosExtraidos.pagador_documento, recebedor_nome: dadosExtraidos.recebedor_nome, recebedor_documento: dadosExtraidos.recebedor_documento },
     });
   }
 
   await enviarMensagemWhatsApp(remetente, formatarResumoComprovante(dadosExtraidos));
+  if (dadosExtraidos._perguntarSentido && documentoOriginal && resultado.ref) {
+    await enviarMensagemWhatsApp(
+      remetente,
+      `❓ Só pra confirmar: *${dadosExtraidos._perguntarSentido}* é o seu estabelecimento (você *vendeu*) ou você *pagou* nessa loja?
+
+Responde "*é meu*" (venda) ou "*eu paguei*" (compra). Lancei como compra por enquanto.`
+    ).catch(() => {});
+  }
 
   // Lançamento que cai numa competência JÁ FECHADA (comprovante retroativo — cliente mandou depois
   // do fechamento do mês). Entra normal na aba do mês da data do comprovante, mas avisa que o

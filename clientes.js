@@ -15,7 +15,7 @@ const ABA_CLIENTES = 'Clientes';
 // cliente dentro de GOOGLE_DRIVE_FOLDER_ID (ver documentos-grandes.js), criada sozinha na primeira
 // vez que ele manda um extrato/fatura grande demais pra ler de uma vez. Célula vazia = pasta ainda
 // não criada; garantirPastaCliente cria e preenche aqui pra nunca precisar recriar/duplicar.
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash', 'Pasta_Drive_ID'];
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash', 'Pasta_Drive_ID', 'Identidades'];
 const LIMITE_PADRAO = 300; // usado se um cliente antigo não tiver limite salvo (ex.: cadastro manual anterior a essa coluna existir)
 const TIPO_PADRAO = 'PADRAO';
 
@@ -103,13 +103,13 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:I1`,
+    range: `${ABA_CLIENTES}!A1:J1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:I1`,
+      range: `${ABA_CLIENTES}!A1:J1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
     });
@@ -133,7 +133,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:I`,
+    range: `${ABA_CLIENTES}!A2:J`,
   });
 
   const linhas = resposta.data.values || [];
@@ -152,6 +152,10 @@ async function carregarTodosClientes() {
     senhaHash: linha[7] || '',
     // Vazio = pasta ainda não criada no Drive (ver garantirPastaCliente em documentos-grandes.js).
     pastaDriveId: linha[8] || '',
+    // 16/10/2026 — nomes/CNPJs/CPFs pelos quais o cliente PAGA e RECEBE (razão social, nome fantasia,
+    // nome da pessoa), separados por ";". Decide entrada x saída (ajustarSentidoPorPartes em
+    // server.js). Preenchido no cadastro e aprendido quando o cliente corrige "isso é receita".
+    identidades: String(linha[9] || '').split(';').map((x) => x.trim()).filter(Boolean),
   }));
 }
 
@@ -413,6 +417,19 @@ async function definirPastaDriveClientePorSheetId(sheetId, pastaDriveId) {
   return atualizarColunaPorSheetId('I', sheetId, pastaDriveId);
 }
 
+// Acrescenta nomes/documentos à identidade do cliente (todas as linhas da mesma planilha), sem
+// duplicar. `novas` = array de strings.
+async function adicionarIdentidadesCliente(sheetId, novas) {
+  const todos = await carregarTodosClientes();
+  const atuais = new Set((todos.find((c) => c.sheetId === sheetId) || { identidades: [] }).identidades);
+  const antes = atuais.size;
+  (novas || []).map((x) => String(x || '').trim()).filter((x) => x.length >= 3).forEach((x) => atuais.add(x));
+  if (atuais.size === antes) return false;
+  await atualizarColunaPorSheetId('J', sheetId, [...atuais].join('; '));
+  cache = null;
+  return true;
+}
+
 module.exports = {
   listarClientesAtivos,
   aplicarCompartilhamentoPadrao,
@@ -423,6 +440,7 @@ module.exports = {
   ativarPlanoEspecialista,
   definirSenhaDashboard,
   definirPastaDriveClientePorSheetId,
+  adicionarIdentidadesCliente,
   getDriveClient,
   gerarUrlAutorizacaoDrive,
   trocarCodigoPorTokens,

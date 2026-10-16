@@ -1,13 +1,13 @@
 require('dotenv').config();
-const { adicionarCliente, aplicarCompartilhamentoPadrao } = require('./clientes');
+const { adicionarCliente, aplicarCompartilhamentoPadrao, adicionarIdentidadesCliente } = require('./clientes');
 const { enviarMensagemWhatsApp } = require('./whatsapp');
 const { estilizarPlanilhaCliente } = require('./sheets-styler');
 const { garantirPastaCliente } = require('./documentos-grandes');
 
-const [, , numero, nome, sheetId, emailCliente] = process.argv;
+const [, , numero, nome, sheetId, emailCliente, identidades] = process.argv;
 
 if (!numero || !nome || !sheetId) {
-  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA" ["email-do-cliente@gmail.com"]');
+  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA" ["email-do-cliente@gmail.com" ou ""] ["Razão Social; Nome Fantasia; CNPJ; CPF"]');
   process.exit(1);
 }
 
@@ -20,6 +20,11 @@ async function main() {
   await garantirPastaCliente({ numeroWhatsapp: numero, nome, sheetId, pastaDriveId: '' })
     .then((pastaId) => console.log(`Pasta no Drive criada/reaproveitada (ID: ${pastaId}).`))
     .catch((erro) => console.error('Aviso: cliente cadastrado, mas a criação da pasta no Drive falhou:', erro.message));
+
+  // Identidades (16/10/2026): nomes/CNPJs pelos quais o cliente paga e recebe — decidem entrada x saída.
+  await adicionarIdentidadesCliente(sheetId, [nome, ...String(identidades || '').split(';')])
+    .then(() => console.log('Identidades do cliente registradas.'))
+    .catch((erro) => console.error('Aviso: não consegui registrar as identidades:', erro.message));
 
   // Acesso padrão (14/10/2026): equipe edita, cliente só lê (e-mail opcional), nenhum link aberto.
   await aplicarCompartilhamentoPadrao(sheetId, emailCliente)

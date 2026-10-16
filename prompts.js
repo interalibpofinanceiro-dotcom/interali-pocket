@@ -741,7 +741,8 @@ REGRAS:
 - É correção quando o cliente contesta ou ajusta o lançamento: "despesa não é receita", "isso foi um gasto", "não é venda, eu paguei", "é pessoal", "foi transferência entre minhas contas", "é dízimo", "coloca como mercado", "não, isso entrou pra mim".
 - "Despesa"/"gasto"/"paguei"/"comprei" = "saida". "Receita"/"recebi"/"venda"/"entrou pra mim" = "entrada". Atenção a negação: "despesa não é receita" = é DESPESA (saída); "não é despesa, é receita" = é RECEITA (entrada).
 - Se o sentido mudou, escolha um "grupo_dre" COMPATÍVEL com o novo sentido (saída nunca recebe chave de receita/aporte/rendimento; entrada nunca recebe chave de custo/despesa) e uma "categoria" coerente (ex.: saída num estabelecimento -> "Compra — <nome do estabelecimento>").
-- "Pessoal", "da família", "meu", "gasto pessoal" numa saída -> "grupo_dre": "pessoal_prolabore" e categoria começando com "Retirada do titular — ".
+- "É meu", "é minha loja", "esse estabelecimento é meu", "eu que vendi" (resposta à pergunta "é seu estabelecimento ou você pagou?") = o cliente VENDEU -> "tipo_movimentacao": "entrada" e um "grupo_dre" de receita ("receita_venda_mercadorias" ou "receita_prestacao_servicos", pelo que o documento indica). "Eu paguei", "comprei" = "saida".
+- "Gasto pessoal", "da família", "é pessoal" numa saída -> "grupo_dre": "pessoal_prolabore" e categoria começando com "Retirada do titular — ".
 - Se a mensagem for outra coisa (pergunta, comando, assunto diferente, "ok", "obrigado") -> "e_correcao": false e os demais campos null.
 - Responda APENAS com o JSON.
 
