@@ -5,7 +5,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const {
   PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_ORCAMENTO, PROMPT_VENDAS, PROMPT_CUPOM_TERMICO, PROMPT_CONSULTA,
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
-  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS, PROMPT_CLASSIFICAR_TRANSACOES_DRE,
+  PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS, PROMPT_CLASSIFICAR_TRANSACOES_DRE, PROMPT_CORRECAO_LANCAMENTO,
 } = require('./prompts');
 
 const anthropic = new Anthropic({
@@ -352,6 +352,27 @@ async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, ex
   return saida;
 }
 
+// Interpreta a mensagem do cliente como correção do último lançamento (ver PROMPT_CORRECAO_LANCAMENTO).
+// Devolve null quando não é correção; valida chave e sentido (nunca devolve combinação incoerente).
+async function interpretarCorrecaoDeLancamento(lancamento, texto, { nomeCliente } = {}) {
+  const { porChave } = require('./dre');
+  const atual = `Lançamento registrado: ${lancamento.tipo_movimentacao === 'entrada' ? 'ENTRADA (receita)' : 'SAÍDA (despesa)'} de R$ ${Number(lancamento.valor || 0).toFixed(2)} em ${lancamento.data} — "${lancamento.descricao || ''}" — ${lancamento.estabelecimento_ou_pessoa || ''} — categoria "${lancamento.categoria || ''}" (grupo ${lancamento.grupo_dre || ''}).`;
+  const resposta = await chamarExtracaoTexto(PROMPT_CORRECAO_LANCAMENTO, `${nomeCliente ? `Cliente: ${nomeCliente}
+` : ''}${atual}
+
+MENSAGEM DO CLIENTE:
+${texto}`, 600);
+  const j = extrairJSON(resposta);
+  if (!j || !j.e_correcao) return null;
+  const tipo = j.tipo_movimentacao === 'entrada' || j.tipo_movimentacao === 'saida' ? j.tipo_movimentacao : null;
+  const tipoFinal = tipo || (lancamento.tipo_movimentacao === 'entrada' ? 'entrada' : 'saida');
+  let grupo = j.grupo_dre && porChave(j.grupo_dre) ? j.grupo_dre : null;
+  if (grupo && !direcaoCompativel(grupo, tipoFinal)) grupo = null;
+  if (tipo && !grupo && lancamento.grupo_dre && !direcaoCompativel(lancamento.grupo_dre, tipoFinal)) grupo = tipoFinal === 'entrada' ? 'receita_outras' : 'admin_outras_despesas';
+  if (!tipo && !grupo && !j.categoria) return null;
+  return { tipo_movimentacao: tipo, categoria: j.categoria || null, grupo_dre: grupo, resposta: j.resposta || '' };
+}
+
 async function esclarecerOrfaosDeTexto(itens, texto) {
   const lista = itens.map((it, i) => `${i}. R$ ${it.valor} em ${it.data}${it.descricao ? ` — "${it.descricao}"` : ''}`).join('\n');
   const resposta = await chamarExtracaoTexto(PROMPT_ESCLARECER_ORFAOS, `RECEBIMENTOS PENDENTES:\n${lista}\n\nMENSAGEM DO CLIENTE:\n${texto}`, 2048);
@@ -414,6 +435,7 @@ module.exports = {
   extrairResumoExtratoDeBuffer,
   esclarecerOrfaosDeTexto,
   classificarTransacoesParaDRE,
+  interpretarCorrecaoDeLancamento,
   consultarFluxoDeCaixa,
   getMediaType,
   testarAnthropic,

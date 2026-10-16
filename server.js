@@ -16,6 +16,7 @@ const {
   extrairResumoExtratoDeBuffer,
   esclarecerOrfaosDeTexto,
   classificarTransacoesParaDRE,
+  interpretarCorrecaoDeLancamento,
   consultarFluxoDeCaixa,
   testarAnthropic,
 } = require('./index');
@@ -585,7 +586,7 @@ const REGEX_PALAVRA_CHAVE_DOCUMENTO = /\b(extrato|fatura|cart[ãa]o|boleto|pagar
 // de tentar reverter sozinho (mesmo princípio de "não corrigir sozinho um monte de mensagens
 // estranhas sem investigar" já usado no resto do arquivo).
 const MEMORIA_ULTIMO_DOCUMENTO = new Map(); // remetente -> { sheetId, aba, linha, buffer, mimeType, nomeArquivo, resumoTipo, aguardandoTipo, criadoEm }
-const TTL_MEMORIA_CORRECAO_MS = 10 * 60 * 1000;
+const TTL_MEMORIA_CORRECAO_MS = 60 * 60 * 1000; // 16/10/2026: era 10 min — correção de sentido/categoria costuma vir depois
 
 function registrarMemoriaCorrecao(remetente, entrada) {
   if (!remetente) return;
@@ -667,7 +668,15 @@ async function aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, texto
   }
 
   const correcao = interpretarCorrecao(texto);
-  if (!correcao) return false;
+  if (!correcao) {
+    // 16/10/2026 — correção de SENTIDO/CATEGORIA ("despesa não é receita", "isso é pessoal", "foi
+    // transferência", "coloca como mercado"): a IA interpreta contra o último lançamento e o Pocket
+    // corrige NA HORA, no lugar (sem apagar/reprocessar). Caso real: Sirlene, maquininha de outra loja.
+    if (memoria && memoria.dados && RE_PARECE_CORRECAO.test(texto)) {
+      return aplicarCorrecaoDeClassificacao(remetente, cliente, sheetId, memoria, texto);
+    }
+    return false;
+  }
 
   if (!memoria) {
     await enviarMensagemWhatsApp(remetente, 'Não achei nenhum documento recente pra corrigir (a memória de correção dura só 10 minutos, ou o último documento gerou mais de um lançamento — extrato/fatura detalhada/lote de vendas não dá pra desfazer sozinho por aqui). Pode reenviar o arquivo certo, ou me chamar que eu reviso na planilha.');
@@ -686,6 +695,49 @@ async function aplicarCorrecaoUltimoDocumento(remetente, cliente, sheetId, texto
   // PENDENCIAS_ESCOLHA_FATURA ("total"/"itens") já usado no resto do arquivo.
   await enviarMensagemWhatsApp(remetente, 'Entendi que algo saiu errado no último documento — mas pra corrigir certinho, me diz: era um *extrato bancário*, uma *fatura de cartão* ou um *boleto*?');
   registrarMemoriaCorrecao(remetente, { ...memoria, aguardandoTipo: true });
+  return true;
+}
+
+const RE_PARECE_CORRECAO = /\b(despesa|receita|gasto|pagu|compr|venda|vendi|recebi|entrada|sa[ií]da|pessoal|retirada|transfer|d[ií]zimo|oferta|categoria|era|foi|n[ãa]o\s+[ée]|errad|na verdade|coloca|muda|troca)/i;
+
+async function aplicarCorrecaoDeClassificacao(remetente, cliente, sheetId, memoria, texto) {
+  let correcao;
+  try {
+    correcao = await interpretarCorrecaoDeLancamento(memoria.dados, texto, { nomeCliente: cliente && cliente.nome });
+  } catch (erro) {
+    console.error('Falha ao interpretar correção do cliente:', erro.message);
+    avisarFaltaDeCredito(erro);
+    return false;
+  }
+  if (!correcao) return false;
+
+  const novo = {
+    tipo_movimentacao: correcao.tipo_movimentacao || memoria.dados.tipo_movimentacao,
+    categoria: correcao.categoria || memoria.dados.categoria,
+    grupo_dre: correcao.grupo_dre || memoria.dados.grupo_dre,
+  };
+  const data = [
+    { range: `'${memoria.aba}'!D${memoria.linha}`, values: [[novo.tipo_movimentacao]] },
+    { range: `'${memoria.aba}'!I${memoria.linha}`, values: [[novo.categoria]] },
+    { range: `'${memoria.aba}'!M${memoria.linha}`, values: [[novo.grupo_dre]] },
+    // "cliente|..." = decisão de quem conhece o próprio negócio: vira memória prioritária (ver
+    // sincronizarComEspecialista/memoria-cliente.js), igual à do especialista.
+    { range: `'${memoria.aba}'!V${memoria.linha}`, values: [[`cliente|${novo.categoria}`]] },
+  ];
+  try {
+    await comRetryTransiente(() => getSheetsClient().spreadsheets.values.batchUpdate({ spreadsheetId: sheetId, requestBody: { valueInputOption: 'RAW', data } }));
+  } catch (erro) {
+    console.error('Falha ao aplicar correção do cliente:', erro.message);
+    await enviarMensagemWhatsApp(remetente, 'Entendi a correção, mas não consegui alterar o lançamento agora. Já avisei a equipe pra ajustar.').catch(() => {});
+    return true;
+  }
+  registrarMemoriaCorrecao(remetente, { ...memoria, dados: { ...memoria.dados, ...novo } });
+  console.log(`Correção do cliente aplicada (${cliente ? cliente.nome : remetente}): ${memoria.dados.tipo_movimentacao}/${memoria.dados.grupo_dre} -> ${novo.tipo_movimentacao}/${novo.grupo_dre} — "${texto}"`);
+  const sentido = novo.tipo_movimentacao === 'entrada' ? 'entrada (receita)' : 'saída (despesa)';
+  await enviarMensagemWhatsApp(remetente, `✅ ${correcao.resposta || 'Corrigido!'}
+
+Agora está como *${sentido}* — ${novo.categoria} (R$ ${formatarNumero(memoria.dados.valor)}). Vou lembrar disso nos próximos.`);
+  if (cliente) atualizarAbaDreCliente(cliente).catch(() => {});
   return true;
 }
 
@@ -1029,7 +1081,64 @@ async function classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, 
 // passado só quando veio de uma mídia (não do comando "lançar:" por texto, que não tem arquivo).
 // Quando presente e o lançamento é NOVO (não duplicado/completar/ambíguo), grava na memória de
 // correção de curto prazo (ver MEMORIA_ULTIMO_DOCUMENTO) pra permitir corrigir por texto depois.
+// Confere o SENTIDO pelo nome de quem pagou e de quem recebeu (16/10/2026, pedido do Aroldo: "precisa
+// ler origem e nome da conta pra identificar se é entrada ou saída — em alguns clientes será receita,
+// em outros despesa"). Identidade do cliente = todos os nomes cadastrados pra mesma planilha (ex.:
+// "Aroldo Correa (Silvana)" -> Aroldo Correa e Silvana). Só corrige quando a evidência é clara;
+// senão mantém o que a IA decidiu.
+const PALAVRAS_NOME_IGNORADAS = new Set(['ltda', 'me', 'eireli', 'epp', 'sa', 'cia', 'de', 'da', 'do', 'dos', 'das', 'e', 'comercio', 'servicos']);
+function tokensNome(t) {
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z\s]/g, ' ').split(/\s+/).filter((p) => p.length >= 3 && !PALAVRAS_NOME_IGNORADAS.has(p));
+}
+async function identidadesDoCliente(cliente) {
+  if (!cliente) return [];
+  const todos = await listarClientesAtivos().catch(() => [cliente]);
+  const nomes = new Set();
+  for (const c of todos.filter((x) => x.sheetId === cliente.sheetId)) {
+    String(c.nome || '').split(/[()]/).map((p) => p.trim()).filter(Boolean).forEach((p) => nomes.add(p));
+  }
+  return [...nomes].map(tokensNome).filter((t) => t.length);
+}
+function ehDoCliente(nome, identidades) {
+  const t = tokensNome(nome);
+  if (!t.length) return false;
+  // Mesmo primeiro nome + algum sobrenome, ou 2+ palavras em comum (cobre "SIRLENE ROSA VICENTE").
+  return identidades.some((id) => {
+    const comum = id.filter((p) => t.includes(p)).length;
+    return comum >= 2 || (id.length === 1 && comum === 1) || (t[0] === id[0] && comum >= 2);
+  });
+}
+async function ajustarSentidoPorPartes(dados, cliente) {
+  if (!dados || !cliente || /d[ií]zimo|oferta|doa[cç][aã]o/i.test(`${dados.descricao} ${dados.categoria}`)) return; // regra 2: sempre saída
+  const ids = await identidadesDoCliente(cliente);
+  if (!ids.length) return;
+  const pagaCliente = ehDoCliente(dados.pagador_nome, ids);
+  const recebeCliente = ehDoCliente(dados.recebedor_nome, ids);
+  const maquininha = /via estabelecimento|via cliente|maquininha|point|cielo|stone|getnet|sumup|pagseguro/i.test(`${dados.observacoes} ${dados.descricao}`);
+  let novo = null;
+  if (dados.tipo_movimentacao === 'entrada' && pagaCliente && !recebeCliente) novo = 'saida';
+  else if (dados.tipo_movimentacao === 'entrada' && maquininha && dados.recebedor_nome && !recebeCliente) novo = 'saida';
+  else if (dados.tipo_movimentacao === 'saida' && recebeCliente && !pagaCliente && dados.pagador_nome) novo = 'entrada';
+  if (!novo) return;
+  console.log(`Sentido corrigido pelo nome das partes (${cliente.nome}): ${dados.tipo_movimentacao} -> ${novo} | pagador "${dados.pagador_nome || ''}" | recebedor "${dados.recebedor_nome || ''}"`);
+  dados.tipo_movimentacao = novo;
+  const { porChave: chave } = require('./dre');
+  const g = chave(dados.grupo_dre);
+  const receita = g && g.bloco === 'RECEITA_BRUTA';
+  if (novo === 'saida' && receita) {
+    dados.grupo_dre = 'nao_classificado'; // a rotina do especialista/IA dá a linha certa de despesa
+    dados.categoria = `Compra — ${dados.recebedor_nome || dados.estabelecimento_ou_pessoa || 'estabelecimento'}`;
+    if (dados.recebedor_nome) dados.estabelecimento_ou_pessoa = dados.recebedor_nome;
+  } else if (novo === 'entrada' && g && g.bloco !== 'RECEITA_BRUTA') {
+    dados.grupo_dre = 'nao_classificado';
+    dados.categoria = `Recebimento — ${dados.pagador_nome || dados.estabelecimento_ou_pessoa || ''}`.trim();
+  }
+  dados.observacoes = `${dados.observacoes || ''} [Sentido conferido pelo Pocket: pagador "${dados.pagador_nome || '-'}", recebedor "${dados.recebedor_nome || '-'}".]`.trim();
+}
+
 async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExtraidos, documentoOriginal = null) {
+  await ajustarSentidoPorPartes(dadosExtraidos, cliente).catch((erro) => console.error('Falha ao conferir sentido pelas partes:', erro.message));
   const lancamentosExistentes = await buscarTodosLancamentos(sheetId);
   await enriquecerLancamentoComCnae(dadosExtraidos, lancamentosExistentes).catch((erro) => console.error('Falha no enriquecimento CNAE:', erro.message));
   const resultado = await classificarESalvarLancamento(remetente, sheetId, dadosExtraidos, lancamentosExistentes);
@@ -1083,6 +1192,7 @@ async function processarLancamentoExtraido(remetente, cliente, sheetId, dadosExt
       mimeType: documentoOriginal.mimeType,
       nomeArquivo: documentoOriginal.nomeArquivo,
       resumoTipo: documentoOriginal.resumoTipo || 'comprovante',
+      dados: { data: dadosExtraidos.data, valor: dadosExtraidos.valor, tipo_movimentacao: dadosExtraidos.tipo_movimentacao, descricao: dadosExtraidos.descricao, estabelecimento_ou_pessoa: dadosExtraidos.estabelecimento_ou_pessoa, categoria: dadosExtraidos.categoria, grupo_dre: dadosExtraidos.grupo_dre },
     });
   }
 

@@ -77,6 +77,11 @@ const REGRAS_FLUXO_ENTRADA_SAIDA = `REGRAS CRÍTICAS DE FLUXO (ENTRADA vs SAÍDA
    - Preencha "tipo_movimentacao" com a direção da perna que o documento mostra (entrada se é o crédito, saída se é o débito), mas use SEMPRE "categoria": "Transferência entre Contas" e "grupo_dre": "transferencia_entre_contas".
    - NUNCA classifique isso como venda, faturamento, retirada, pró-labore, nem nenhuma chave de RECEITA_BRUTA/CUSTOS/DESPESAS.
 
+5. COMPROVANTE DE MAQUININHA (16/10/2026 — caso real: comprovante "Via Estabelecimento" do Mercado Pago de OUTRA loja, que a cliente recebeu ao pagar com o cartão, foi lançado como receita):
+   - Comprovante de maquininha (Cielo, Stone, Rede, Getnet, Mercado Pago Point, PagSeguro, SumUp — "via estabelecimento", "via cliente", "venda crédito/débito") mostra o ESTABELECIMENTO que recebeu. Ele só é "entrada" se o estabelecimento for o PRÓPRIO TITULAR da conta (nome/CNPJ do titular). Estabelecimento de outra pessoa/empresa = o titular PAGOU -> "saida", "estabelecimento_ou_pessoa" = o estabelecimento.
+   - Na dúvida (não dá pra saber se o estabelecimento é do titular) -> "saida".
+   - Sempre preencha "pagador_nome"/"recebedor_nome" com o que o documento mostra — o sistema confere com o nome do titular depois.
+
 4. CUPOM FISCAL / RECIBO DE VENDA EMITIDO POR OUTRO ESTABELECIMENTO (09/09/2026 — caso real: cupom de venda de uma sorveteria, cliente final anônimo "Consumidor Final", foi lançado como ENTRADA quando deveria ser SAÍDA):
    - Um cupom fiscal, recibo de venda ou nota fiscal de venda tem um EMITENTE (o estabelecimento que vendeu, normalmente no topo/cabeçalho — nome, CNPJ) e às vezes um "Cliente"/"Consumidor" (quem comprou, geralmente "Consumidor Final" ou um nome avulso — raramente é o titular da conta que está mandando o documento pro Pocket).
    - Quem MANDA esse tipo de documento pro Pocket é, na esmagadora maioria dos casos, quem COMPROU (está guardando o comprovante do próprio gasto) — NÃO o dono do estabelecimento que vendeu. Portanto, por padrão: "tipo_movimentacao": "saida", "estabelecimento_ou_pessoa" = o EMITENTE (quem vendeu), "cnpj_fornecedor" = CNPJ do emitente.
@@ -116,6 +121,10 @@ Sua tarefa é analisar o documento enviado e retornar SOMENTE um JSON válido (s
   "tipo_movimentacao": "entrada | saida",
   "descricao": "descrição curta e objetiva do que foi pago/recebido",
   "estabelecimento_ou_pessoa": "nome de quem recebeu ou pagou",
+  "pagador_nome": "nome de QUEM PAGOU, exatamente como aparece no documento (pagador, origem, remetente, debitado, comprador/portador do cartão), ou null",
+  "pagador_documento": "CPF/CNPJ de quem pagou, se aparecer (mesmo mascarado), ou null",
+  "recebedor_nome": "nome de QUEM RECEBEU, exatamente como aparece (favorecido, destino, beneficiário, estabelecimento da maquininha/cupom), ou null",
+  "recebedor_documento": "CPF/CNPJ de quem recebeu, se aparecer, ou null",
   "documento_identificacao": "CNPJ, CPF ou chave/ID da transação, se disponível, senão null",
   "cnpj_fornecedor": "CNPJ do EMITENTE/FORNECEDOR do documento (quem VENDEU / quem EMITIU a nota/cupom), só os 14 dígitos ou formatado — NÃO o CNPJ/CPF do pagador. null se não houver ou se for compra de pessoa física",
   "forma_pagamento": "pix | ted | doc | boleto | dinheiro | cartao_credito | cartao_debito | outro",
@@ -714,7 +723,33 @@ REGRAS (na ordem — a primeira que se aplicar vence):
 CLASSIFICAÇÃO PARA A DRE (grupo_dre) — use SOMENTE estas chaves:
 ${listaParaPrompt()}`;
 
+// Correção do cliente por mensagem sobre o ÚLTIMO lançamento (16/10/2026, caso real: Sirlene mandou
+// comprovante de maquininha de outra loja, o Pocket lançou como receita, ela respondeu "Despesa não é
+// receita" e nada mudou — só correção de TIPO DE DOCUMENTO ("era extrato") era entendida).
+const PROMPT_CORRECAO_LANCAMENTO = `Você é o assistente financeiro (BPO) de um cliente no WhatsApp. Acabou de registrar um lançamento e o cliente mandou uma mensagem. Decida se a mensagem é uma CORREÇÃO desse lançamento e, se for, qual é a classificação certa.
+
+Retorne SOMENTE um JSON:
+{
+  "e_correcao": true,
+  "tipo_movimentacao": "entrada | saida | null (null = não mudou o sentido)",
+  "categoria": "categoria curta e específica no vocabulário do cliente, ou null se não mudou",
+  "grupo_dre": "chave da lista abaixo, ou null se não mudou",
+  "resposta": "frase curta e simpática confirmando o que foi corrigido (sem jargão contábil)"
+}
+
+REGRAS:
+- É correção quando o cliente contesta ou ajusta o lançamento: "despesa não é receita", "isso foi um gasto", "não é venda, eu paguei", "é pessoal", "foi transferência entre minhas contas", "é dízimo", "coloca como mercado", "não, isso entrou pra mim".
+- "Despesa"/"gasto"/"paguei"/"comprei" = "saida". "Receita"/"recebi"/"venda"/"entrou pra mim" = "entrada". Atenção a negação: "despesa não é receita" = é DESPESA (saída); "não é despesa, é receita" = é RECEITA (entrada).
+- Se o sentido mudou, escolha um "grupo_dre" COMPATÍVEL com o novo sentido (saída nunca recebe chave de receita/aporte/rendimento; entrada nunca recebe chave de custo/despesa) e uma "categoria" coerente (ex.: saída num estabelecimento -> "Compra — <nome do estabelecimento>").
+- "Pessoal", "da família", "meu", "gasto pessoal" numa saída -> "grupo_dre": "pessoal_prolabore" e categoria começando com "Retirada do titular — ".
+- Se a mensagem for outra coisa (pergunta, comando, assunto diferente, "ok", "obrigado") -> "e_correcao": false e os demais campos null.
+- Responda APENAS com o JSON.
+
+CLASSIFICAÇÃO PARA A DRE (grupo_dre):
+${listaParaPrompt()}`;
+
 module.exports = {
+  PROMPT_CORRECAO_LANCAMENTO,
   PROMPT_CLASSIFICAR_TRANSACOES_DRE,
   PROMPT_ESCLARECER_ORFAOS,
   PROMPT_EXTRACAO,
