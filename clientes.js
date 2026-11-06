@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { google } = require('googleapis');
+const { normalizarNicho } = require('./nichos');
 
 const ABA_CLIENTES = 'Clientes';
 // 'Tipo' adicionada no FIM em 23/08/2026 (mesmo padrão de sempre — nunca reordena as que já
@@ -15,7 +16,10 @@ const ABA_CLIENTES = 'Clientes';
 // cliente dentro de GOOGLE_DRIVE_FOLDER_ID (ver documentos-grandes.js), criada sozinha na primeira
 // vez que ele manda um extrato/fatura grande demais pra ler de uma vez. Célula vazia = pasta ainda
 // não criada; garantirPastaCliente cria e preenche aqui pra nunca precisar recriar/duplicar.
-const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash', 'Pasta_Drive_ID', 'Identidades'];
+// 'Nicho' adicionada no FIM em 05/11/2026 (mesmo padrão — aditiva): ramo do cliente (SALAO, PIZZARIA,
+// TRANSPORTES, PESSOA_FISICA...), escolhe o pacote de categorias em nichos.js. Vazio = comportamento
+// antigo (a IA identifica o ramo sozinha pelo documento). Definido por planilha (Sheet_ID), igual senha.
+const CABECALHO_CLIENTES = ['Numero_WhatsApp', 'Nome_Cliente', 'Sheet_ID', 'Ativo', 'Plano_Especialista', 'LimiteLancamentos', 'Tipo', 'Senha_Hash', 'Pasta_Drive_ID', 'Identidades', 'Nicho'];
 const LIMITE_PADRAO = 300; // usado se um cliente antigo não tiver limite salvo (ex.: cadastro manual anterior a essa coluna existir)
 const TIPO_PADRAO = 'PADRAO';
 
@@ -103,13 +107,13 @@ async function garantirAbaComCabecalho(sheets, spreadsheetId) {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A1:J1`,
+    range: `${ABA_CLIENTES}!A1:K1`,
   });
 
   if (!resposta.data.values || resposta.data.values.length === 0) {
     await sheets.spreadsheets.values.update({
       spreadsheetId,
-      range: `${ABA_CLIENTES}!A1:J1`,
+      range: `${ABA_CLIENTES}!A1:K1`,
       valueInputOption: 'RAW',
       requestBody: { values: [CABECALHO_CLIENTES] },
     });
@@ -133,7 +137,7 @@ async function carregarTodosClientes() {
 
   const resposta = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A2:J`,
+    range: `${ABA_CLIENTES}!A2:K`,
   });
 
   const linhas = resposta.data.values || [];
@@ -156,6 +160,8 @@ async function carregarTodosClientes() {
     // nome da pessoa), separados por ";". Decide entrada x saída (ajustarSentidoPorPartes em
     // server.js). Preenchido no cadastro e aprendido quando o cliente corrige "isso é receita".
     identidades: String(linha[9] || '').split(';').map((x) => x.trim()).filter(Boolean),
+    // 05/11/2026 — chave oficial do nicho (ver nichos.js) ou null quando vazio/irreconhecível.
+    nicho: normalizarNicho(linha[10]),
   }));
 }
 
@@ -274,7 +280,7 @@ async function criarPlanilhaCliente(nomeCliente) {
 // `tipo` (23/08/2026, opcional, default 'PADRAO') — perfil do cliente; hoje só 'PADRAO' ou
 // 'COMERCIO_MATRIZ' têm efeito no código (ver comercio-matriz.js). Parâmetro novo no FIM da lista,
 // então nenhuma chamada existente (cadastrar-cliente.js, checkout da landing page) precisa mudar.
-async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false, limiteLancamentos = LIMITE_PADRAO, tipo = TIPO_PADRAO) {
+async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista = false, limiteLancamentos = LIMITE_PADRAO, tipo = TIPO_PADRAO, nicho = '') {
   const spreadsheetId = process.env.GOOGLE_MASTER_SHEET_ID;
   const sheets = getSheetsClient();
 
@@ -282,10 +288,10 @@ async function adicionarCliente(numeroWhatsapp, nome, sheetId, planoEspecialista
 
   await sheets.spreadsheets.values.append({
     spreadsheetId,
-    range: `${ABA_CLIENTES}!A:G`,
+    range: `${ABA_CLIENTES}!A:K`,
     valueInputOption: 'USER_ENTERED',
     insertDataOption: 'INSERT_ROWS',
-    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE', limiteLancamentos, tipo || TIPO_PADRAO]] },
+    requestBody: { values: [[numeroWhatsapp, nome, sheetId, 'TRUE', planoEspecialista ? 'TRUE' : 'FALSE', limiteLancamentos, tipo || TIPO_PADRAO, '', '', '', normalizarNicho(nicho) || '']] },
   });
 
   cache = null;
@@ -430,7 +436,17 @@ async function adicionarIdentidadesCliente(sheetId, novas) {
   return true;
 }
 
+// Define o nicho de TODAS as linhas que apontam pra mesma planilha (mesmo critério da senha do
+// painel: vários números do mesmo cliente compartilham a planilha, o ramo é da planilha).
+async function definirNichoPorSheetId(sheetId, nicho) {
+  const chave = normalizarNicho(nicho);
+  if (!chave) throw new Error(`Nicho "${nicho}" não reconhecido.`);
+  const linhas = await atualizarColunaPorSheetId('K', sheetId, chave);
+  return { chave, linhas };
+}
+
 module.exports = {
+  definirNichoPorSheetId,
   listarClientesAtivos,
   aplicarCompartilhamentoPadrao,
   buscarClientePorNumero,

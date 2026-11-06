@@ -4,15 +4,23 @@ const { enviarMensagemWhatsApp } = require('./whatsapp');
 const { estilizarPlanilhaCliente } = require('./sheets-styler');
 const { garantirPastaCliente } = require('./documentos-grandes');
 
-const [, , numero, nome, sheetId, emailCliente, identidades] = process.argv;
+const [, , numero, nome, sheetId, emailCliente, identidades, nicho] = process.argv;
+const { normalizarNicho, listaNichos } = require('./nichos');
 
 if (!numero || !nome || !sheetId) {
-  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA" ["email-do-cliente@gmail.com" ou ""] ["Razão Social; Nome Fantasia; CNPJ; CPF"]');
+  console.log('Uso: node cadastrar-cliente.js "whatsapp:+55XXXXXXXXXXX" "Nome do Cliente" "ID_DA_PLANILHA" ["email-do-cliente@gmail.com" ou ""] ["Razão Social; Nome Fantasia; CNPJ; CPF"] ["NICHO"]');
+  console.log('Nichos: ' + listaNichos().join(' | '));
   process.exit(1);
 }
 
 async function main() {
-  await adicionarCliente(numero, nome, sheetId);
+  // Nicho (05/11/2026, ver nichos.js) — opcional; vazio = IA identifica o ramo sozinha, como antes.
+  if (nicho && !normalizarNicho(nicho)) {
+    console.error(`Nicho "${nicho}" não reconhecido. Use um destes: ${listaNichos().join(' | ')}`);
+    process.exit(1);
+  }
+  await adicionarCliente(numero, nome, sheetId, false, undefined, undefined, nicho || '');
+  if (nicho) console.log(`Nicho: ${normalizarNicho(nicho)}`);
   console.log(`Cliente "${nome}" (${numero}) cadastrado com sucesso.`);
 
   // Pasta do cliente no Drive (16/09/2026) — já deixa pronta no cadastro, não só na primeira vez

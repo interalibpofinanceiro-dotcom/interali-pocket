@@ -12,6 +12,7 @@
     "server": "node server.js",
     "cadastrar-cliente": "node cadastrar-cliente.js",
     "desativar-cliente": "node desativar-cliente.js",
+    "definir-nicho": "node definir-nicho.js",
     "criar-voucher": "node criar-voucher.js",
     "definir-senha-dashboard": "node definir-senha-dashboard.js",
     "estilizar-planilhas": "node scripts/estilizar-planilhas.js",

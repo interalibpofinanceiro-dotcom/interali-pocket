@@ -84,6 +84,14 @@ const { sugerirPorCNAE } = require('./cnae-categorias');
 const { chaveForaDoResultado, porChave } = require('./dre');
 const { montarDreAnual, escreverAbaDre } = require('./dre-anual');
 const { aprenderPorContraparte, sugerirPelaMemoria, aprenderPorCategoria, exemplosParaIA, normalizar: normalizarMemoria } = require('./memoria-cliente');
+const { definirClienteAtual } = require('./contexto-cliente');
+const { pacoteDoNicho, normalizarNicho, adicionarRegraNicho, carregarRegrasNicho, listaNichos } = require('./nichos');
+const { formatarParaOndeFoiDinheiro } = require('./reconciliacao');
+
+function ehPessoaFisica(cliente) {
+  const pacote = cliente && pacoteDoNicho(cliente.nicho);
+  return !!(pacote && pacote.pessoaFisica);
+}
 const {
   registrarFechamentoCliente,
   registrarFechamentoMestre,
@@ -104,6 +112,7 @@ const {
   definirSenhaDashboard,
   gerarUrlAutorizacaoDrive,
   trocarCodigoPorTokens,
+  definirNichoPorSheetId,
 } = require('./clientes');
 const {
   garantirPastaCliente,
@@ -1637,6 +1646,7 @@ function reservaSemPista(tipo, categoriaAtual) {
 }
 
 async function sincronizarComEspecialista(cliente) {
+  definirClienteAtual(cliente); // pacote do nicho na classificação da DRE (tarefa diária, fora do webhook)
   const lancamentos = await buscarTodosLancamentos(cliente.sheetId);
   const valida = (l) => l.categoria && l.categoria !== 'Não Classificado';
   const editados = lancamentos.filter((l) => valida(l) && l.categoria_pocket !== null && l.categoria.trim() !== String(l.categoria_pocket).trim());
@@ -1959,6 +1969,51 @@ function pistaPorNomeBanco(texto) {
 // Reconhece o comando do admin pra criar voucher direto pelo WhatsApp, sem precisar de
 // terminal: "criar cupom BARBER-8912" ou "criar cupom BARBER-8912 indicação Instagram".
 // Tudo depois do código vira a descrição (opcional, só pra controle interno do Aroldo).
+function interpretarComandoNicho(texto) {
+  const t = (texto || '').trim();
+  if (/^nichos$/i.test(t)) return { acao: 'listar' };
+  let m = t.match(/^regras\s+(\S+)$/i);
+  if (m) return { acao: 'ver_regras', nicho: m[1] };
+  m = t.match(/^regra\s+(\S+)\s*:\s*([\s\S]+)$/i);
+  if (m) return { acao: 'nova_regra', nicho: m[1], regra: m[2].trim() };
+  m = t.match(/^nicho\s+(.+?)\s*:\s*(\S+)$/i);
+  if (m) return { acao: 'definir', cliente: m[1].trim(), nicho: m[2] };
+  return null;
+}
+
+async function executarComandoNicho(cmd) {
+  const disponiveis = listaNichos().join('\n');
+  if (cmd.acao === 'listar') {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const porPlanilha = new Map();
+    for (const c of clientes) if (!porPlanilha.has(c.sheetId)) porPlanilha.set(c.sheetId, c);
+    const linhas = [...porPlanilha.values()].map((c) => `• ${c.nome}: ${c.nicho || '(sem nicho — IA adivinha)'}`);
+    return `🏷️ *Nichos disponíveis*\n${disponiveis}\n\n👥 *Clientes*\n${linhas.join('\n')}`;
+  }
+  if (cmd.acao === 'ver_regras') {
+    const chave = normalizarNicho(cmd.nicho);
+    if (!chave) throw new Error(`Nicho "${cmd.nicho}" não existe. Disponíveis:\n${disponiveis}`);
+    const regras = (await carregarRegrasNicho({ ignorarCache: true })).get(chave) || [];
+    return regras.length
+      ? `📚 Regras salvas do nicho ${chave}:\n${regras.map((r, i) => `${i + 1}. ${r}`).join('\n')}`
+      : `📚 O nicho ${chave} ainda não tem regras salvas (só o pacote padrão).`;
+  }
+  if (cmd.acao === 'nova_regra') {
+    const chave = await adicionarRegraNicho(cmd.nicho, cmd.regra, 'whatsapp-admin');
+    return `✅ Regra salva no nicho *${chave}*. Vale em até 5 minutos pra TODOS os clientes desse nicho:\n"${cmd.regra}"`;
+  }
+  if (cmd.acao === 'definir') {
+    const clientes = await listarClientesAtivos({ ignorarCache: true });
+    const alvo = cmd.cliente.toLowerCase();
+    const achados = [...new Map(clientes.filter((c) => c.nome.toLowerCase().includes(alvo)).map((c) => [c.sheetId, c])).values()];
+    if (achados.length === 0) throw new Error(`Nenhum cliente ativo com "${cmd.cliente}" no nome.`);
+    if (achados.length > 1) throw new Error(`Mais de uma planilha com "${cmd.cliente}" no nome: ${achados.map((c) => c.nome).join(', ')}. Use um nome mais específico.`);
+    const { chave, linhas } = await definirNichoPorSheetId(achados[0].sheetId, cmd.nicho);
+    return `✅ ${achados[0].nome} agora é do nicho *${chave}* (${linhas} número(s) atualizados).`;
+  }
+  return null;
+}
+
 function interpretarComandoVoucher(texto) {
   const match = (texto || '').trim().match(/^(?:criar|novo)\s+(?:cupom|voucher)\s+(\S+)\s*(.*)$/i);
   if (!match) return null;
@@ -2230,6 +2285,7 @@ async function registrarTransacoesDeExtrato(remetente, sheetId, transacoesBrutas
   // chegar. Precisa rodar ANTES do sincronizarConciliacaoNaPlanilha pra essas linhas novas
   // entrarem já na mesma passada de conciliação (senão ficariam órfãs de novo até o próximo extrato).
   const clienteExtrato = await buscarClientePorNumero(remetente).catch(() => null);
+  definirClienteAtual(clienteExtrato);
   const registrados = await registrarOrfaosDoExtrato(sheetId, lancamentosExistentes, extratoTotal, { nomeCliente: clienteExtrato && clienteExtrato.nome }).catch((erro) => {
     console.error('Falha ao registrar órfãos do extrato:', erro.message);
     return [];
@@ -2321,6 +2377,7 @@ async function salvarDocumentoPesadoEProcessarDepois(remetente, cliente, sheetId
 // escolha do cliente após uma leitura item a item falhar (ver PENDENCIAS_ESCOLHA_FATURA). Lança
 // (throw) em caso de erro — quem chama decide como avisar o cliente (ver tratarErroProcessamento).
 async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mimeType, nomeArquivo, legenda }) {
+  definirClienteAtual(cliente); // também chamado pelo buffer de espera de legenda (setTimeout)
   const legendaLower = (legenda || '').toLowerCase();
   let sinal = montarSinalRoteamento(legenda, nomeArquivo);
   const extenso = documentoPareceExtenso(buffer, mimeType) || imagemPareceExtensa(buffer, mimeType, sinal);
@@ -2541,6 +2598,7 @@ async function processarMidiaRecebida(remetente, cliente, sheetId, { buffer, mim
 // `contexto` = { tipoMidia, legenda, buffer, mimeType } — buffer/mimeType só quando disponíveis
 // (permite oferecer "total"/"itens" de novo sem pedir reenvio do arquivo).
 async function tratarErroProcessamento(remetente, cliente, contexto, error) {
+  definirClienteAtual(cliente);
   console.error('Erro ao processar mensagem:', error.message);
   avisarFaltaDeCredito(error);
 
@@ -2738,6 +2796,22 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       }
       return;
     }
+
+    // Comandos de NICHO (05/11/2026, ver nichos.js):
+    //   "nichos"                          -> lista os nichos e o nicho de cada cliente
+    //   "nicho Vanusa: salao"             -> define o nicho do cliente (por nome, vale pra todos os números da planilha)
+    //   "regra salao: <texto da regra>"   -> salva regra que passa a valer pra TODOS os clientes do nicho
+    //   "regras salao"                    -> mostra as regras salvas daquele nicho
+    const comandoNicho = interpretarComandoNicho(interpretado.texto);
+    if (comandoNicho) {
+      try {
+        await enviarMensagemWhatsApp(remetente, await executarComandoNicho(comandoNicho));
+      } catch (error) {
+        console.error('Erro no comando de nicho:', error.message);
+        await enviarMensagemWhatsApp(remetente, `❌ ${error.message}`).catch(() => {});
+      }
+      return;
+    }
   }
 
   let cliente;
@@ -2759,6 +2833,10 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
       await notificarAdminSobreLead(remetente);
       return;
     }
+
+    // 05/11/2026 — marca o cliente desta mensagem pra index.js aplicar o pacote do nicho dele em
+    // toda chamada à IA daqui pra frente (ver contexto-cliente.js / nichos.js).
+    definirClienteAtual(cliente);
 
     // Cliente tinha lançamento(s) em dúvida (duplicidade ambígua) esperando resposta — checa
     // ANTES de qualquer outro processamento, senão a resposta ("diferente", "duplicado") cairia
@@ -3056,11 +3134,17 @@ app.post(/^\/webhook(\/.*)?$/, async (req, res) => {
         const resumo = gerarResumo(lancamentos, extrato, { periodo });
         const upsell = periodo === 'mes' && !cliente.planoEspecialista ? formatarUpsellEspecialista(resumo) : '';
         await enviarMensagemWhatsApp(remetente, formatarResumo(resumo) + upsell);
-      } else if (/\bdre\b/.test(corpoLower) || corpoLower.includes('demonstra') || corpoLower.includes('resultado do exerc')) {
+      } else if (/\bdre\b/.test(corpoLower) || corpoLower.includes('demonstra') || corpoLower.includes('resultado do exerc')
+        || (ehPessoaFisica(cliente) && /para onde (foi|vai|t[aá] indo)/.test(corpoLower))) {
         const periodo = corpoLower.includes('semana') ? 'semana' : corpoLower.includes('hoje') || corpoLower.includes('dia') ? 'dia' : 'mes';
         const lancamentos = await buscarTodosLancamentos(sheetId);
-        const dre = gerarDRE(lancamentos, { periodo });
-        await enviarMensagemWhatsApp(remetente, formatarDRE(dre, cliente.nome));
+        // 05/11/2026 — pessoa física não recebe DRE contábil, recebe "para onde foi seu dinheiro".
+        if (ehPessoaFisica(cliente)) {
+          await enviarMensagemWhatsApp(remetente, formatarParaOndeFoiDinheiro(lancamentos, { periodo }, cliente.nome));
+        } else {
+          const dre = gerarDRE(lancamentos, { periodo });
+          await enviarMensagemWhatsApp(remetente, formatarDRE(dre, cliente.nome));
+        }
         atualizarAbaDreCliente(cliente).catch((erro) => console.error('Falha ao atualizar aba DRE sob demanda:', erro.message));
       } else if (!cliente.planoEspecialista && interpretarPedidoEspecialista(interpretado.texto)) {
         const assinatura = await buscarAssinaturaAtivaPorWhatsapp(remetente);
@@ -3368,6 +3452,7 @@ function competenciaPredominante(datas) {
 
 // Devolve { competencia, banco } do que foi lido — usado pra mover o arquivo pra pasta certa.
 async function processarDocumentoPesadoBuffer(cliente, buffer, tipoAlvo, mimeType = 'application/pdf') {
+  definirClienteAtual(cliente); // documento pesado roda em tarefa agendada, fora do webhook
   const ehPdf = mimeType === 'application/pdf';
   const blocos = ehPdf ? await dividirPdfEmBlocos(buffer) : [buffer];
   const mediaTypeBloco = ehPdf ? 'application/pdf' : mimeType;

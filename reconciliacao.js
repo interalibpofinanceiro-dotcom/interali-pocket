@@ -1034,6 +1034,54 @@ function formatarDRE(dre, nomeCliente) {
   return linhas.join('\n');
 }
 
+// Relatório de PESSOA FÍSICA (05/11/2026, pacotes por nicho — ver nichos.js): cliente com nicho
+// PESSOA_FISICA que pede "DRE"/"resultado" recebe isto no lugar da DRE contábil. Mesmos lançamentos,
+// linguagem de casa: quanto entrou, para onde foi (por categoria), quanto foi guardado e quanto sobrou.
+// Transferência entre contas, aporte do titular e repasse a terceiros não contam como gasto nem renda.
+function formatarParaOndeFoiDinheiro(lancamentos, opcoes = {}, nomeCliente = '') {
+  const referencia = opcoes.referencia || new Date();
+  const tipoPeriodo = ['dia', 'semana', 'mes'].includes(opcoes.periodo) ? opcoes.periodo : 'mes';
+  const { inicio, fim } = calcularPeriodo(tipoPeriodo, referencia);
+  const doPeriodo = filtrarPorPeriodo(lancamentos, 'data', inicio, fim);
+  const IGNORAR = new Set(['transferencia_entre_contas', 'aporte_titular', 'repasse_terceiros_entrada', 'repasse_terceiros_saida']);
+
+  let entrou = 0;
+  let guardado = 0;
+  const gastos = new Map();
+  for (const l of doPeriodo) {
+    if (IGNORAR.has(l.grupo_dre)) continue;
+    const valor = Number(l.valor) || 0;
+    if (l.tipo_movimentacao === 'entrada') { entrou += valor; continue; }
+    if (l.grupo_dre === 'investimento_imobilizado') { guardado += valor; continue; }
+    const categoria = (l.categoria && l.categoria !== 'Não Classificado') ? l.categoria : 'Outros (revisar)';
+    gastos.set(categoria, (gastos.get(categoria) || 0) + valor);
+  }
+  const totalGasto = [...gastos.values()].reduce((s, v) => s + v, 0);
+  if (!entrou && !totalGasto && !guardado) {
+    return 'Ainda não tenho lançamentos nesse período pra mostrar para onde foi seu dinheiro. Manda alguns comprovantes e tenta de novo. 💸';
+  }
+  const nomesPeriodo = { dia: 'hoje', semana: 'nesta semana', mes: 'neste mês' };
+  const linhas = [
+    `💸 *Para onde foi seu dinheiro ${nomesPeriodo[tipoPeriodo]}*${nomeCliente ? ` — ${nomeCliente}` : ''}`,
+    `(${inicio.toLocaleDateString('pt-BR')} a ${fim.toLocaleDateString('pt-BR')})`,
+    '',
+    `🟢 Entrou: ${formatarMoeda(entrou)}`,
+    `🔴 Gastou: ${formatarMoeda(totalGasto)}`,
+  ];
+  if (guardado) linhas.push(`🐷 Guardou/investiu: ${formatarMoeda(guardado)}`);
+  const sobrou = entrou - totalGasto - guardado;
+  linhas.push(`${sobrou >= 0 ? '💚 Sobrou' : '⚠️ Faltou'}: ${formatarMoeda(Math.abs(sobrou))}`, '');
+  const ordenados = [...gastos.entries()].sort((a, b) => b[1] - a[1]);
+  if (ordenados.length) {
+    linhas.push('🏷️ Seus gastos por categoria:');
+    for (const [categoria, valor] of ordenados) {
+      const pct = totalGasto ? ` (${((valor / totalGasto) * 100).toFixed(0)}%)` : '';
+      linhas.push(`• ${categoria}: ${formatarMoeda(valor)}${pct}`);
+    }
+  }
+  return linhas.join('\n');
+}
+
 // "Prova dos saldos" (09/09/2026, inspirada no projeto de Conciliação Bancária do curso "Seu
 // financeiro no Claude") — confirma que a LEITURA do extrato do mês está internamente consistente:
 // saldo inicial (saldo_apos da 1ª transação, subtraindo o próprio valor dela) + soma de entradas −
@@ -1320,6 +1368,7 @@ module.exports = {
   gerarResumo,
   gerarFechamento,
   formatarResumo,
+  formatarParaOndeFoiDinheiro,
   formatarDataBR,
   formatarUpsellEspecialista,
   obterSaldoAtual,

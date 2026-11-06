@@ -7,6 +7,8 @@ const {
   PROMPT_EXTRATO, PROMPT_CONTA_A_PAGAR, PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO,
   PROMPT_FATURA_RESUMO, PROMPT_EXTRATO_RESUMO, PROMPT_ESCLARECER_ORFAOS, PROMPT_CLASSIFICAR_TRANSACOES_DRE, PROMPT_CORRECAO_LANCAMENTO,
 } = require('./prompts');
+const { clienteAtual } = require('./contexto-cliente');
+const { pacoteDoNicho, carregarRegrasNicho, blocoCategorizacao, blocoLinguagem } = require('./nichos');
 
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
@@ -92,7 +94,31 @@ const MAX_TOKENS_EXTRACAO_PADRAO = 32000;
 // `thinking: disabled` sempre (senão o modelo pode gastar quase todo o max_tokens só "pensando"
 // antes de responder, e fica lento demais pra bot de WhatsApp — medido: 14855 de 16000 tokens em
 // thinking numa chamada real).
+// Prompts que decidem categoria/grupo_dre — só neles entra o pacote do nicho (05/11/2026, ver
+// nichos.js). Leitura de extrato, resumo de fatura, orçamento e cupom térmico não categorizam aqui.
+const PROMPTS_COM_CATEGORIZACAO = new Set([
+  PROMPT_EXTRACAO, PROMPT_EXTRACAO_TEXTO, PROMPT_DESPESA_FIXA, PROMPT_VENDAS, PROMPT_CONTA_A_PAGAR,
+  PROMPT_CONTA_A_RECEBER, PROMPT_CONTA_A_RECEBER_TEXTO, PROMPT_ESCLARECER_ORFAOS,
+  PROMPT_CLASSIFICAR_TRANSACOES_DRE, PROMPT_CORRECAO_LANCAMENTO,
+]);
+
+// Texto extra com o pacote do nicho do cliente da mensagem atual (ver contexto-cliente.js).
+// Cliente sem nicho, ou chamada fora de um cliente -> '' (comportamento de antes, sem mudança).
+async function complementoNicho(system, { linguagem = false } = {}) {
+  const cliente = clienteAtual();
+  const pacote = cliente && pacoteDoNicho(cliente.nicho);
+  if (!pacote) return '';
+  const partes = [];
+  if (PROMPTS_COM_CATEGORIZACAO.has(system) || linguagem) {
+    const regras = await carregarRegrasNicho().catch(() => new Map());
+    partes.push(blocoCategorizacao(pacote, regras.get(pacote.chave) || []));
+  }
+  if (linguagem) partes.push(blocoLinguagem(pacote));
+  return partes.length ? `\n\n${partes.join('\n\n')}` : '';
+}
+
 async function chamarExtracaoVisao(system, buffer, mediaType, instrucao, maxTokens = MAX_TOKENS_EXTRACAO_PADRAO) {
+  instrucao = `${instrucao || ''}${await complementoNicho(system)}`;
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: maxTokens,
@@ -114,6 +140,7 @@ async function chamarExtracaoVisao(system, buffer, mediaType, instrucao, maxToke
 // Mesma ideia acima, pro lado dos prompts SEM imagem (lançamento por texto, pergunta livre etc.) —
 // um único ponto, thinking desabilitado por padrão, pra não repetir a chamada crua em cada função.
 async function chamarExtracaoTexto(system, mensagemUsuario, maxTokens = 1024) {
+  mensagemUsuario = `${mensagemUsuario}${await complementoNicho(system)}`;
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
     max_tokens: maxTokens,
@@ -284,6 +311,7 @@ async function extrairContaAReceberDeTexto(texto) {
 // isso não passa por chamarExtracaoTexto (que serve pra quem chama extrairJSON em cima).
 async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
   const hoje = new Date().toISOString().slice(0, 10);
+  const nicho = await complementoNicho(PROMPT_CONSULTA, { linguagem: true });
 
   const response = await anthropic.messages.create({
     model: CLAUDE_MODEL,
@@ -293,7 +321,7 @@ async function consultarFluxoDeCaixa(pergunta, dadosPlanilha) {
     messages: [
       {
         role: 'user',
-        content: `Data de hoje: ${hoje}\n\nDados financeiros do cliente:\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}`,
+        content: `Data de hoje: ${hoje}\n\nDados financeiros do cliente:\n${JSON.stringify(dadosPlanilha, null, 2)}\n\nPergunta do cliente: ${pergunta}${nicho}`,
       },
     ],
   });
@@ -332,7 +360,6 @@ async function classificarTransacoesParaDRE(transacoes, { nomeCliente, nicho, ex
     const lista = lote.map((t, i) => `${i}. ${t.data} | ${t.tipo === 'entrada' ? 'ENTRADA' : 'SAÍDA'} | R$ ${Number(t.valor || 0).toFixed(2)} | "${(t.descricao || '').slice(0, 120)}"`).join('\n');
     const contexto = [
       nomeCliente && `Cliente: ${nomeCliente}`,
-      nicho && `Nicho: ${nicho}`,
       // Como o especialista de BPO já classificou este cliente (memoria-cliente.js) — tem prioridade
       // sobre a regra genérica quando a transação é do mesmo tipo.
       exemplos && exemplos.length ? `COMO O ESPECIALISTA JÁ CLASSIFICOU ESTE CLIENTE (siga este padrão):\n${exemplos.join('\n')}` : null,
